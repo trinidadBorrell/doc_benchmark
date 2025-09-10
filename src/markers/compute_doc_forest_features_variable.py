@@ -312,7 +312,7 @@ def create_montage_layout(n_channels):
 
 
 def compute_features(markers_file, output_scalars=None, output_topos=None, 
-                    n_channels=None, plot=False):
+                    n_channels=None, plot=True):
     """Compute features from markers with variable electrode support.
     
     Parameters

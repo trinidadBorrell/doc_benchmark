@@ -81,8 +81,15 @@ class MarkerNameMapper:
             'SymbolicMutualInformation_weighted',
             'KolmogorovComplexity_default',
             'ContingentNegativeVariation_default',
+            'TimeLockedTopography_p1',
+            'TimeLockedTopography_p3a',
+            'TimeLockedTopography_p3b',
+            'TimeLockedContrast_LSGS-LDGD',
+            'TimeLockedContrast_LSGD-LDGS',
+            'TimeLockedContrast_LD-LS',
             'TimeLockedContrast_mmn',
             'TimeLockedContrast_p3a',
+            'TimeLockedContrast_GD-GS',
             'TimeLockedContrast_p3b'
         ]
         
