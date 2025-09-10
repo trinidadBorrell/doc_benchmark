@@ -1482,11 +1482,11 @@ class GlobalAnalyzer:
             'PermutationEntropy_default', 'SymbolicMutualInformation_weighted', 'KolmogorovComplexity_default'
         ]
         
-        time_locked_markers = [
+        time_locked_topography_markers = [
             'ContingentNegativeVariation_default', 'TimeLockedTopography_p1', 'TimeLockedTopography_p3a', 'TimeLockedTopography_p3b', 'TimeLockedContrast_LSGS-LDGD', 'TimeLockedContrast_LSGD-LDGS', 'TimeLockedContrast_LD-LS', 'TimeLockedContrast_GD-GS'
         ]
 
-        time_locked_topography_markers = [
+        time_locked_contrast_markers = [
             'TimeLockedContrast_LSGS-LDGD', 'TimeLockedContrast_LSGD-LDGS', 'TimeLockedContrast_LD-LS', 'TimeLockedContrast_GD-GS', 'TimeLockedContrast_mmn', 'TimeLockedContrast_p3a', 'TimeLockedContrast_p3b'
         ]
         
@@ -1499,7 +1499,7 @@ class GlobalAnalyzer:
             ('PSD Normalized', psd_normalized),
             ('PSD Summary', psd_summary),
             ('Entropy Markers', entropy_markers),
-            ('Time-Locked Markers', time_locked_markers),
+            ('Time-Locked Contrast Markers', time_locked_contrast_markers),
             ('Time-Locked Topography Markers', time_locked_topography_markers)
         ]
         
