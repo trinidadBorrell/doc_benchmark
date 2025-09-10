@@ -8,6 +8,16 @@ This is an enhanced version of compute_doc_forest_markers.py that can handle
 variable numbers of electrodes and automatically adapts the electrode
 selections based on the available channels.
 
+Features:
+- Automatic adaptation to different electrode configurations (32, 64, 128, 256 channels)
+- Event ID mapping for .fif files to convert numerical IDs to condition names
+- Support for custom electrode ROI definitions
+- Command line interface with configurable options
+
+The event ID mapping converts numerical event codes to meaningful condition names
+that are required for TimeLockedContrast markers. This mapping can be customized
+or disabled if your data already has proper condition names.
+
 References
 ----------
 [1] Engemann D.A.`*, Raimondo F.`*, King JR., Rohaut B., Louppe G.,
@@ -37,6 +47,89 @@ from nice.markers import (PowerSpectralDensity,
                           ContingentNegativeVariation,
                           TimeLockedTopography,
                           TimeLockedContrast)
+
+
+def get_event_id_mapping():
+    """Get event ID mapping for .fif files.
+    
+    Map numerical event IDs to condition names as expected by TimeLockedContrast
+    markers. Adjust this mapping based on your experimental design.
+    
+    Returns
+    -------
+    dict
+        Dictionary mapping numerical event IDs to condition names
+    """
+    
+    event_id_mapping = {
+        # Based on nice/algorithms/information_theory/tests/test_komplexity.py mapping
+        # Main experimental conditions (Local/Standard, Global/Standard, etc.)
+        10: 'HSTD',   # Control
+        20: 'HDVT',   # Control 
+        30: 'LSGS',    # Local Standard Global Standard (highest count)
+        40: 'LSGD',    # Local Standard Global Deviant
+        50: 'LDGS',    # Local Deviant Global Standard
+        60: 'LDGD'     # Local Deviant Global Deviant
+    }
+    
+    return event_id_mapping
+
+
+def apply_event_id_mapping(epochs, event_id_mapping=None, verbose=True):
+    """Apply event ID mapping to epochs.
+    
+    Parameters
+    ----------
+    epochs : mne.Epochs
+        The epochs object to remap
+    event_id_mapping : dict | None
+        Dictionary mapping old event IDs to new condition names.
+        If None, uses the default mapping from get_event_id_mapping()
+    verbose : bool
+        Whether to print mapping information
+        
+    Returns
+    -------
+    mne.Epochs
+        The epochs object with remapped event_id
+    """
+    
+    if event_id_mapping is None:
+        event_id_mapping = get_event_id_mapping()
+    
+    if verbose:
+        print("Event ID mapping being used:")
+        for old_id, new_name in event_id_mapping.items():
+            print(f"  {old_id} -> {new_name}")
+        
+        print(f"\nOriginal event_id: {epochs.event_id}")
+    
+    # Create new event_id mapping with condition names
+    new_event_id = {}
+    for old_name, old_id in epochs.event_id.items():
+        try:
+            old_id_int = int(old_name)  # Convert string to int
+            if old_id_int in event_id_mapping:
+                new_name = event_id_mapping[old_id_int]
+                new_event_id[new_name] = old_id
+            else:
+                # Keep unmapped events as is
+                new_event_id[old_name] = old_id
+        except ValueError:
+            # If old_name is already a string condition name, keep it
+            new_event_id[old_name] = old_id
+    
+    epochs.event_id = new_event_id
+    
+    if verbose:
+        print(f"Remapped event_id: {epochs.event_id}")
+        
+        print("\nEvent counts after mapping:")
+        for event_name, event_id in epochs.event_id.items():
+            count = sum(epochs.events[:, 2] == event_id)
+            print(f"  {event_name} (ID {event_id}): {count} events")
+    
+    return epochs
 
 
 def get_electrode_mapping(n_channels):
@@ -119,7 +212,7 @@ def get_electrode_mapping(n_channels):
     }
 
 
-def compute_markers(epochs, output_file=None):
+def compute_markers(epochs, output_file=None, apply_event_mapping=True, event_id_mapping=None):
     """Compute markers for given epochs.
     
     Parameters
@@ -128,12 +221,21 @@ def compute_markers(epochs, output_file=None):
         The epochs to compute markers for
     output_file : str | None
         Path to save the markers. If None, uses default naming.
+    apply_event_mapping : bool
+        Whether to apply event ID mapping to convert numerical IDs to condition names
+    event_id_mapping : dict | None
+        Custom event ID mapping. If None and apply_event_mapping is True, 
+        uses the default mapping from get_event_id_mapping()
         
     Returns
     -------
     Markers
         The computed markers
     """
+    
+    # Apply event ID mapping if requested
+    if apply_event_mapping:
+        epochs = apply_event_id_mapping(epochs, event_id_mapping=event_id_mapping)
     
     n_channels = len(epochs.ch_names)
     electrode_mapping = get_electrode_mapping(n_channels)
@@ -238,6 +340,8 @@ def main():
     parser.add_argument('input_file', help='Input epochs file (.fif)')
     parser.add_argument('--output', '-o', help='Output markers file (.hdf5)')
     parser.add_argument('--plot', action='store_true', help='Generate plots')
+    parser.add_argument('--no-event-mapping', action='store_true', 
+                        help='Skip automatic event ID mapping (keep original event IDs)')
     
     args = parser.parse_args()
     
@@ -252,8 +356,9 @@ def main():
         base_name = op.splitext(args.input_file)[0]
         output_file = base_name + '_markers.hdf5'
     
-    # Compute markers
-    mc = compute_markers(epochs, output_file)
+    # Compute markers with or without event mapping
+    apply_mapping = not args.no_event_mapping
+    mc = compute_markers(epochs, output_file, apply_event_mapping=apply_mapping)
     
     # Optional plotting
     if args.plot:

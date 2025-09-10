@@ -95,8 +95,15 @@ class MarkerNameMapper:
             'SymbolicMutualInformation_weighted',
             'KolmogorovComplexity_default',
             'ContingentNegativeVariation_default',
+            'TimeLockedTopography_p1',
+            'TimeLockedTopography_p3a',
+            'TimeLockedTopography_p3b',
+            'TimeLockedContrast_LSGS-LDGD',
+            'TimeLockedContrast_LSGD-LDGS',
+            'TimeLockedContrast_LD-LS',
             'TimeLockedContrast_mmn',
             'TimeLockedContrast_p3a',
+            'TimeLockedContrast_GD-GS',
             'TimeLockedContrast_p3b'
         ]
         
@@ -631,12 +638,35 @@ class GlobalAnalyzer:
             self.global_topo_data['cosine_similarities'].append(topo_metrics['cosine_similarity'])
             
             # Reconstruct topographic arrays from per-marker data
+            # IMPORTANT: Use MarkerNameMapper order, NOT sorted order to maintain consistency
             per_marker_topo = data['summary']['topographic_metrics']['per_marker']
             topo_orig_list = []
             topo_recon_list = []
-            for marker_name in sorted(per_marker_topo.keys()):
-                topo_orig_list.append(per_marker_topo[marker_name]['topo_original'])
-                topo_recon_list.append(per_marker_topo[marker_name]['topo_reconstructed'])
+            
+            # Use the same order as MarkerNameMapper to ensure consistency
+            for i in range(len(per_marker_topo)):
+                expected_marker_name = self.mapper.get_topo_name(i)
+                if expected_marker_name in per_marker_topo:
+                    topo_orig_list.append(per_marker_topo[expected_marker_name]['topo_original'])
+                    topo_recon_list.append(per_marker_topo[expected_marker_name]['topo_reconstructed'])
+                else:
+                    # Fallback: find by index if name doesn't match
+                    print(f"     ⚠️  Warning: Expected marker '{expected_marker_name}' at index {i} not found")
+                    # Try to find the marker by index in the sorted keys
+                    sorted_keys = sorted(per_marker_topo.keys())
+                    if i < len(sorted_keys):
+                        actual_marker_name = sorted_keys[i]
+                        print(f"     🔄 Using '{actual_marker_name}' instead")
+                        topo_orig_list.append(per_marker_topo[actual_marker_name]['topo_original'])
+                        topo_recon_list.append(per_marker_topo[actual_marker_name]['topo_reconstructed'])
+                    else:
+                        raise ValueError(f"Cannot find marker for index {i}")
+            
+            # Verify we got all markers
+            if len(topo_orig_list) != len(per_marker_topo):
+                print(f"     ⚠️  Warning: Expected {len(per_marker_topo)} markers, got {len(topo_orig_list)}")
+                print(f"     Expected markers: {[self.mapper.get_topo_name(i) for i in range(len(per_marker_topo))]}")
+                print(f"     Available markers: {sorted(per_marker_topo.keys())}")
             
             self.global_topo_data['topos_orig_all'].append(np.array(topo_orig_list))
             self.global_topo_data['topos_recon_all'].append(np.array(topo_recon_list))
@@ -1375,19 +1405,19 @@ class GlobalAnalyzer:
                 # Use biosemi64 montage which is specifically designed for 64 electrodes
                 montage = mne.channels.make_standard_montage('biosemi64')
                 # Create info with the exact channel names from the montage
-                info = mne.create_info(montage.ch_names, 1000, 'eeg')
+                info = mne.create_info(montage.ch_names, 100, 'eeg')
                 info.set_montage(montage)
                 print(f"  ✅ Created biosemi64 montage for {n_channels} channels")
                 
             elif n_channels == 32:
                 montage = mne.channels.make_standard_montage('biosemi32')
-                info = mne.create_info(montage.ch_names, 1000, 'eeg')
+                info = mne.create_info(montage.ch_names, 100, 'eeg')
                 info.set_montage(montage)
                 print(f"  ✅ Created biosemi32 montage for {n_channels} channels")
                 
             elif n_channels == 128:
                 montage = mne.channels.make_standard_montage('biosemi128')
-                info = mne.create_info(montage.ch_names, 1000, 'eeg')
+                info = mne.create_info(montage.ch_names, 100, 'eeg')
                 info.set_montage(montage)
                 print(f"  ✅ Created biosemi128 montage for {n_channels} channels")
                 
@@ -1404,7 +1434,7 @@ class GlobalAnalyzer:
                 eeg_dig = montage.dig[3:3+n_channels]  # EEG channels
                 montage.dig = fiducials + eeg_dig
                 
-                info = mne.create_info(available_channels, 1000, 'eeg')
+                info = mne.create_info(available_channels, 100, 'eeg')
                 info.set_montage(montage)
                 print(f"  ✅ Created standard_1020 montage for {n_channels} channels")
                 
@@ -1417,7 +1447,7 @@ class GlobalAnalyzer:
             
             # Create channel names matching typical EEG conventions
             ch_names = [f'EEG{i+1:03d}' for i in range(n_channels)]
-            info = mne.create_info(ch_names, 1000, 'eeg')
+            info = mne.create_info(ch_names, 100, 'eeg')
             
             # Create a spherical layout for the electrodes
             # Use MNE's built-in sphere layout which ensures electrodes stay within head boundary
@@ -1453,7 +1483,11 @@ class GlobalAnalyzer:
         ]
         
         time_locked_markers = [
-            'ContingentNegativeVariation_default', 'TimeLockedContrast_mmn', 'TimeLockedContrast_p3a', 'TimeLockedContrast_p3b'
+            'ContingentNegativeVariation_default', 'TimeLockedTopography_p1', 'TimeLockedTopography_p3a', 'TimeLockedTopography_p3b', 'TimeLockedContrast_LSGS-LDGD', 'TimeLockedContrast_LSGD-LDGS', 'TimeLockedContrast_LD-LS', 'TimeLockedContrast_GD-GS'
+        ]
+
+        time_locked_topography_markers = [
+            'TimeLockedContrast_LSGS-LDGD', 'TimeLockedContrast_LSGD-LDGS', 'TimeLockedContrast_LD-LS', 'TimeLockedContrast_GD-GS', 'TimeLockedContrast_mmn', 'TimeLockedContrast_p3a', 'TimeLockedContrast_p3b'
         ]
         
         # Create mapping from marker name to index
@@ -1465,7 +1499,8 @@ class GlobalAnalyzer:
             ('PSD Normalized', psd_normalized),
             ('PSD Summary', psd_summary),
             ('Entropy Markers', entropy_markers),
-            ('Time-Locked Markers', time_locked_markers)
+            ('Time-Locked Markers', time_locked_markers),
+            ('Time-Locked Topography Markers', time_locked_topography_markers)
         ]
         
         plot_count = 0
@@ -1485,7 +1520,7 @@ class GlobalAnalyzer:
             if len(marker_indices) == 0:
                 print(f"  ⚠️  No markers found for {plot_title}, skipping plot")
                 continue
-                
+        
             n_rows = len(marker_indices)
             
             fig, axes = plt.subplots(n_rows, 4, figsize=(20, max(4, n_rows * 3)))  # 4 columns: orig, recon, difference, nmse
