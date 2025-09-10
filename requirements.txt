@@ -1,0 +1,116 @@
+# Install with: pip install -r requirements.txt
+# 
+# Python version where this was ran --> 3.9.6
+#
+# IMPORTANT: Install in two steps due to nice package dependency on numpy:
+# (1) pip install -r requirements.txt
+# (2) pip install -e git+https://github.com/nice-tools/nice@e54fe9eda1318e3612b9a9e87a8e5d85c4b9f589#egg=nice
+
+# Core scientific computing (install first)
+numpy==2.0.1
+scipy==1.13.1
+pandas==2.3.1
+
+# Machine learning
+scikit-learn==1.6.1
+joblib==1.5.1
+
+# EEG analysis and signal processing  
+mne==1.2.3
+# Note: nice package requires numpy to be pre-installed
+# Install separately: pip install -e git+https://github.com/nice-tools/nice@e54fe9eda1318e3612b9a9e87a8e5d85c4b9f589#egg=nice
+
+# File I/O and data formats
+h5py==3.14.0
+h5io==0.2.5
+
+# Plotting and visualization
+matplotlib==3.8.4
+seaborn==0.13.2
+contourpy==1.3.0
+cycler==0.12.1
+fonttools==4.59.0
+kiwisolver==1.4.7
+pillow==11.3.0
+pyparsing==3.2.3
+
+# Deep learning (for torch-based computations)
+torch==2.2.2
+
+# Progress bars and utilities
+tqdm==4.67.1
+pooch==1.8.2
+
+# System and process management
+psutil==7.0.0
+
+# Web requests
+requests==2.32.4
+urllib3==2.5.0
+certifi==2025.7.14
+charset-normalizer==3.4.2
+idna==3.10
+
+# Jupyter notebook support (optional but useful for development)
+ipython==8.18.1
+ipykernel==6.30.0
+jupyter_client==8.6.3
+jupyter_core==5.8.1
+notebook
+jupyter
+
+# Additional dependencies
+packaging==24.2
+python-dateutil==2.9.0.post0
+pytz==2025.2
+six==1.17.0
+decorator==5.2.1
+lazy_loader==0.4
+networkx==3.2.1
+sympy==1.14.0
+mpmath==1.3.0
+
+# Performance and optimization
+numexpr==2.10.1
+threadpoolctl==3.6.0
+
+# Development and debugging (optional)
+debugpy==1.8.15
+pexpect==4.9.0
+ptyprocess==0.7.0
+
+# Template and markup
+Jinja2==3.1.6
+MarkupSafe==3.0.2
+
+# Misc utilities
+panda==0.3.1
+filelock==3.18.0
+fsspec==2025.7.0
+importlib_metadata
+importlib_resources
+typing_extensions==4.12.2
+tzdata==2025.2
+
+# Platform-specific (macOS)
+appnope==0.1.4
+
+# Jupyter/IPython additional
+asttokens==3.0.0
+comm==0.2.3
+executing==2.2.0
+jedi==0.19.2
+matplotlib-inline==0.1.7
+nest-asyncio==1.6.0
+parso==0.8.4
+platformdirs==4.3.8
+prompt_toolkit==3.0.51
+pure_eval==0.2.3
+py-cpuinfo==9.0.0
+Pygments==2.19.2
+pyzmq==27.0.0
+stack-data==0.6.3
+tornado==6.5.1
+traitlets==5.14.3
+wcwidth==0.2.13
+exceptiongroup==1.3.0

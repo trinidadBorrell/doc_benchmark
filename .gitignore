@@ -1,0 +1,10 @@
+notebooks/
+results/
+cookbooks/old_scripts/
+src/train_extratrees.py
+.ruff_cache/
+.vscode/
+.DS_Store
+*__pycache__*
+.venv/
+requirements_old.txt
