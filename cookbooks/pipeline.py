@@ -17,6 +17,7 @@ Usage:
     python pipeline.py --all --markers-only --metadata-dir /path/to/metadata --data-dir /path/to/fifdata               # Only compute markers
     python pipeline.py --analysis-only --metadata-dir /path/to/metadata --data-dir /path/to/fifdata                    # Only run analysis on existing results
 
+     python pipeline.py --subject AD023 --metadata-dir /Users/trinidad.borrell/Documents/Work/PhD/Proyects/nice/doc_a_data/metadata --data-dir /Users/trinidad.borrell/Documents/Work/PhD/data/TOTEM/zero_shot_data/fifdata/fifdata
 Authors: Trinidad Borrell <trinidad.borrell@gmail.com>
 """
 
