@@ -47,6 +47,72 @@ def entropy(a, axis=0):  # noqa
     return -np.nansum(a * np.log(a), axis=axis) / np.log(a.shape[axis])
 
 
+def create_256_to_64_roi_mapping():
+    """Create mapping from 256-channel ROIs to 64-channel ROIs using the JSON mapping.
+    
+    Returns
+    -------
+    dict
+        Mapping functions for each ROI type
+    """
+    import json
+    import os.path as op
+    
+    # Load the mapping file
+    mapping_file = op.join(op.dirname(__file__), '..', '..', 'data', 'egi256_biosemi64.json')
+    
+    with open(mapping_file, 'r') as f:
+        mapping_data = json.load(f)
+    
+    # Get the recombination groups (biosemi64 -> 256 electrodes)
+    recombination_groups = mapping_data['recombination_groups']
+    
+    # Create reverse mapping: 256 electrode number -> 64 channel index
+    electrode_256_to_ch_64 = {}
+    
+    # Define the actual channel order from the fif file (1-based indexing)
+    ch_64_names_ordered = [
+        'Fp1', 'AF7', 'AF3', 'F1', 'F3', 'F5', 'F7', 'FT7', 'FC5', 'FC3', 'FC1', 'C1', 'C3', 'C5', 'T7', 'TP7',
+        'CP5', 'CP3', 'CP1', 'P1', 'P3', 'P5', 'P7', 'P9', 'PO7', 'PO3', 'O1', 'Iz', 'Oz', 'POz', 'Pz', 'CPz',
+        'Fpz', 'Fp2', 'AF8', 'AF4', 'AFz', 'Fz', 'F2', 'F4', 'F6', 'F8', 'FT8', 'FC6', 'FC4', 'FC2', 'FCz', 'Cz',
+        'C2', 'C4', 'C6', 'T8', 'TP8', 'CP6', 'CP4', 'CP2', 'P2', 'P4', 'P6', 'P8', 'P10', 'PO8', 'PO4', 'O2'
+    ]
+    
+    # Convert electrode names to indices and create mapping
+    for ch_64_name, electrode_256_list in recombination_groups.items():
+        # Get the 64-channel index (0-63) from the channel names using actual fif order
+        if ch_64_name in ch_64_names_ordered:
+            ch_64_idx = ch_64_names_ordered.index(ch_64_name)  # 0-based indexing (0-63)
+            
+            # Convert electrode names like "E33" to electrode numbers (E33 -> 33, keep 1-based)
+            for electrode_name in electrode_256_list:
+                electrode_num = int(electrode_name[1:])  # E33 -> 33 (1-based EGI number)
+                electrode_256_to_ch_64[electrode_num] = ch_64_idx
+    
+    def map_256_roi_to_64(roi_256):
+        """Map a 256-channel ROI to corresponding 64-channel indices.
+        
+        Parameters
+        ----------
+        roi_256 : array
+            Array of EGI electrode numbers (1-based, e.g., [5, 6, 13, 14, 15, 21, 22])
+            
+        Returns
+        -------
+        array
+            Array of 64-channel indices (0-based, 0-63)
+        """
+        mapped_channels = set()
+        
+        for electrode_num in roi_256:
+            if electrode_num in electrode_256_to_ch_64:
+                mapped_channels.add(electrode_256_to_ch_64[electrode_num])
+        
+        return np.array(sorted(mapped_channels))
+    
+    return map_256_roi_to_64
+
+
 def get_electrode_mapping(n_channels):
     """Get electrode mappings based on the number of channels.
     
@@ -70,46 +136,24 @@ def get_electrode_mapping(n_channels):
         p3b_roi = np.array([8, 44, 80, 99, 100, 109, 118, 127, 128, 131, 185])
         p3a_roi = np.array([5, 6, 8, 13, 14, 15, 21, 22, 44, 80, 131, 185])
         
-    elif n_channels == 128:  # EGI 128-channel system
-        scalp_roi = np.arange(120)
-        non_scalp = np.arange(120, 128)
-        # Scale down the ROIs proportionally
-        cnv_roi = np.array([2, 3, 6, 7, 8, 10, 11])
-        mmn_roi = np.array([2, 3, 4, 6, 7, 8, 10, 11, 22, 40, 65, 92])
-        p3b_roi = np.array([4, 22, 40, 49, 50, 54, 59, 63, 64, 65, 92])
-        p3a_roi = np.array([2, 3, 4, 6, 7, 8, 10, 11, 22, 40, 65, 92])
-        
-    elif n_channels == 64:  # Standard 64-channel system
-        scalp_roi = np.arange(64)
+    elif n_channels == 64:  # Standard 64-channel system (biosemi64)
+        scalp_roi = np.arange(64)  # 0-based indexing (0-63)
         non_scalp = np.array([])  # No non-scalp channels
-        # Central and frontal electrodes for CNV
-        cnv_roi = np.array([1, 2, 3, 5, 6])
-        # Frontocentral electrodes for MMN
-        mmn_roi = np.array([1, 2, 3, 5, 6, 11, 20, 32, 46])
-        # Parietal electrodes for P3b
-        p3b_roi = np.array([2, 11, 20, 24, 25, 27, 29, 31, 32, 46])
-        # Frontocentral electrodes for P3a
-        p3a_roi = np.array([1, 2, 3, 5, 6, 11, 20, 32, 46])
         
-    elif n_channels == 32:  # Standard 32-channel system
-        scalp_roi = np.arange(32)
-        non_scalp = np.array([])
-        # Simplified ROIs for 32 channels
-        cnv_roi = np.array([0, 1, 2, 3])
-        mmn_roi = np.array([0, 1, 2, 3, 5, 10, 16])
-        p3b_roi = np.array([1, 5, 10, 12, 13, 15, 16])
-        p3a_roi = np.array([0, 1, 2, 3, 5, 10, 16])
+        # Use mapping from 256-channel ROIs to 64-channel ROIs
+        map_roi = create_256_to_64_roi_mapping()
         
-    else:
-        # Default: use all channels as scalp ROI and create basic ROIs
-        scalp_roi = np.arange(n_channels)
-        non_scalp = np.array([])
-        # Use first few channels for all ROIs as fallback
-        n_roi = min(7, n_channels)
-        cnv_roi = np.arange(n_roi)
-        mmn_roi = np.arange(min(12, n_channels))
-        p3b_roi = np.arange(min(11, n_channels))
-        p3a_roi = np.arange(min(12, n_channels))
+        # Original 256-channel ROIs
+        cnv_roi_256 = np.array([5, 6, 13, 14, 15, 21, 22])
+        mmn_roi_256 = np.array([5, 6, 8, 13, 14, 15, 21, 22, 44, 80, 131, 185])
+        p3b_roi_256 = np.array([8, 44, 80, 99, 100, 109, 118, 127, 128, 131, 185])
+        p3a_roi_256 = np.array([5, 6, 8, 13, 14, 15, 21, 22, 44, 80, 131, 185])
+        
+        # Map to 64-channel indices
+        cnv_roi = map_roi(cnv_roi_256)
+        mmn_roi = map_roi(mmn_roi_256)
+        p3b_roi = map_roi(p3b_roi_256)
+        p3a_roi = map_roi(p3a_roi_256)
     
     # Filter out channels that don't exist
     cnv_roi = cnv_roi[cnv_roi < n_channels]
@@ -266,6 +310,48 @@ def get_reduction_params(electrode_mapping):
             'epochs': None,
             'channels': p3b_roi if len(p3b_roi) > 0 else scalp_roi,
             'times': None}}
+
+    # Add reduction parameters for other TimeLockedContrast markers
+    # I NEED TO CONFIRM THIS IS CORRECT
+    reduction_params['TimeLockedContrast/LSGS-LDGD'] = {
+        'reduction_func':
+            [{'axis': 'epochs', 'function': epochs_fun},
+             {'axis': 'channels', 'function': channels_fun},
+             {'axis': 'times', 'function': np.mean}],
+        'picks': {
+            'epochs': None,
+            'channels': scalp_roi,
+            'times': None}}
+
+    reduction_params['TimeLockedContrast/LSGD-LDGS'] = {
+        'reduction_func':
+            [{'axis': 'epochs', 'function': epochs_fun},
+             {'axis': 'channels', 'function': channels_fun},
+             {'axis': 'times', 'function': np.mean}],
+        'picks': {
+            'epochs': None,
+            'channels': scalp_roi,
+            'times': None}}
+
+    reduction_params['TimeLockedContrast/LD-LS'] = {
+        'reduction_func':
+            [{'axis': 'epochs', 'function': epochs_fun},
+             {'axis': 'channels', 'function': channels_fun},
+             {'axis': 'times', 'function': np.mean}],
+        'picks': {
+            'epochs': None,
+            'channels': scalp_roi,
+            'times': None}}
+
+    reduction_params['TimeLockedContrast/GD-GS'] = {
+        'reduction_func':
+            [{'axis': 'epochs', 'function': epochs_fun},
+             {'axis': 'channels', 'function': channels_fun},
+             {'axis': 'times', 'function': np.mean}],
+        'picks': {
+            'epochs': None,
+            'channels': scalp_roi,
+            'times': None}}
     
     return reduction_params
 
@@ -373,11 +459,17 @@ def compute_features(markers_file, output_scalars=None, output_topos=None,
         # Extract the class from the marker key
         # "nice/marker/PowerSpectralDensity/delta" -> "PowerSpectralDensity"
         # "nice/marker/PowerSpectralDensity/summary_se" -> "PowerSpectralDensity/summary_se"
+        # "nice/marker/TimeLockedContrast/mmn" -> "TimeLockedContrast/mmn"
         parts = marker_key.split('/')
         if len(parts) >= 3:
-            marker_class = parts[2]  # PowerSpectralDensity
-            if len(parts) >= 4 and parts[3] == 'summary_se':
-                marker_class += '/summary_se'  # PowerSpectralDensity/summary_se
+            marker_class = parts[2]  # PowerSpectralDensity, TimeLockedContrast, etc.
+            if len(parts) >= 4:
+                # Handle special cases and comments
+                comment = parts[3]
+                if marker_class == 'PowerSpectralDensity' and comment == 'summary_se':
+                    marker_class += '/summary_se'  # PowerSpectralDensity/summary_se
+                elif marker_class == 'TimeLockedContrast':
+                    marker_class += '/' + comment  # TimeLockedContrast/mmn, TimeLockedContrast/p3a, etc.
             available_marker_classes.add(marker_class)
     
     print(f"Available marker classes: {sorted(available_marker_classes)}")
