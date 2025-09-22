@@ -731,7 +731,7 @@ class GlobalAnalyzer:
         plt.savefig(op.join(self.plots_dir, 'scalar_global_correlation_mse.png'), dpi=300, bbox_inches='tight')
         plt.close()
         
-        # 2. Heatmaps: subjects × markers
+        # 2. Heatmaps: subjects × markers - modified version
         marker_names = list(self.global_scalar_data['marker_data'].keys())
         n_markers = len(marker_names)
         n_subjects = len(subjects)
@@ -739,8 +739,8 @@ class GlobalAnalyzer:
         print(f"     🔥 Creating scalar heatmaps ({n_subjects} subjects × {n_markers} markers)")
         
         # Prepare heatmap data
-        correlation_matrix = np.zeros((n_subjects, n_markers))
-        norm_sq_error_matrix = np.zeros((n_subjects, n_markers))
+        absolute_diff_matrix = np.zeros((n_subjects, n_markers))
+        normalized_diff_matrix = np.zeros((n_subjects, n_markers))
         
         for i, subject_id in enumerate(subjects):
             for j, marker_name in enumerate(marker_names):
@@ -749,19 +749,20 @@ class GlobalAnalyzer:
                     orig_val = self.global_scalar_data['marker_data'][marker_name]['orig_vals'][idx]
                     recon_val = self.global_scalar_data['marker_data'][marker_name]['recon_vals'][idx]
                     
-                    # Correlation per marker (just the relative error as proxy)
-                    correlation_matrix[i, j] = 1 - abs((orig_val - recon_val) / (abs(orig_val) + 1e-8))
-                    norm_sq_error_matrix[i, j] = self.global_scalar_data['marker_data'][marker_name]['norm_sq_errors'][idx]
+                    # Absolute difference between original and reconstructed values
+                    absolute_diff_matrix[i, j] = abs(orig_val - recon_val)
+                    
+                    # Normalized difference: |orig - recon| / mean(|orig|, |recon|)
+                    mean_val = (abs(orig_val) + abs(recon_val)) / 2
+                    normalized_diff_matrix[i, j] = abs(orig_val - recon_val) / (mean_val + 1e-8)
         
-        # Create regular heatmaps (original approach)
+        # Create heatmaps
         fig, axes = plt.subplots(2, 1, figsize=(20, 12))
-        fig.suptitle('Scalar Features: Subject × Marker Analysis (Original)', fontsize=16)
+        fig.suptitle('Scalar Features: Subject × Marker Analysis', fontsize=16)
         
-        # Correlation heatmap - center at 0 with symmetric range
-        corr_vmax = np.max(np.abs(correlation_matrix))
-        im1 = axes[0].imshow(correlation_matrix, aspect='auto', cmap='RdBu_r', 
-                            vmin=-corr_vmax, vmax=corr_vmax)
-        axes[0].set_title('Correlation per Subject and Marker')
+        # Absolute difference heatmap
+        im1 = axes[0].imshow(absolute_diff_matrix, aspect='auto', cmap='Reds', vmin=0)
+        axes[0].set_title('Absolute Difference |Original - Reconstructed|')
         axes[0].set_xlabel('Markers')
         axes[0].set_ylabel('Subjects')
         axes[0].set_xticks(range(n_markers))
@@ -770,16 +771,9 @@ class GlobalAnalyzer:
         axes[0].set_yticklabels(subjects)
         plt.colorbar(im1, ax=axes[0])
         
-        # Norm Sq Error heatmap - use white-centered colormap if there are negative values
-        norm_sq_error_min, norm_sq_error_max = np.min(norm_sq_error_matrix), np.max(norm_sq_error_matrix)
-        if norm_sq_error_min < 0:
-            norm_sq_error_vmax = max(abs(norm_sq_error_min), abs(norm_sq_error_max))
-            im2 = axes[1].imshow(norm_sq_error_matrix, aspect='auto', cmap='RdBu_r', 
-                                vmin=-norm_sq_error_vmax, vmax=norm_sq_error_vmax)
-        else:
-            im2 = axes[1].imshow(norm_sq_error_matrix, aspect='auto', cmap='Reds', vmin=0)
-        
-        axes[1].set_title('Normalized Squared Error per Subject and Marker')
+        # Normalized difference heatmap
+        im2 = axes[1].imshow(normalized_diff_matrix, aspect='auto', cmap='Reds', vmin=0)
+        axes[1].set_title('Normalized Difference |Original - Reconstructed| / Mean(|Original|, |Reconstructed|)')
         axes[1].set_xlabel('Markers')
         axes[1].set_ylabel('Subjects')
         axes[1].set_xticks(range(n_markers))
@@ -792,78 +786,6 @@ class GlobalAnalyzer:
         plt.savefig(op.join(self.plots_dir, 'scalar_heatmaps_subjects_markers.png'), dpi=300, bbox_inches='tight')
         plt.close()
         
-        # Create outlier-filtered versions
-        print("     🧹 Creating outlier-filtered scalar heatmaps...")
-        
-        # Filter outliers from correlation matrix
-        corr_filtered, corr_outlier_info = OutlierDetector.filter_outliers_2d(
-            correlation_matrix, method='iqr', factor=1.5)
-        
-        # Filter outliers from norm_sq_error matrix  
-        norm_sq_error_filtered, norm_sq_error_outlier_info = OutlierDetector.filter_outliers_2d(
-            norm_sq_error_matrix, method='iqr', factor=1.5)
-        
-        print(f"        📊 Correlation outliers: {corr_outlier_info['n_outliers']} ({corr_outlier_info['outlier_percent']:.1f}%)")
-        print(f"        📊 Norm Sq Error outliers: {norm_sq_error_outlier_info['n_outliers']} ({norm_sq_error_outlier_info['outlier_percent']:.1f}%)")
-        
-        # Create comparison plots
-        fig, axes = plt.subplots(2, 2, figsize=(28, 12))
-        fig.suptitle('Scalar Features: Subject × Marker Analysis (Original vs Outlier-Filtered)', fontsize=16)
-        
-        # Correlation comparison
-        OutlierDetector.create_comparison_heatmaps(
-            fig, axes[0], correlation_matrix, corr_filtered, corr_outlier_info,
-            'Correlation per Subject and Marker', 'Markers', 'Subjects',
-            xticklabels=marker_names, yticklabels=subjects)
-        
-        # Norm Sq Error comparison  
-        OutlierDetector.create_comparison_heatmaps(
-            fig, axes[1], norm_sq_error_matrix, norm_sq_error_filtered, norm_sq_error_outlier_info,
-            'Norm Sq Error per Subject and Marker', 'Markers', 'Subjects',
-            xticklabels=marker_names, yticklabels=subjects)
-        
-        plt.tight_layout()
-        plt.savefig(op.join(self.plots_dir, 'scalar_heatmaps_subjects_markers_comparison.png'), dpi=300, bbox_inches='tight')
-        plt.close()
-        
-        # Save outlier-filtered versions separately
-        fig, axes = plt.subplots(2, 1, figsize=(20, 12))
-        fig.suptitle('Scalar Features: Subject × Marker Analysis (Outlier-Filtered)', fontsize=16)
-        
-        # Filtered correlation heatmap
-        corr_filt_vmax = max(abs(np.nanmin(corr_filtered)), abs(np.nanmax(corr_filtered)))
-        im1 = axes[0].imshow(corr_filtered, aspect='auto', cmap='RdBu_r', 
-                            vmin=-corr_filt_vmax, vmax=corr_filt_vmax)
-        axes[0].set_title(f'Correlation per Subject and Marker (Filtered: {corr_outlier_info["outlier_percent"]:.1f}% outliers removed)')
-        axes[0].set_xlabel('Markers')
-        axes[0].set_ylabel('Subjects')
-        axes[0].set_xticks(range(n_markers))
-        axes[0].set_xticklabels(marker_names, rotation=45, ha='right')
-        axes[0].set_yticks(range(n_subjects))
-        axes[0].set_yticklabels(subjects)
-        plt.colorbar(im1, ax=axes[0])
-        
-        # Filtered Norm Sq Error heatmap
-        norm_sq_error_filt_min, norm_sq_error_filt_max = np.nanmin(norm_sq_error_filtered), np.nanmax(norm_sq_error_filtered)
-        if norm_sq_error_filt_min < 0:
-            norm_sq_error_filt_vmax = max(abs(norm_sq_error_filt_min), abs(norm_sq_error_filt_max))
-            im2 = axes[1].imshow(norm_sq_error_filtered, aspect='auto', cmap='RdBu_r', 
-                                vmin=-norm_sq_error_filt_vmax, vmax=norm_sq_error_filt_vmax)
-        else:
-            im2 = axes[1].imshow(norm_sq_error_filtered, aspect='auto', cmap='Reds', vmin=0)
-        
-        axes[1].set_title(f'Norm Sq Error per Subject and Marker (Filtered: {norm_sq_error_outlier_info["outlier_percent"]:.1f}% outliers removed)')
-        axes[1].set_xlabel('Markers')
-        axes[1].set_ylabel('Subjects')
-        axes[1].set_xticks(range(n_markers))
-        axes[1].set_xticklabels(marker_names, rotation=45, ha='right')
-        axes[1].set_yticks(range(n_subjects))
-        axes[1].set_yticklabels(subjects)
-        plt.colorbar(im2, ax=axes[1])
-        
-        plt.tight_layout()
-        plt.savefig(op.join(self.plots_dir, 'scalar_heatmaps_subjects_markers_filtered.png'), dpi=300, bbox_inches='tight')
-        plt.close()
         
         # 3. Mean norm_sq_error and correlation per marker
         mean_norm_sq_errors = []
@@ -883,7 +805,8 @@ class GlobalAnalyzer:
             mean_correlations.append(np.mean(corr_vals))
             std_correlations.append(np.std(corr_vals))
         
-        fig, axes = plt.subplots(2, 1, figsize=(20, 10))
+        # Increased height from 10 to 15
+        fig, axes = plt.subplots(2, 1, figsize=(20, 15))
         fig.suptitle('Mean Statistics per Marker Across Subjects', fontsize=16)
         
         x_pos = np.arange(len(marker_names))
@@ -937,7 +860,7 @@ class GlobalAnalyzer:
             'Std_Correlation': std_correlations
         })
         marker_stats_data.to_csv(op.join(self.data_dir, 'scalar_marker_statistics.csv'), index=False)
-    '''
+    
     def create_topographic_global_plots(self):
         """Create global topographic analysis plots."""
         print("Creating global topographic plots...")
@@ -1367,7 +1290,7 @@ class GlobalAnalyzer:
             'Cosine_Similarity': self.global_topo_data['cosine_similarities']
         })
         topo_summary_data.to_csv(op.join(self.data_dir, 'topo_global_summary.csv'), index=False)
-    '''
+    
     def create_mne_topomap_plots(self):
         """Create MNE topographic plots for original, reconstructed, and NMSE data."""
         if not HAS_MNE:
@@ -1523,8 +1446,8 @@ class GlobalAnalyzer:
         
             n_rows = len(marker_indices)
             
-            fig, axes = plt.subplots(n_rows, 4, figsize=(20, max(4, n_rows * 3)))  # 4 columns: orig, recon, difference, nmse
-            fig.suptitle(f'MNE Topographic Maps - {plot_title} ({len(marker_indices)} markers)', fontsize=16)
+            fig, axes = plt.subplots(n_rows, 4, figsize=(25, max(4, n_rows * 3)))  # 4 columns: orig, recon, difference, nmse
+          #  fig.suptitle(f'MNE Topographic Maps - {plot_title} ({len(marker_indices)} markers)', fontsize=16)
             
             # Handle single row case
             if n_rows == 1:
@@ -1549,49 +1472,48 @@ class GlobalAnalyzer:
                 diff_abs_max = max(abs(np.min(diff_data)), abs(np.max(diff_data)))
                 diff_symmetric_min, diff_symmetric_max = -diff_abs_max, diff_abs_max
                 
-                #try:
-                    # Plot original - use vlim instead of vmin/vmax
-                    # Use 'Blues' colormap which goes from white (low) to blue (high)
+                # Plot original
                 im1, _ = mne.viz.plot_topomap(orig_data, info, axes=axes[row, 0],
                                                  vlim=(data_min, data_max), 
                                                  show=False, cmap='Blues')
-                axes[row, 0].set_title(f'{marker_name}\nOriginal')
-                    
-                    # Plot reconstructed
+                if len(marker_name) > 15:
+                    axes[row, 0].set_title(f'{marker_name[:15]}\n{marker_name[15:]} Original')
+                else:
+                    axes[row, 0].set_title(f'{marker_name}\nOriginal')
+                
+                # Plot reconstructed
                 im2, _ = mne.viz.plot_topomap(recon_data, info, axes=axes[row, 1],
-                                                 vlim=(data_min, data_max),
-                                                 show=False, cmap='Blues')
-                axes[row, 1].set_title(f'{marker_name}\nReconstructed')
-                    
-                    # Plot difference (Original - Reconstructed) with symmetric scale
+                                             vlim=(data_min, data_max),
+                                             show=False, cmap='Blues')
+                if len(marker_name) > 15:
+                    axes[row, 1].set_title(f'{marker_name[:15]}\n{marker_name[15:]} Reconstructed')
+                else:
+                    axes[row, 1].set_title(f'{marker_name}\nReconstructed')
+                
+                # Plot difference (Original - Reconstructed) with symmetric scale
                 im3, _ = mne.viz.plot_topomap(diff_data, info, axes=axes[row, 2],
-                                                 vlim=(diff_symmetric_min, diff_symmetric_max),
-                                                 show=False, cmap='RdBu_r')
-                axes[row, 2].set_title(f'{marker_name}\nDifference (Symmetric)')
+                                             vlim=(diff_symmetric_min, diff_symmetric_max),
+                                             show=False, cmap='RdBu_r')
+                #handle long marker names
+                if len(marker_name) > 15:
+                    axes[row, 2].set_title(f'{marker_name[:15]}\n{marker_name[15:]} Difference')
+                else:
+                    axes[row, 2].set_title(f'{marker_name}\nDifference')
                     
                     # Plot difference again but with same scale as original/reconstructed
                 im4, _ = mne.viz.plot_topomap(diff_data, info, axes=axes[row, 3],
                                                  vlim=(data_min, data_max),
                                                  show=False, cmap='Blues')
-                axes[row, 3].set_title(f'{marker_name}\nDifference (Same Scale)')
+                if len(marker_name) > 15:
+                    axes[row, 3].set_title(f'{marker_name[:15]}\n{marker_name[15:]} Difference')
+                else:
+                    axes[row, 3].set_title(f'{marker_name}\nDifference')
                     
                     # Add colorbars for each row
                 plt.colorbar(im1, ax=axes[row, 0], shrink=0.8)
                 plt.colorbar(im2, ax=axes[row, 1], shrink=0.8)
                 plt.colorbar(im3, ax=axes[row, 2], shrink=0.8)
                 plt.colorbar(im4, ax=axes[row, 3], shrink=0.8)
-                    
-                #except Exception as e:
-                #    print(f"  ⚠️  Error plotting topomap for {marker_name}: {e}")
-                    # Create fallback plot
-                #    axes[row, 0].text(0.5, 0.5, f'Error:\n{marker_name}\nOriginal', 
-                #                     ha='center', va='center', transform=axes[row, 0].transAxes)
-                #    axes[row, 1].text(0.5, 0.5, f'Error:\n{marker_name}\nReconstructed',
-                #                     ha='center', va='center', transform=axes[row, 1].transAxes)
-                #    axes[row, 2].text(0.5, 0.5, f'Error:\n{marker_name}\nDiff (Symmetric)',
-                #                     ha='center', va='center', transform=axes[row, 2].transAxes)
-                #    axes[row, 3].text(0.5, 0.5, f'Error:\n{marker_name}\nDiff (Same Scale)',
-                #                     ha='center', va='center', transform=axes[row, 3].transAxes)
             
             plt.tight_layout()
             plt.savefig(op.join(self.plots_dir, f'mne_topomaps_{plot_title.lower().replace(" ", "_").replace("-", "_")}.png'), 
@@ -1761,8 +1683,17 @@ class GlobalAnalyzer:
         subjects = self.global_scalar_data['subjects']
         n_subjects = len(subjects)
         
+        # 1. SUBJECT-WISE TESTS (for each subject across all markers)
+        self._create_subject_wise_statistical_tests_plot(subjects, n_subjects)
+        
+        # 2. MARKER-WISE TESTS (for each marker across all subjects)
+        self._create_marker_wise_statistical_tests_plot(subjects, n_subjects)
+    
+    def _create_subject_wise_statistical_tests_plot(self, subjects, n_subjects):
+        """Create statistical tests plot for each subject across markers."""
+        print("  Creating subject-wise statistical tests plot...")
+        
         # Collect p-values from individual subject analyses
-        # Initialize containers for different test types
         scalar_pvalues = {'paired_ttest': [], 'wilcoxon': [], 'one_sample_ttest': []}
         topo_pvalues = {'paired_ttest': [], 'wilcoxon': [], 'one_sample_ttest': []}
         
@@ -1781,7 +1712,7 @@ class GlobalAnalyzer:
             topo_pvalues['wilcoxon'].append(topo_tests['wilcoxon']['p_value'])
             topo_pvalues['one_sample_ttest'].append(topo_tests['one_sample_ttest_on_differences']['p_value'])
         
-        # Create heatmap for scalar tests
+        # Create matrices
         test_names = ['Paired t-test', 'Wilcoxon', 'One-sample t-test']
         scalar_pvalue_matrix = np.array([
             scalar_pvalues['paired_ttest'],
@@ -1796,13 +1727,13 @@ class GlobalAnalyzer:
         ])
         
         # Find max p-value for colorbar scale
-        max_pval_scalar = np.ceil(np.max(scalar_pvalue_matrix) * 10) / 10  # Round up to nearest 0.1
+        max_pval_scalar = np.ceil(np.max(scalar_pvalue_matrix) * 10) / 10
         max_pval_topo = np.ceil(np.max(topo_pvalue_matrix) * 10) / 10
         max_pval_overall = max(max_pval_scalar, max_pval_topo)
         
-        # Create figure with two subplots
-        fig, axes = plt.subplots(2, 1, figsize=(12, 8))
-        fig.suptitle('Statistical Tests P-values Across Subjects', fontsize=16)
+        # Create figure
+        fig, axes = plt.subplots(2, 1, figsize=(max(12, n_subjects * 0.8), 8))
+        fig.suptitle('Statistical Tests P-values: Subject-wise Analysis\n(Tests performed for each subject across all markers)', fontsize=16)
         
         # Scalar tests heatmap
         im1 = axes[0].imshow(scalar_pvalue_matrix, aspect='auto', cmap='Reds', 
@@ -1844,23 +1775,177 @@ class GlobalAnalyzer:
         
         plt.colorbar(im2, ax=axes[1])
         
-        # Add significance threshold line at p=0.05
-        for ax in axes:
-            # Add horizontal line at p=0.05 threshold if it's within our range
-            if max_pval_overall >= 0.05:
-                # Convert p=0.05 to colorbar position
-                p_05_position = 0.05 / max_pval_overall
-                # This would need to be implemented differently as it's a colorbar threshold
-                pass
-
-        
         plt.tight_layout()
-        plt.savefig(op.join(self.plots_dir, 'statistical_tests_pvalues.png'), dpi=300, bbox_inches='tight')
+        plt.savefig(op.join(self.plots_dir, 'statistical_test_pvalues_subjects.png'), dpi=300, bbox_inches='tight')
         plt.close()
         
-        print("  ✅ Created statistical tests p-values plot")
-        print(f"      Max scalar p-value: {max_pval_scalar:.3f}")
-        print(f"      Max topo p-value: {max_pval_topo:.3f}")
+        print(f"    ✅ Created subject-wise statistical tests plot")
+        print(f"        Max scalar p-value: {max_pval_scalar:.3f}")
+        print(f"        Max topo p-value: {max_pval_topo:.3f}")
+    
+    def _create_marker_wise_statistical_tests_plot(self, subjects, n_subjects):
+        """Create statistical tests plot for each marker across subjects."""
+        print("  Creating marker-wise statistical tests plot...")
+        
+        # Get marker names
+        marker_names = list(self.global_scalar_data['marker_data'].keys())
+        n_markers = len(marker_names)
+        
+        # Initialize containers for marker-wise tests
+        scalar_marker_pvalues = {'paired_ttest': [], 'wilcoxon': [], 'one_sample_ttest': []}
+        topo_marker_pvalues = {'paired_ttest': [], 'wilcoxon': [], 'one_sample_ttest': []}
+        
+        # For each marker, perform statistical tests across subjects
+        for marker_name in marker_names:
+            # Get original and reconstructed values for this marker across all subjects
+            orig_vals = self.global_scalar_data['marker_data'][marker_name]['orig_vals']
+            recon_vals = self.global_scalar_data['marker_data'][marker_name]['recon_vals']
+            
+            # Perform statistical tests for scalar data
+            if len(orig_vals) >= 2:  # Need at least 2 subjects
+                from scipy.stats import ttest_rel, wilcoxon, ttest_1samp
+                
+                # Paired t-test (original vs reconstructed for this marker)
+                try:
+                    _, p_paired = ttest_rel(orig_vals, recon_vals)
+                    scalar_marker_pvalues['paired_ttest'].append(p_paired)
+                except:
+                    scalar_marker_pvalues['paired_ttest'].append(1.0)
+                
+                # Wilcoxon signed-rank test
+                try:
+                    _, p_wilcoxon = wilcoxon(orig_vals, recon_vals)
+                    scalar_marker_pvalues['wilcoxon'].append(p_wilcoxon)
+                except:
+                    scalar_marker_pvalues['wilcoxon'].append(1.0)
+                
+                # One-sample t-test on differences
+                try:
+                    differences = np.array(orig_vals) - np.array(recon_vals)
+                    _, p_one_sample = ttest_1samp(differences, 0)
+                    scalar_marker_pvalues['one_sample_ttest'].append(p_one_sample)
+                except:
+                    scalar_marker_pvalues['one_sample_ttest'].append(1.0)
+            else:
+                # Not enough subjects for statistical tests
+                scalar_marker_pvalues['paired_ttest'].append(1.0)
+                scalar_marker_pvalues['wilcoxon'].append(1.0)
+                scalar_marker_pvalues['one_sample_ttest'].append(1.0)
+        
+        # For topographic data, we need to extract per-marker data across subjects
+        if len(self.global_topo_data['topos_orig_all']) > 0:
+            topos_orig_all = np.array(self.global_topo_data['topos_orig_all'])
+            topos_recon_all = np.array(self.global_topo_data['topos_recon_all'])
+            
+            for marker_idx in range(min(n_markers, topos_orig_all.shape[1])):
+                # Get data for this marker across all subjects and channels
+                marker_orig_data = topos_orig_all[:, marker_idx, :].flatten()  # Flatten across subjects and channels
+                marker_recon_data = topos_recon_all[:, marker_idx, :].flatten()
+                
+                # Perform statistical tests for topographic data
+                if len(marker_orig_data) >= 2:
+                    try:
+                        _, p_paired = ttest_rel(marker_orig_data, marker_recon_data)
+                        topo_marker_pvalues['paired_ttest'].append(p_paired)
+                    except:
+                        topo_marker_pvalues['paired_ttest'].append(1.0)
+                    
+                    try:
+                        _, p_wilcoxon = wilcoxon(marker_orig_data, marker_recon_data)
+                        topo_marker_pvalues['wilcoxon'].append(p_wilcoxon)
+                    except:
+                        topo_marker_pvalues['wilcoxon'].append(1.0)
+                    
+                    try:
+                        differences = marker_orig_data - marker_recon_data
+                        _, p_one_sample = ttest_1samp(differences, 0)
+                        topo_marker_pvalues['one_sample_ttest'].append(p_one_sample)
+                    except:
+                        topo_marker_pvalues['one_sample_ttest'].append(1.0)
+                else:
+                    topo_marker_pvalues['paired_ttest'].append(1.0)
+                    topo_marker_pvalues['wilcoxon'].append(1.0)
+                    topo_marker_pvalues['one_sample_ttest'].append(1.0)
+        else:
+            # No topographic data available
+            for _ in range(n_markers):
+                topo_marker_pvalues['paired_ttest'].append(1.0)
+                topo_marker_pvalues['wilcoxon'].append(1.0)
+                topo_marker_pvalues['one_sample_ttest'].append(1.0)
+        
+        # Create matrices
+        test_names = ['Paired t-test', 'Wilcoxon', 'One-sample t-test']
+        scalar_marker_pvalue_matrix = np.array([
+            scalar_marker_pvalues['paired_ttest'],
+            scalar_marker_pvalues['wilcoxon'], 
+            scalar_marker_pvalues['one_sample_ttest']
+        ])
+        
+        topo_marker_pvalue_matrix = np.array([
+            topo_marker_pvalues['paired_ttest'][:n_markers],
+            topo_marker_pvalues['wilcoxon'][:n_markers],
+            topo_marker_pvalues['one_sample_ttest'][:n_markers]
+        ])
+        
+        # Find max p-value for colorbar scale
+        max_pval_scalar_marker = np.ceil(np.max(scalar_marker_pvalue_matrix) * 10) / 10
+        max_pval_topo_marker = np.ceil(np.max(topo_marker_pvalue_matrix) * 10) / 10
+        max_pval_marker_overall = max(max_pval_scalar_marker, max_pval_topo_marker)
+        
+        # Create figure
+        fig, axes = plt.subplots(2, 1, figsize=(max(15, n_markers * 0.6), 10))
+        fig.suptitle('Statistical Tests P-values: Marker-wise Analysis\n(Tests performed for each marker across all subjects)', fontsize=16)
+        
+        # Scalar tests heatmap
+        im1 = axes[0].imshow(scalar_marker_pvalue_matrix, aspect='auto', cmap='Reds', 
+                            vmin=0, vmax=max_pval_marker_overall)
+        axes[0].set_title('Scalar Statistical Tests P-values')
+        axes[0].set_xlabel('Markers')
+        axes[0].set_ylabel('Test Type')
+        axes[0].set_xticks(range(n_markers))
+        axes[0].set_xticklabels(marker_names, rotation=45, ha='right')
+        axes[0].set_yticks(range(len(test_names)))
+        axes[0].set_yticklabels(test_names)
+        axes[0].grid(False)
+        
+        # Add p-value text annotations (only if not too many markers)
+        if n_markers <= 20:
+            for i in range(len(test_names)):
+                for j in range(n_markers):
+                    text = axes[0].text(j, i, f'{scalar_marker_pvalue_matrix[i, j]:.3f}',
+                                       ha="center", va="center", color="black", fontsize=7)
+        
+        plt.colorbar(im1, ax=axes[0])
+        
+        # Topographic tests heatmap
+        im2 = axes[1].imshow(topo_marker_pvalue_matrix, aspect='auto', cmap='Reds',
+                            vmin=0, vmax=max_pval_marker_overall)
+        axes[1].set_title('Topographic Statistical Tests P-values')
+        axes[1].set_xlabel('Markers')
+        axes[1].set_ylabel('Test Type')
+        axes[1].set_xticks(range(n_markers))
+        axes[1].set_xticklabels(marker_names, rotation=45, ha='right')
+        axes[1].set_yticks(range(len(test_names)))
+        axes[1].set_yticklabels(test_names)
+        axes[1].grid(False)
+        
+        # Add p-value text annotations (only if not too many markers)
+        if n_markers <= 20:
+            for i in range(len(test_names)):
+                for j in range(n_markers):
+                    text = axes[1].text(j, i, f'{topo_marker_pvalue_matrix[i, j]:.3f}',
+                                       ha="center", va="center", color="black", fontsize=7)
+        
+        plt.colorbar(im2, ax=axes[1])
+        
+        plt.tight_layout()
+        plt.savefig(op.join(self.plots_dir, 'statistical_test_pvalues_markers.png'), dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        print(f"    ✅ Created marker-wise statistical tests plot")
+        print(f"        Max scalar p-value: {max_pval_scalar_marker:.3f}")
+        print(f"        Max topo p-value: {max_pval_topo_marker:.3f}")
+        print(f"        Number of markers tested: {n_markers}")
     
     def run_analysis(self):
         """Run complete global analysis."""
@@ -1889,7 +1974,7 @@ class GlobalAnalyzer:
         
         # Create plots
         self.create_scalar_global_plots()
-       # self.create_topographic_global_plots()
+        # self.create_topographic_global_plots()  # Commented out for now
         
         # Create MNE topographic plots
         self.create_mne_topomap_plots()

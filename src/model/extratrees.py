@@ -1,14 +1,16 @@
-"""Cross-subject ExtraTrees classification for TOTEM data.
+"""Cross-subject binary ExtraTrees classification for TOTEM data.
 
 ==================================================
-Cross-subject ExtraTrees classification
+Cross-subject Binary ExtraTrees classification
 ==================================================
 
-This script trains ExtraTrees classifiers across subjects to predict 
-consciousness states from EEG markers. The classification is performed
+This script trains ExtraTrees classifiers across subjects for binary 
+classification of consciousness states from EEG markers: VS (Vegetative State) 
+vs MCS (Minimally Conscious State). The classification is performed
 at the subject level, where each subject contributes one sample.
 
 Key features:
+- Binary classification: VS vs MCS (UWS → VS, MCS+/MCS- → MCS)
 - Cross-subject classification (no data leakage)
 - Support for scalar or topographic markers
 - Support for original or reconstructed data
@@ -53,7 +55,7 @@ sns.set_style("whitegrid")
 
 
 class CrossSubjectClassifier:
-    """Cross-subject ExtraTrees classifier for consciousness state prediction."""
+    """Cross-subject binary ExtraTrees classifier for VS vs MCS state prediction."""
     
     def __init__(self, data_dir, patient_labels_file, marker_type='scalar', 
                  data_origin='original', output_dir=None, random_state=42):
@@ -98,7 +100,7 @@ class CrossSubjectClassifier:
         self.results = {}
         
     def load_patient_labels(self):
-        """Load patient labels from CSV file."""
+        """Load patient labels from CSV file for binary classification (VS vs MCS)."""
         print(f"📋 Loading patient labels from: {self.patient_labels_file}")
         
         try:
@@ -117,9 +119,16 @@ class CrossSubjectClassifier:
                 if pd.isna(state) or state == 'n/a':
                     continue
                 
-                # Merge MCS+ and MCS- into single MCS category
-                if state in ['MCS+', 'MCS-']:
+                # Binary classification: VS vs MCS
+                if state == 'UWS':
+                    # UWS corresponds to VS (Vegetative State)
+                    state = 'VS'
+                elif state in ['MCS+', 'MCS-']:
+                    # Merge MCS+ and MCS- into single MCS category
                     state = 'MCS'
+                else:
+                    # Skip other states (COMA, EMCS, CONTROL, etc.)
+                    continue
                 
                 subject_session_key = f"{subject}_{session}"
                 labels_dict[subject_session_key] = state
@@ -127,6 +136,7 @@ class CrossSubjectClassifier:
             
             print(f"   ✓ Loaded labels for {len(labels_dict)} subject/sessions")
             print(f"   ✓ Available states: {sorted(available_states)}")
+            print(f"   🎯 Binary classification: VS (Vegetative State) vs MCS (Minimally Conscious State)")
             
             return labels_dict, sorted(available_states)
             
@@ -157,7 +167,10 @@ class CrossSubjectClassifier:
                 continue
                 
             # Look for session directories
-            session_dirs = [d for d in os.listdir(subject_path) if d.startswith('ses-')]
+            try:
+                session_dirs = [d for d in os.listdir(subject_path) if d.startswith('ses-')]
+            except PermissionError:
+                continue
             
             for session_dir in sorted(session_dirs):
                 session_path = op.join(subject_path, session_dir)
@@ -204,6 +217,11 @@ class CrossSubjectClassifier:
                         continue
         
         print("   ⚠️  No scalar_metrics.csv files found in data directory")
+        # Return generic feature names if no metrics file found
+        if self.marker_type == 'scalar':
+            print("   🔧 Generating generic scalar feature names...")
+            generic_names = [f"marker_{i:02d}" for i in range(1, 29)]  # Assume 28 markers
+            return generic_names, generic_names
         return None, None
     
     def load_subject_data(self, subject_session_path):
@@ -270,7 +288,11 @@ class CrossSubjectClassifier:
         if not op.exists(self.data_dir):
             raise ValueError(f"Data directory does not exist: {self.data_dir}")
         
-        subject_dirs = [d for d in os.listdir(self.data_dir) if d.startswith('sub-')]
+        try:
+            subject_dirs = [d for d in os.listdir(self.data_dir) if d.startswith('sub-')]
+        except PermissionError as e:
+            raise ValueError(f"Permission denied accessing data directory {self.data_dir}: {e}")
+            
         print(f"   Found {len(subject_dirs)} potential subject directories")
         
         subjects_processed = 0
@@ -284,7 +306,11 @@ class CrossSubjectClassifier:
                 continue
             
             # Look for session directories
-            session_dirs = [d for d in os.listdir(subject_path) if d.startswith('ses-')]
+            try:
+                session_dirs = [d for d in os.listdir(subject_path) if d.startswith('ses-')]
+            except PermissionError:
+                print(f"   ⚠️  Permission denied accessing {subject_path}")
+                continue
             
             for session_dir in sorted(session_dirs):
                 session_path = op.join(subject_path, session_dir)
@@ -304,6 +330,7 @@ class CrossSubjectClassifier:
                 marker_data = self.load_subject_data(session_path)
                 
                 if marker_data is None:
+                    print(f"   ⏭️  Skipping {subject_session_key}: failed to load data")
                     subjects_skipped += 1
                     continue
                 
@@ -338,6 +365,13 @@ class CrossSubjectClassifier:
         unique, counts = np.unique(self.y, return_counts=True)
         for class_name, count in zip(unique, counts):
             print(f"      {class_name}: {count} subjects")
+        
+        # Check if we have enough data for each class
+        min_class_size = min(counts)
+        if min_class_size == 0:
+            raise ValueError("Some classes have no samples!")
+        elif min_class_size == 1:
+            print(f"   ⚠️  Warning: Some classes have only 1 sample. Consider using Leave-One-Out CV.")
         
         return self.X, self.y_encoded, self.subjects
     
@@ -508,41 +542,23 @@ class CrossSubjectClassifier:
         # Confusion matrix on test set
         test_conf_matrix = confusion_matrix(y_test, y_test_pred)
         
-        # AUC computation (binary or multi-class OvR)
+        # AUC computation for binary classification (VS vs MCS)
         test_auc_score = None
-        test_auc_scores_ovr = None
-        test_auc_score_macro = None
         
         if len(test_classes_present) == 2:
-            # Binary classification
-            test_auc_score = roc_auc_score(y_test, y_test_proba[:, 1])
-        elif len(test_classes_present) > 2:
-            # Multi-class: One-vs-Rest AUC
+            # Binary classification: compute standard AUC-ROC
             try:
-                # Compute OvR AUC for each class
-                test_auc_scores_ovr = {}
-                y_test_binarized = label_binarize(y_test, classes=test_classes_present)
-                
-                for i, class_name in enumerate(test_class_names_present):
-                    if i < y_test_proba.shape[1]:
-                        class_proba = y_test_proba[:, i]
-                        if y_test_binarized.ndim > 1:
-                            y_true_binary = y_test_binarized[:, i]
-                        else:
-                            y_true_binary = (y_test == test_classes_present[i]).astype(int)
-                        
-                        # Only compute AUC if we have both classes in test set
-                        if len(np.unique(y_true_binary)) > 1:
-                            auc_score_class = roc_auc_score(y_true_binary, class_proba)
-                            test_auc_scores_ovr[class_name] = auc_score_class
-                
-                # Compute macro-averaged AUC
-                if test_auc_scores_ovr:
-                    test_auc_score_macro = np.mean(list(test_auc_scores_ovr.values()))
-                    
+                test_auc_score = roc_auc_score(y_test, y_test_proba[:, 1])
+                print(f"   📊 Test AUC-ROC: {test_auc_score:.3f}")
             except Exception as e:
-                print(f"   ⚠️  Could not compute multi-class AUC: {e}")
-                test_auc_scores_ovr = None
+                print(f"   ⚠️  Could not compute AUC: {e}")
+                test_auc_score = None
+        elif len(test_classes_present) == 1:
+            print(f"   ⚠️  Only one class present in test set: {test_class_names_present[0]}. Cannot compute AUC.")
+            test_auc_score = None
+        else:
+            print(f"   ⚠️  More than 2 classes found: {test_class_names_present}. This should not happen for binary classification.")
+            test_auc_score = None
         
         # Feature importances
         feature_importances = pipeline.named_steps['extratreesclassifier'].feature_importances_
@@ -564,8 +580,6 @@ class CrossSubjectClassifier:
             'test_accuracy': test_accuracy,
             'test_balanced_accuracy': test_balanced_acc,
             'test_auc_score': test_auc_score,
-            'test_auc_scores_ovr': test_auc_scores_ovr,
-            'test_auc_score_macro': test_auc_score_macro,
             'test_precision': test_precision,
             'test_recall': test_recall,
             'test_f1_score': test_f1,
@@ -737,11 +751,11 @@ class CrossSubjectClassifier:
         print(f"   ✓ Results plot saved to: {plot_file}")
         plt.close()
         
-        # ROC curves - binary or multi-class (One-vs-Rest)
-        if n_classes == 2 and results['test_auc_score'] is not None:
+        # ROC curve for binary classification
+        if results['test_auc_score'] is not None:
             self._plot_binary_roc_curve(results)
-        elif n_classes > 2:
-            self._plot_multiclass_roc_curves(results)
+        else:
+            print("   ⚠️  Skipping ROC curve plot: AUC score not available")
     
     def _plot_binary_roc_curve(self, results):
         """Plot ROC curve for binary classification."""
@@ -910,8 +924,6 @@ class CrossSubjectClassifier:
                 'test_accuracy': float(results['test_accuracy']),
                 'test_balanced_accuracy': float(results['test_balanced_accuracy']),
                 'test_auc_score': float(results['test_auc_score']) if results['test_auc_score'] is not None else None,
-                'test_auc_scores_ovr': {k: float(v) for k, v in results['test_auc_scores_ovr'].items()} if results['test_auc_scores_ovr'] is not None else None,
-                'test_auc_score_macro': float(results['test_auc_score_macro']) if results['test_auc_score_macro'] is not None else None,
                 
                 # Training set performance (for overfitting check)
                 'train_accuracy': float(results['train_accuracy']),
@@ -982,7 +994,7 @@ class CrossSubjectClassifier:
         print(f"   ✓ Subject predictions saved to: {csv_file}")
         
         # Save feature importances with names
-        if self.feature_names is not None:
+        if self.feature_names is not None and len(self.feature_names) == len(results['feature_importances']):
             feature_importance_df = pd.DataFrame({
                 'feature_name': self.feature_names,
                 'feature_name_abbreviated': self.feature_names_abbreviated,
@@ -993,6 +1005,17 @@ class CrossSubjectClassifier:
             feature_importance_file = op.join(self.output_dir, 'feature_importances.csv')
             feature_importance_df.to_csv(feature_importance_file, index=False)
             print(f"   ✓ Feature importances saved to: {feature_importance_file}")
+        else:
+            # Fallback: save just the importance values
+            feature_importance_df = pd.DataFrame({
+                'feature_index': range(len(results['feature_importances'])),
+                'importance': results['feature_importances']
+            })
+            feature_importance_df = feature_importance_df.sort_values('importance', ascending=False)
+            
+            feature_importance_file = op.join(self.output_dir, 'feature_importances.csv')
+            feature_importance_df.to_csv(feature_importance_file, index=False)
+            print(f"   ✓ Feature importances saved to: {feature_importance_file} (with indices)")
         
         return json_results
     
@@ -1031,50 +1054,56 @@ class CrossSubjectClassifier:
         print(f"📊 Test size: {test_size:.0%}")
         print()
         
-        # Step 1: Collect data
-        X, y_encoded, subjects = self.collect_data()
-        
-        # Step 2: Create pipeline
-        pipeline = self.create_pipeline(n_estimators, max_depth)
-        
-        # Step 3: Evaluate model
-        results = self.evaluate_model(pipeline, cv_strategy, n_splits, test_size)
-        
-        # Step 4: Create plots
-        self.plot_results(results)
-        
-        # Step 5: Save results
-        final_results = self.save_results(results, pipeline)
-        
-        # Summary
-        print("\n" + "=" * 80)
-        print("CLASSIFICATION SUMMARY")
-        print("=" * 80)
-        print(f"Dataset: {results['n_train_subjects']} train + {results['n_test_subjects']} test subjects, {results['n_features']} features")
-        print(f"Classes: {', '.join(results['class_names'])}")
-        print(f"CV Balanced Accuracy (train): {results['cv_mean']:.3f} ± {results['cv_std']:.3f}")
-        print(f"Test Balanced Accuracy: {results['test_balanced_accuracy']:.3f}")
-        print(f"Train Balanced Accuracy: {results['train_balanced_accuracy']:.3f}")
-        
-        # AUC reporting for both binary and multi-class
-        if results['test_auc_score'] is not None:
-            print(f"Test AUC Score: {results['test_auc_score']:.3f}")
-        elif results['test_auc_score_macro'] is not None:
-            print(f"Test AUC Score (macro-avg): {results['test_auc_score_macro']:.3f}")
-            if results['test_auc_scores_ovr']:
-                auc_details = ', '.join([f'{k}: {v:.3f}' for k, v in results['test_auc_scores_ovr'].items()])
-                print(f"Test AUC Scores (OvR): {auc_details}")
-        
-        print(f"Results saved to: {self.output_dir}")
-        print("=" * 80)
-        
-        return final_results
+        try:
+            # Step 1: Collect data
+            X, y_encoded, subjects = self.collect_data()
+            
+            # Step 2: Create pipeline
+            pipeline = self.create_pipeline(n_estimators, max_depth)
+            
+            # Step 3: Evaluate model
+            results = self.evaluate_model(pipeline, cv_strategy, n_splits, test_size)
+            
+            # Step 4: Create plots
+            self.plot_results(results)
+            
+            # Step 5: Save results
+            final_results = self.save_results(results, pipeline)
+            
+            # Summary
+            print("\n" + "=" * 80)
+            print("CLASSIFICATION SUMMARY")
+            print("=" * 80)
+            print(f"Dataset: {results['n_train_subjects']} train + {results['n_test_subjects']} test subjects, {results['n_features']} features")
+            print(f"Classes: {', '.join(results['class_names'])}")
+            print(f"CV Balanced Accuracy (train): {results['cv_mean']:.3f} ± {results['cv_std']:.3f}")
+            print(f"Test Balanced Accuracy: {results['test_balanced_accuracy']:.3f}")
+            print(f"Train Balanced Accuracy: {results['train_balanced_accuracy']:.3f}")
+            
+            # AUC reporting for binary classification
+            if results['test_auc_score'] is not None:
+                print(f"Test AUC-ROC Score: {results['test_auc_score']:.3f}")
+            else:
+                print("Test AUC-ROC Score: Not available")
+            
+            print(f"Results saved to: {self.output_dir}")
+            print("=" * 80)
+            
+            return final_results
+            
+        except Exception as e:
+            print(f"\n❌ Classification failed with error: {e}")
+            print("\n🔧 Debugging information:")
+            print(f"   Data directory exists: {op.exists(self.data_dir)}")
+            print(f"   Labels file exists: {op.exists(self.patient_labels_file)}")
+            print(f"   Output directory: {self.output_dir}")
+            raise
 
 
 def main():
     """Main function for command line usage."""
     parser = argparse.ArgumentParser(
-        description='Cross-subject ExtraTrees classification for consciousness states'
+        description='Cross-subject binary ExtraTrees classification for VS vs MCS consciousness states'
     )
     parser.add_argument('--data-dir', required=True,
                        help='Path to results directory containing subject data')
