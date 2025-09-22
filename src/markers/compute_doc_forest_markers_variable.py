@@ -295,34 +295,34 @@ def compute_markers(epochs, output_file=None, apply_event_mapping=True, event_id
     
     m_list = [
         PowerSpectralDensity(estimator=base_psd, fmin=1., fmax=4.,
-                             normalize=False, comment='delta'),
+                             normalize=False, comment='delta', dB = False),
         PowerSpectralDensity(estimator=base_psd, fmin=1., fmax=4.,
-                             normalize=True, comment='deltan'),
+                             normalize=True, comment='deltan', dB = False),
         PowerSpectralDensity(estimator=base_psd, fmin=4., fmax=8.,
-                             normalize=False, comment='theta'),
+                             normalize=False, comment='theta', dB = False),
         PowerSpectralDensity(estimator=base_psd, fmin=4., fmax=8.,
-                             normalize=True, comment='thetan'),
+                             normalize=True, comment='thetan', dB = False),
         PowerSpectralDensity(estimator=base_psd, fmin=8., fmax=12.,
-                             normalize=False, comment='alpha'),
+                             normalize=False, comment='alpha', dB = False),
         PowerSpectralDensity(estimator=base_psd, fmin=8., fmax=12.,
-                             normalize=True, comment='alphan'),
+                             normalize=True, comment='alphan', dB = False),
         PowerSpectralDensity(estimator=base_psd, fmin=12., fmax=30.,
-                             normalize=False, comment='beta'),
+                             normalize=False, comment='beta', dB = False),
         PowerSpectralDensity(estimator=base_psd, fmin=12., fmax=30.,
-                             normalize=True, comment='betan'),
+                             normalize=True, comment='betan', dB = False),
         PowerSpectralDensity(estimator=base_psd, fmin=30., fmax=45.,
-                             normalize=False, comment='gamma'),
+                             normalize=False, comment='gamma', dB = False),
         PowerSpectralDensity(estimator=base_psd, fmin=30., fmax=45.,
-                             normalize=True, comment='gamman'),
+                             normalize=True, comment='gamman', dB = False),
         
         PowerSpectralDensity(estimator=base_psd, fmin=1., fmax=45.,
-                             normalize=True, comment='summary_se'),
+                             normalize=True, comment='summary_se', dB = False),
         PowerSpectralDensitySummary(estimator=base_psd, fmin=1., fmax=45.,
-                                    percentile=.5, comment='summary_msf'),
+                                    percentile=.5, comment='summary_msf', dB = False),
         PowerSpectralDensitySummary(estimator=base_psd, fmin=1., fmax=45.,
-                                    percentile=.9, comment='summary_sef90'),
+                                    percentile=.9, comment='summary_sef90', dB = False),
         PowerSpectralDensitySummary(estimator=base_psd, fmin=1., fmax=45.,
-                                    percentile=.95, comment='summary_sef95'),
+                                    percentile=.95, comment='summary_sef95', dB = False),
         
         PermutationEntropy(tmin=None, tmax=0.6, backend='python'),
         
@@ -416,8 +416,8 @@ def main():
                     plt.figure(figsize=(10, 6))
                     plt.semilogy(freqs, np.mean(psd, axis=0).T, alpha=0.1, color='black')
                     plt.xlim(2, 40)
-                    plt.ylim(1e-14, 1e-10)
-                    plt.ylabel('log(psd)')
+                    plt.ylim(min(np.mean(psd, axis=0))*0.8, max(np.mean(psd, axis=0))*1.2)
+                    plt.ylabel('PSD')
                     plt.xlabel('Frequency [Hz]')
                     plt.title(f'Power Spectral Density - {len(epochs.ch_names)} channels')
                     
