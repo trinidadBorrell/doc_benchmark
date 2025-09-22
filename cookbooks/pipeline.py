@@ -5,7 +5,7 @@ Pipeline to benchmark data
 A comprehensive Python pipeline for processing EEG data through three main phases:
 1. Markers: Compute EEG markers and features from raw data
 2. Analysis: Compare markers and perform individual subject analysis
-3. Models: Train extra trees for classification 
+3. Models: Train extra trees for binary classification (VS vs MCS) 
 
 
 Usage:
@@ -251,7 +251,7 @@ class Pipeline:
             ]):
                 return False
                 
-            self.logger.info(f"  Step 2: Computing features from markers_original.hdf5")
+            self.logger.info("  Step 2: Computing features from markers_original.hdf5")
             if not self._run_command([
                 "python", str(self.src_dir / "markers/compute_doc_forest_features_variable.py"),
                 str(markers_dir / "markers_original.hdf5"),
@@ -271,7 +271,7 @@ class Pipeline:
             ]):
                 return False
                 
-            self.logger.info(f"  Step 4: Computing features from markers_reconstructed.hdf5")
+            self.logger.info("  Step 4: Computing features from markers_reconstructed.hdf5")
             if not self._run_command([
                 "python", str(self.src_dir / "markers/compute_doc_forest_features_variable.py"),
                 str(markers_dir / "markers_reconstructed.hdf5"),
@@ -300,6 +300,31 @@ class Pipeline:
         """
         try:
             self.logger.info("Running global models training")
+            
+            # First check if we have enough successful subjects
+            subjects_dir = self.results_dir / "SUBJECTS"
+            if not subjects_dir.exists():
+                self.logger.error("No subjects directory found")
+                return False
+                
+            # Count subjects with complete data
+            complete_subjects = []
+            for subject_dir in subjects_dir.glob("sub-*"):
+                if not subject_dir.is_dir():
+                    continue
+                for session_dir in subject_dir.glob("ses-*"):
+                    if not session_dir.is_dir():
+                        continue
+                    features_dir = session_dir / "features_variable"
+                    if (features_dir.exists() and 
+                        (features_dir / "scalars_original.npy").exists() and
+                        (features_dir / "scalars_reconstructed.npy").exists()):
+                        complete_subjects.append(f"{subject_dir.name}/{session_dir.name}")
+            
+            self.logger.info(f"Found {len(complete_subjects)} subjects with complete data")
+            if len(complete_subjects) < 2:
+                self.logger.error("Need at least 2 subjects with complete data for model training")
+                return False
             
             # Create global models output directory
             models_output_dir = self.results_dir / "EXTRATREES" / f"models_{datetime.now().strftime('%Y-%m-%d_%H%M%S')}"
@@ -334,7 +359,7 @@ class Pipeline:
                 
                 if not self._run_command([
                     "python", str(self.src_dir / "model/extratrees.py"),
-                    "--data-dir", str(self.results_dir),
+                    "--data-dir", str(self.results_dir / "SUBJECTS"),
                     "--patient-labels", str(patient_labels_path),
                     "--output-dir", str(config_output_dir),
                     "--marker-type", marker_type,
@@ -376,6 +401,21 @@ class Pipeline:
             results_dir = self.results_dir / "SUBJECTS" / f"sub-{subject_id}" / session 
             compare_dir = results_dir / "compare_markers"
             compare_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Check if required feature files exist
+            features_dir = results_dir / "features_variable"
+            required_files = [
+                features_dir / "scalars_original.npy",
+                features_dir / "scalars_reconstructed.npy",
+                features_dir / "topos_original.npy",
+                features_dir / "topos_reconstructed.npy"
+            ]
+            
+            missing_files = [f for f in required_files if not f.exists()]
+            if missing_files:
+                self.logger.warning(f"Missing feature files for {subject_id}/{session}: {[f.name for f in missing_files]}")
+                self.logger.warning(f"Skipping analysis for {subject_id}/{session}")
+                return False
             
             self.logger.info(f"Running analysis for {subject_id}/{session}")
             
@@ -533,8 +573,8 @@ class Pipeline:
         if not skip_global and self.completed_subjects:
             self.run_global_analysis()
         
-        # Phase 3: Models Training
-        if not skip_models and self.completed_subjects:
+        # Phase 3: Models Training (run even if some subjects failed, as long as we have enough data)
+        if not skip_models:
             self.logger.info("Starting global models training phase...")
             models_success = self.run_models_phase()
             if not models_success:
@@ -760,7 +800,7 @@ Examples:
             return
             
         # Run pipeline
-    results = pipeline.run_pipeline(
+    pipeline.run_pipeline(
             subjects=subjects,
             skip_markers=skip_markers,
             skip_models=skip_models, 
