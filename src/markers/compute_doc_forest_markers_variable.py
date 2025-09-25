@@ -66,10 +66,10 @@ def get_event_id_mapping():
         # Main experimental conditions (Local/Standard, Global/Standard, etc.)
         10: 'HSTD',   # Control
         20: 'HDVT',   # Control 
-        30: 'LSGS',    # Local Standard Global Standard (highest count)
+        30: 'LSGS',    # Local Standard Global Standard 
         40: 'LSGD',    # Local Standard Global Deviant
-        50: 'LDGS',    # Local Deviant Global Standard
-        60: 'LDGD'     # Local Deviant Global Deviant
+        50: 'LDGD',    # Local Deviant Global Deviant
+        60: 'LDGS'     # Local Deviant Global Standard
     }
     
     return event_id_mapping
@@ -318,11 +318,11 @@ def compute_markers(epochs, output_file=None, apply_event_mapping=True, event_id
         PowerSpectralDensity(estimator=base_psd, fmin=1., fmax=45.,
                              normalize=True, comment='summary_se', dB = False),
         PowerSpectralDensitySummary(estimator=base_psd, fmin=1., fmax=45.,
-                                    percentile=.5, comment='summary_msf', dB = False),
+                                    percentile=.5, comment='summary_msf'),
         PowerSpectralDensitySummary(estimator=base_psd, fmin=1., fmax=45.,
-                                    percentile=.9, comment='summary_sef90', dB = False),
+                                    percentile=.9, comment='summary_sef90'),
         PowerSpectralDensitySummary(estimator=base_psd, fmin=1., fmax=45.,
-                                    percentile=.95, comment='summary_sef95', dB = False),
+                                    percentile=.95, comment='summary_sef95'),
         
         PermutationEntropy(tmin=None, tmax=0.6, backend='python'),
         
@@ -389,6 +389,7 @@ def main():
     
     args = parser.parse_args()
     
+    print('Here3')
     # Load epochs
     print(f"Loading epochs from: {args.input_file}")
     epochs = mne.read_epochs(args.input_file, preload=True)

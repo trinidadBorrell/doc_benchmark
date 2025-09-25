@@ -788,54 +788,90 @@ class GlobalAnalyzer:
         
         
         # 3. Mean norm_sq_error and correlation per marker
+        # Improved mean statistics per marker calculations
         mean_norm_sq_errors = []
         std_norm_sq_errors = []
         mean_correlations = []
         std_correlations = []
+        mean_normalized_diffs = []
+        std_normalized_diffs = []
         
         for marker_name in marker_names:
+            # Get data for this marker across all subjects
+            orig_vals = np.array(self.global_scalar_data['marker_data'][marker_name]['orig_vals'])
+            recon_vals = np.array(self.global_scalar_data['marker_data'][marker_name]['recon_vals'])
+            n_subjects = len(orig_vals)
+            
+            # 1. Norm Sq Error (using existing calculation)
             marker_norm_sq_errors = self.global_scalar_data['marker_data'][marker_name]['norm_sq_errors']
             mean_norm_sq_errors.append(np.mean(marker_norm_sq_errors))
-            std_norm_sq_errors.append(np.std(marker_norm_sq_errors))
+            # Standard error of the mean: std / sqrt(N)
+            std_norm_sq_errors.append(np.std(marker_norm_sq_errors, ddof=1) / np.sqrt(n_subjects) if n_subjects > 1 else 0)
             
-            # Calculate correlations per marker across subjects
-            orig_vals = self.global_scalar_data['marker_data'][marker_name]['orig_vals']
-            recon_vals = self.global_scalar_data['marker_data'][marker_name]['recon_vals']
-            corr_vals = [1 - abs((o - r) / (abs(o) + 1e-8)) for o, r in zip(orig_vals, recon_vals)]
-            mean_correlations.append(np.mean(corr_vals))
-            std_correlations.append(np.std(corr_vals))
+            # 2. Correlation calculation (proper Pearson correlation)
+            if np.std(orig_vals) > 1e-8 and np.std(recon_vals) > 1e-8:
+                corr_coeff = np.corrcoef(orig_vals, recon_vals)[0, 1]
+                # For multiple subjects, we have one correlation per marker
+                mean_correlations.append(corr_coeff)
+                std_correlations.append(0)  # Single correlation value per marker
+            else:
+                mean_correlations.append(0)
+                std_correlations.append(0)
+            
+            # 3. Normalized difference: |orig - recon| / mean(|orig|, |recon|)
+            normalized_diffs = []
+            for orig, recon in zip(orig_vals, recon_vals):
+                mean_abs_val = (abs(orig) + abs(recon)) / 2
+                if mean_abs_val > 1e-8:
+                    normalized_diffs.append(abs(orig - recon) / mean_abs_val)
+                else:
+                    normalized_diffs.append(0)
+            
+            mean_normalized_diffs.append(np.mean(normalized_diffs))
+            # Standard error of the mean: std / sqrt(N)
+            std_normalized_diffs.append(np.std(normalized_diffs, ddof=1) / np.sqrt(n_subjects) if n_subjects > 1 else 0)
         
-        # Increased height from 10 to 15
-        fig, axes = plt.subplots(2, 1, figsize=(20, 15))
+        # Create figure with 3 subplots
+        fig, axes = plt.subplots(3, 1, figsize=(20, 18))
         fig.suptitle('Mean Statistics per Marker Across Subjects', fontsize=16)
         
         x_pos = np.arange(len(marker_names))
         
-        # Mean Norm Sq Error plot
-        axes[0].plot(x_pos, mean_norm_sq_errors, 'o-', linewidth=2, markersize=6)
+        # 1. Mean Norm Sq Error plot
+        axes[0].plot(x_pos, mean_norm_sq_errors, 'o-', linewidth=2, markersize=6, color='red')
         axes[0].fill_between(x_pos, 
                            np.array(mean_norm_sq_errors) - np.array(std_norm_sq_errors), 
                            np.array(mean_norm_sq_errors) + np.array(std_norm_sq_errors), 
-                           alpha=0.3)
+                           alpha=0.3, color='red')
         axes[0].set_xlabel('Markers')
         axes[0].set_ylabel('Mean Norm Sq Error')
-        axes[0].set_title('Mean Norm Sq Error per Marker')
+        axes[0].set_title('Mean Norm Sq Error per Marker (±SEM)')
         axes[0].set_xticks(x_pos)
         axes[0].set_xticklabels(marker_names, rotation=45, ha='right')
         axes[0].grid(True, alpha=0.3)
         
-        # Mean correlation plot
+        # 2. Mean correlation plot
         axes[1].plot(x_pos, mean_correlations, 'o-', linewidth=2, markersize=6, color='green')
-        axes[1].fill_between(x_pos, 
-                           np.array(mean_correlations) - np.array(std_correlations), 
-                           np.array(mean_correlations) + np.array(std_correlations), 
-                           alpha=0.3, color='green')
         axes[1].set_xlabel('Markers')
-        axes[1].set_ylabel('Mean Correlation')
-        axes[1].set_title('Mean Correlation per Marker')
+        axes[1].set_ylabel('Pearson Correlation')
+        axes[1].set_title('Pearson Correlation (Original vs Reconstructed) per Marker')
         axes[1].set_xticks(x_pos)
         axes[1].set_xticklabels(marker_names, rotation=45, ha='right')
         axes[1].grid(True, alpha=0.3)
+        axes[1].set_ylim(-1, 1)  # Correlation range
+        
+        # 3. Mean normalized difference plot
+        axes[2].plot(x_pos, mean_normalized_diffs, 'o-', linewidth=2, markersize=6, color='blue')
+        axes[2].fill_between(x_pos, 
+                           np.array(mean_normalized_diffs) - np.array(std_normalized_diffs), 
+                           np.array(mean_normalized_diffs) + np.array(std_normalized_diffs), 
+                           alpha=0.3, color='blue')
+        axes[2].set_xlabel('Markers')
+        axes[2].set_ylabel('Mean Normalized Difference')
+        axes[2].set_title('Mean Normalized Difference |Orig-Recon|/Mean(|Orig|,|Recon|) per Marker (±SEM)')
+        axes[2].set_xticks(x_pos)
+        axes[2].set_xticklabels(marker_names, rotation=45, ha='right')
+        axes[2].grid(True, alpha=0.3)
         
         plt.tight_layout()
         plt.savefig(op.join(self.plots_dir, 'scalar_mean_stats_per_marker.png'), dpi=300, bbox_inches='tight')
@@ -855,9 +891,10 @@ class GlobalAnalyzer:
         marker_stats_data = pd.DataFrame({
             'Marker': marker_names,
             'Mean_Norm_Sq_Error': mean_norm_sq_errors,
-            'Std_Norm_Sq_Error': std_norm_sq_errors,
-            'Mean_Correlation': mean_correlations,
-            'Std_Correlation': std_correlations
+            'SEM_Norm_Sq_Error': std_norm_sq_errors,
+            'Pearson_Correlation': mean_correlations,
+            'Mean_Normalized_Difference': mean_normalized_diffs,
+            'SEM_Normalized_Difference': std_normalized_diffs
         })
         marker_stats_data.to_csv(op.join(self.data_dir, 'scalar_marker_statistics.csv'), index=False)
     
@@ -1344,22 +1381,42 @@ class GlobalAnalyzer:
                 info.set_montage(montage)
                 print(f"  ✅ Created biosemi128 montage for {n_channels} channels")
                 
+            elif n_channels == 256:
+                # Try EGI_256 first (most appropriate for your data), then fallback to biosemi256
+                try:
+                    montage = mne.channels.make_standard_montage('EGI_256')
+                    info = mne.create_info(montage.ch_names, 100, 'eeg')
+                    info.set_montage(montage)
+                    print(f"  ✅ Created EGI_256 montage for {n_channels} channels")
+                except:
+                    montage = mne.channels.make_standard_montage('biosemi256')
+                    info = mne.create_info(montage.ch_names, 100, 'eeg')
+                    info.set_montage(montage)
+                    print(f"  ✅ Created biosemi256 montage for {n_channels} channels")
+                
             elif n_channels <= 256:
                 # For other channel counts, try to use standard_1020 which has good coverage
                 montage = mne.channels.make_standard_montage('standard_1020')
-                # Take only the first n_channels
-                available_channels = montage.ch_names[:n_channels]
-                montage.ch_names = available_channels
                 
-                # Filter the dig points to match the selected channels
-                # Keep fiducials (first 3 points) and selected EEG channels
-                fiducials = montage.dig[:3]  # nasion, lpa, rpa
-                eeg_dig = montage.dig[3:3+n_channels]  # EEG channels
-                montage.dig = fiducials + eeg_dig
-                
-                info = mne.create_info(available_channels, 100, 'eeg')
-                info.set_montage(montage)
-                print(f"  ✅ Created standard_1020 montage for {n_channels} channels")
+                # Check if we have enough channels in the montage
+                if len(montage.ch_names) >= n_channels:
+                    # Take only the first n_channels
+                    available_channels = montage.ch_names[:n_channels]
+                    montage.ch_names = available_channels
+                    
+                    # Filter the dig points to match the selected channels
+                    # Keep fiducials (first 3 points) and selected EEG channels
+                    fiducials = montage.dig[:3]  # nasion, lpa, rpa
+                    eeg_dig = montage.dig[3:3+n_channels]  # EEG channels
+                    montage.dig = fiducials + eeg_dig
+                    
+                    info = mne.create_info(available_channels, 100, 'eeg')
+                    info.set_montage(montage)
+                    print(f"  ✅ Created standard_1020 montage for {n_channels} channels")
+                else:
+                    # Not enough channels in montage, fall back to spherical layout
+                    print(f"  ⚠️  standard_1020 montage has only {len(montage.ch_names)} channels, need {n_channels}")
+                    raise ValueError("Not enough channels in standard montage")
                 
             else:
                 raise ValueError(f"Unsupported channel count: {n_channels}")
@@ -1475,26 +1532,30 @@ class GlobalAnalyzer:
                 # Plot original
                 im1, _ = mne.viz.plot_topomap(orig_data, info, axes=axes[row, 0],
                                                  vlim=(data_min, data_max), 
-                                                 show=False, cmap='Blues')
+                                                 show=False, cmap='viridis')
+                # Set title for original plot
                 if len(marker_name) > 15:
-                    axes[row, 0].set_title(f'{marker_name[:15]}\n{marker_name[15:]} Original')
+                    title_orig = f'{marker_name[:15]}\n{marker_name[15:]} Original'
                 else:
-                    axes[row, 0].set_title(f'{marker_name}\nOriginal')
-                
-                # Plot reconstructed
+                    title_orig = f'{marker_name}\nOriginal'
+                axes[row, 0].set_title(title_orig)
+                    
+                    # Plot reconstructed
                 im2, _ = mne.viz.plot_topomap(recon_data, info, axes=axes[row, 1],
-                                             vlim=(data_min, data_max),
-                                             show=False, cmap='Blues')
+                                                 vlim=(data_min, data_max),
+                                                 show=False, cmap='viridis')
+                # Set title for reconstructed plot
                 if len(marker_name) > 15:
-                    axes[row, 1].set_title(f'{marker_name[:15]}\n{marker_name[15:]} Reconstructed')
+                    title_recon = f'{marker_name[:15]}\n{marker_name[15:]} Reconstructed'
                 else:
-                    axes[row, 1].set_title(f'{marker_name}\nReconstructed')
-                
-                # Plot difference (Original - Reconstructed) with symmetric scale
+                    title_recon = f'{marker_name}\nReconstructed'
+                axes[row, 1].set_title(title_recon)
+                    
+                    # Plot difference (Original - Reconstructed) with symmetric scale
                 im3, _ = mne.viz.plot_topomap(diff_data, info, axes=axes[row, 2],
-                                             vlim=(diff_symmetric_min, diff_symmetric_max),
-                                             show=False, cmap='RdBu_r')
-                #handle long marker names
+                                                 vlim=(diff_symmetric_min, diff_symmetric_max),
+                                                 show=False, cmap='viridis')
+                # Handle long marker names
                 if len(marker_name) > 15:
                     axes[row, 2].set_title(f'{marker_name[:15]}\n{marker_name[15:]} Difference')
                 else:
@@ -1503,7 +1564,7 @@ class GlobalAnalyzer:
                     # Plot difference again but with same scale as original/reconstructed
                 im4, _ = mne.viz.plot_topomap(diff_data, info, axes=axes[row, 3],
                                                  vlim=(data_min, data_max),
-                                                 show=False, cmap='Blues')
+                                                 show=False, cmap='viridis')
                 if len(marker_name) > 15:
                     axes[row, 3].set_title(f'{marker_name[:15]}\n{marker_name[15:]} Difference')
                 else:
@@ -1731,8 +1792,8 @@ class GlobalAnalyzer:
         max_pval_topo = np.ceil(np.max(topo_pvalue_matrix) * 10) / 10
         max_pval_overall = max(max_pval_scalar, max_pval_topo)
         
-        # Create figure
-        fig, axes = plt.subplots(2, 1, figsize=(max(12, n_subjects * 0.8), 8))
+        # Create figure - increased height
+        fig, axes = plt.subplots(2, 1, figsize=(max(12, n_subjects * 0.8), 12))
         fig.suptitle('Statistical Tests P-values: Subject-wise Analysis\n(Tests performed for each subject across all markers)', fontsize=16)
         
         # Scalar tests heatmap
@@ -1892,8 +1953,8 @@ class GlobalAnalyzer:
         max_pval_topo_marker = np.ceil(np.max(topo_marker_pvalue_matrix) * 10) / 10
         max_pval_marker_overall = max(max_pval_scalar_marker, max_pval_topo_marker)
         
-        # Create figure
-        fig, axes = plt.subplots(2, 1, figsize=(max(15, n_markers * 0.6), 10))
+        # Create figure - increased height
+        fig, axes = plt.subplots(2, 1, figsize=(max(15, n_markers * 0.6), 14))
         fig.suptitle('Statistical Tests P-values: Marker-wise Analysis\n(Tests performed for each marker across all subjects)', fontsize=16)
         
         # Scalar tests heatmap
@@ -1908,12 +1969,13 @@ class GlobalAnalyzer:
         axes[0].set_yticklabels(test_names)
         axes[0].grid(False)
         
-        # Add p-value text annotations (only if not too many markers)
-        if n_markers <= 20:
-            for i in range(len(test_names)):
-                for j in range(n_markers):
-                    text = axes[0].text(j, i, f'{scalar_marker_pvalue_matrix[i, j]:.3f}',
-                                       ha="center", va="center", color="black", fontsize=7)
+        # Add p-value text annotations
+        for i in range(len(test_names)):
+            for j in range(n_markers):
+                # Adjust font size based on number of markers
+                fontsize = max(6, min(9, 120 // n_markers))
+                axes[0].text(j, i, f'{scalar_marker_pvalue_matrix[i, j]:.3f}',
+                           ha="center", va="center", color="black", fontsize=fontsize)
         
         plt.colorbar(im1, ax=axes[0])
         
@@ -1929,12 +1991,13 @@ class GlobalAnalyzer:
         axes[1].set_yticklabels(test_names)
         axes[1].grid(False)
         
-        # Add p-value text annotations (only if not too many markers)
-        if n_markers <= 20:
-            for i in range(len(test_names)):
-                for j in range(n_markers):
-                    text = axes[1].text(j, i, f'{topo_marker_pvalue_matrix[i, j]:.3f}',
-                                       ha="center", va="center", color="black", fontsize=7)
+        # Add p-value text annotations
+        for i in range(len(test_names)):
+            for j in range(n_markers):
+                # Adjust font size based on number of markers
+                fontsize = max(6, min(9, 120 // n_markers))
+                axes[1].text(j, i, f'{topo_marker_pvalue_matrix[i, j]:.3f}',
+                           ha="center", va="center", color="black", fontsize=fontsize)
         
         plt.colorbar(im2, ax=axes[1])
         
