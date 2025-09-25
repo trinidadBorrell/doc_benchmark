@@ -243,12 +243,14 @@ class Pipeline:
             
             # Process original data
             self.logger.info(f"  Step 1: Computing markers from {original_file.name}")
+            print('Here1')
             if not self._run_command([
                 "python", str(self.src_dir / "markers/compute_doc_forest_markers_variable.py"),
                 str(original_file),
                 "--output", str(markers_dir / "markers_original.hdf5"),
                 "--plot"
             ]):
+                print('Here2')
                 return False
                 
             self.logger.info("  Step 2: Computing features from markers_original.hdf5")
@@ -659,11 +661,29 @@ class Pipeline:
             
         try:
             self.logger.debug(f"Running: {' '.join(cmd)}")
-            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
             
-            # Always show stdout for better debugging, not just in verbose mode
-            if result.stdout.strip():
-                self.logger.info(f"STDOUT: {result.stdout}")
+            # Use Popen for real-time output streaming
+            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, 
+                                     text=True, universal_newlines=True)
+            
+            # Stream stdout in real-time
+            while True:
+                output = process.stdout.readline()
+                if output == '' and process.poll() is not None:
+                    break
+                if output:
+                    self.logger.info(f">> {output.strip()}")
+            
+            # Wait for process to complete and get return code
+            return_code = process.poll()
+            
+            # Get any remaining stderr
+            stderr = process.stderr.read()
+            if stderr:
+                self.logger.error(f"STDERR: {stderr}")
+            
+            if return_code != 0:
+                raise subprocess.CalledProcessError(return_code, cmd)
                 
             return True
             
