@@ -1361,6 +1361,7 @@ class GlobalAnalyzer:
         
         # Create montage based on the number of channels
         try:
+            print(f"  !!!!!!!!Creating montage for {n_channels} channels")
             if n_channels == 64:
                 # Use biosemi64 montage which is specifically designed for 64 electrodes
                 montage = mne.channels.make_standard_montage('biosemi64')
@@ -1384,10 +1385,10 @@ class GlobalAnalyzer:
             elif n_channels == 256:
                 # Try EGI_256 first (most appropriate for your data), then fallback to biosemi256
                 try:
-                    montage = mne.channels.make_standard_montage('EGI_256')
-                    info = mne.create_info(montage.ch_names, 100, 'eeg')
+                    print(f"  Creating GSN-HydroCel-256 montage for {n_channels} channels")
+                    montage = mne.channels.make_standard_montage('GSN-HydroCel-256')
+                    info = mne.create_info(ch_names =montage.ch_names, sfreq =100, ch_types ='eeg')
                     info.set_montage(montage)
-                    print(f"  ✅ Created EGI_256 montage for {n_channels} channels")
                 except:
                     montage = mne.channels.make_standard_montage('biosemi256')
                     info = mne.create_info(montage.ch_names, 100, 'eeg')
@@ -1438,7 +1439,7 @@ class GlobalAnalyzer:
             montage_dict = dict(zip(ch_names, pos))
             montage = mne.channels.make_dig_montage(montage_dict, coord_frame='head')
             info.set_montage(montage)
-            print(f"  ✅ Created spherical layout montage for {n_channels} channels")
+            print(f"   Created spherical layout montage for {n_channels} channels")
         
         marker_names = [self.mapper.get_topo_name(i) for i in range(n_markers)]
         
