@@ -129,7 +129,7 @@ def get_electrode_mapping(n_channels):
     
     # Standard mappings for common electrode configurations
     if n_channels == 256:  # EGI 256-channel system
-        scalp_roi = np.arange(224)
+        scalp_roi = np.arange(224) #
         non_scalp = np.arange(224, 256)
         cnv_roi = np.array([5, 6, 13, 14, 15, 21, 22])
         mmn_roi = np.array([5, 6, 8, 13, 14, 15, 21, 22, 44, 80, 131, 185])

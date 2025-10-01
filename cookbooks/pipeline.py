@@ -336,41 +336,38 @@ class Pipeline:
             patient_labels_path = self.metadata_dir / "patient_labels_with_controls.csv"
             
             if not patient_labels_path.exists():
-                # Fallback to old path structure
-                patient_labels_path = self.src_dir.parent / "metadata" / "patient_labels_with_controls.csv"
-                
-            if not patient_labels_path.exists():
                 self.logger.error(f"Patient labels file not found at: {patient_labels_path}")
+                self.logger.error(f"Please check that the file exists and the --metadata-dir path is correct")
+                self.logger.info(f"Looking for: patient_labels_with_controls.csv")
+                self.logger.info(f"In directory: {self.metadata_dir}")
                 return False
             
             self.logger.info(f"Using patient labels: {patient_labels_path}")
             
-            # Train models for different configurations
-            configurations = [
-                ("scalar", "original"),
-                ("scalar", "reconstructed"),
-                ("topo", "original"), 
-                ("topo", "reconstructed")
-            ]
+            # Train cross-data models for different marker types
+            marker_types = ["scalar", "topo"]
             
             success = True
-            for marker_type, data_origin in configurations:
-                self.logger.info(f"Training {marker_type} {data_origin} model...")
+            for marker_type in marker_types:
+                self.logger.info(f"Training cross-data {marker_type} models...")
                 
-                config_output_dir = models_output_dir / f"{marker_type}_{data_origin}"
+                config_output_dir = models_output_dir / f"{marker_type}"
                 
+                # Use the new cross-data classification which trains both models and tests on both test sets
                 if not self._run_command([
                     "python", str(self.src_dir / "model/extratrees.py"),
                     "--data-dir", str(self.results_dir / "SUBJECTS"),
                     "--patient-labels", str(patient_labels_path),
                     "--output-dir", str(config_output_dir),
                     "--marker-type", marker_type,
-                    "--data-origin", data_origin
+                    "--cross-data"  # This tells the script to use CrossDataClassifier
                 ]):
-                    self.logger.error(f"Failed to train {marker_type} {data_origin} model")
+                    self.logger.error(f"Failed to train cross-data {marker_type} models")
                     success = False
                 else:
-                    self.logger.info(f"✓ {marker_type} {data_origin} model completed")
+                    self.logger.info(f"✓ Cross-data {marker_type} models completed")
+                    self.logger.info(f"   - Model A (original) trained and tested on both test sets")
+                    self.logger.info(f"   - Model B (reconstructed) trained and tested on both test sets")
             
             if success:
                 self.logger.info("✓ Global models training completed")
@@ -448,7 +445,13 @@ class Pipeline:
         try:
             self.logger.info("Running global analysis")
             
-            patient_labels_path = self.metadata_dir.parent / "metadata" / "patient_labels_with_controls.csv"
+            patient_labels_path = self.metadata_dir / "patient_labels_with_controls.csv"
+            
+            if not patient_labels_path.exists():
+                self.logger.error(f"Patient labels file not found at: {patient_labels_path}")
+                self.logger.error(f"Please check that the file exists and the --metadata-dir path is correct")
+                return False
+            
             global_output_dir = self.results_dir / "GLOBAL" / f"global_results_{datetime.now().strftime('%Y-%m-%d_%H%M%S')}"
             global_output_dir.mkdir(parents=True, exist_ok=True)
             results_dir = self.results_dir / "SUBJECTS"
