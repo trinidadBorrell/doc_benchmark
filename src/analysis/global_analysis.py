@@ -38,15 +38,15 @@ sns.set_palette("husl")
 COLOR = "black"
 plt.rcParams.update(
     {
-        "figure.dpi": 100,
+        "figure.dpi": 120,
         "figure.figsize": (14, 9),
         "font.family": "serif",
         "mathtext.fontset": "cm",
         "axes.grid": True,
-        "legend.fontsize": 14,
+        "legend.fontsize": "medium",
         "legend.title_fontsize": 18,
         "axes.titlesize": 18,
-        "axes.labelsize": 16,
+        "axes.labelsize": "large",
         "ytick.labelsize": 12,
         "xtick.labelsize": 12,
         # colour‑consistent theme
@@ -636,6 +636,31 @@ class GlobalAnalyzer:
             self.global_topo_data['nmses'].append(topo_metrics['nmse'])
             self.global_topo_data['nrmses'].append(topo_metrics['nrmse'])
             self.global_topo_data['cosine_similarities'].append(topo_metrics['cosine_similarity'])
+        
+        # Collect time series error data (MSE/MAE per trial and sensor)
+        self.global_timeseries_error_data = {
+            'subjects': subjects,
+            'mses': [],
+            'maes': [],
+            'mse_stds': [],
+            'mae_stds': []
+        }
+        
+        for subject_id in subjects:
+            data = self.subjects_data[subject_id]
+            # Check if time series error metrics exist
+            if 'timeseries_error_metrics' in data['summary'] and data['summary']['timeseries_error_metrics'] is not None:
+                ts_metrics = data['summary']['timeseries_error_metrics']['overall']
+                self.global_timeseries_error_data['mses'].append(ts_metrics['mse'])
+                self.global_timeseries_error_data['maes'].append(ts_metrics['mae'])
+                self.global_timeseries_error_data['mse_stds'].append(ts_metrics.get('mse_std', 0))
+                self.global_timeseries_error_data['mae_stds'].append(ts_metrics.get('mae_std', 0))
+            else:
+                print(f"     ⚠️  No time series error metrics for {subject_id}")
+                self.global_timeseries_error_data['mses'].append(np.nan)
+                self.global_timeseries_error_data['maes'].append(np.nan)
+                self.global_timeseries_error_data['mse_stds'].append(np.nan)
+                self.global_timeseries_error_data['mae_stds'].append(np.nan)
             
             # Reconstruct topographic arrays from per-marker data
             # IMPORTANT: Use MarkerNameMapper order, NOT sorted order to maintain consistency
@@ -831,47 +856,24 @@ class GlobalAnalyzer:
             # Standard error of the mean: std / sqrt(N)
             std_normalized_diffs.append(np.std(normalized_diffs, ddof=1) / np.sqrt(n_subjects) if n_subjects > 1 else 0)
         
-        # Create figure with 3 subplots
-        fig, axes = plt.subplots(3, 1, figsize=(20, 18))
-        fig.suptitle('Mean Statistics per Marker Across Subjects', fontsize=16)
+        # Create figure with single subplot - Mean Normalized Difference only
+        fig, ax = plt.subplots(1, 1, figsize=(20, 8))
+        fig.suptitle('Mean Normalized Difference per Marker Across Subjects', fontsize=16)
         
         x_pos = np.arange(len(marker_names))
         
-        # 1. Mean Norm Sq Error plot
-        axes[0].plot(x_pos, mean_norm_sq_errors, 'o-', linewidth=2, markersize=6, color='red')
-        axes[0].fill_between(x_pos, 
-                           np.array(mean_norm_sq_errors) - np.array(std_norm_sq_errors), 
-                           np.array(mean_norm_sq_errors) + np.array(std_norm_sq_errors), 
-                           alpha=0.3, color='red')
-        axes[0].set_xlabel('Markers')
-        axes[0].set_ylabel('Mean Norm Sq Error')
-        axes[0].set_title('Mean Norm Sq Error per Marker (±SEM)')
-        axes[0].set_xticks(x_pos)
-        axes[0].set_xticklabels(marker_names, rotation=45, ha='right')
-        axes[0].grid(True, alpha=0.3)
-        
-        # 2. Mean correlation plot
-        axes[1].plot(x_pos, mean_correlations, 'o-', linewidth=2, markersize=6, color='green')
-        axes[1].set_xlabel('Markers')
-        axes[1].set_ylabel('Pearson Correlation')
-        axes[1].set_title('Pearson Correlation (Original vs Reconstructed) per Marker')
-        axes[1].set_xticks(x_pos)
-        axes[1].set_xticklabels(marker_names, rotation=45, ha='right')
-        axes[1].grid(True, alpha=0.3)
-        axes[1].set_ylim(-1, 1)  # Correlation range
-        
-        # 3. Mean normalized difference plot
-        axes[2].plot(x_pos, mean_normalized_diffs, 'o-', linewidth=2, markersize=6, color='blue')
-        axes[2].fill_between(x_pos, 
-                           np.array(mean_normalized_diffs) - np.array(std_normalized_diffs), 
-                           np.array(mean_normalized_diffs) + np.array(std_normalized_diffs), 
-                           alpha=0.3, color='blue')
-        axes[2].set_xlabel('Markers')
-        axes[2].set_ylabel('Mean Normalized Difference')
-        axes[2].set_title('Mean Normalized Difference |Orig-Recon|/Mean(|Orig|,|Recon|) per Marker (±SEM)')
-        axes[2].set_xticks(x_pos)
-        axes[2].set_xticklabels(marker_names, rotation=45, ha='right')
-        axes[2].grid(True, alpha=0.3)
+        # Mean normalized difference plot
+        ax.plot(x_pos, mean_normalized_diffs, 'o-', linewidth=2, markersize=6, color='blue')
+        ax.fill_between(x_pos, 
+                        np.array(mean_normalized_diffs) - np.array(std_normalized_diffs), 
+                        np.array(mean_normalized_diffs) + np.array(std_normalized_diffs), 
+                        alpha=0.3, color='blue')
+        ax.set_xlabel('Markers')
+        ax.set_ylabel('Mean Normalized Difference')
+        ax.set_title('Mean Normalized Difference |Orig-Recon|/Mean(|Orig|,|Recon|) per Marker (±SEM)')
+        ax.set_xticks(x_pos)
+        ax.set_xticklabels(marker_names, rotation=45, ha='right')
+        ax.grid(True, alpha=0.3)
         
         plt.tight_layout()
         plt.savefig(op.join(self.plots_dir, 'scalar_mean_stats_per_marker.png'), dpi=300, bbox_inches='tight')
@@ -1328,6 +1330,108 @@ class GlobalAnalyzer:
         })
         topo_summary_data.to_csv(op.join(self.data_dir, 'topo_global_summary.csv'), index=False)
     
+    def create_timeseries_error_plots(self):
+        """Create global time series error (MSE/MAE) plots."""
+        print("Creating global time series error plots...")
+        
+        subjects = self.global_timeseries_error_data['subjects']
+        mses = np.array(self.global_timeseries_error_data['mses'])
+        maes = np.array(self.global_timeseries_error_data['maes'])
+        
+        # Remove NaN values for statistics
+        valid_mask = ~(np.isnan(mses) | np.isnan(maes))
+        if not np.any(valid_mask):
+            print("  ⚠️  No valid time series error data found. Skipping plots.")
+            return
+        
+        valid_subjects = [s for s, v in zip(subjects, valid_mask) if v]
+        valid_mses = mses[valid_mask]
+        valid_maes = maes[valid_mask]
+        
+        # Create figure with 2 subplots
+        fig, axes = plt.subplots(1, 2, figsize=(18, 6))
+        state_suffix = f" - State: {self.target_state}" if self.target_state else ""
+        fig.suptitle(f'Time Series Error Analysis Across Subjects{state_suffix}', fontsize=16, fontweight='bold')
+        
+        x_pos = np.arange(len(valid_subjects))
+        
+        # MSE plot
+        mean_mse = np.mean(valid_mses)
+        std_mse = np.std(valid_mses, ddof=1) if len(valid_mses) > 1 else 0
+        
+        axes[0].bar(x_pos, valid_mses, color='steelblue', alpha=0.7, edgecolor='black')
+        axes[0].axhline(y=mean_mse, color='red', linestyle='--', linewidth=2, 
+                       label=f'Mean: {mean_mse:.6f}', alpha=0.7)
+        axes[0].axhline(y=mean_mse + std_mse, color='gray', linestyle=':', alpha=0.5, label='±1 STD')
+        axes[0].axhline(y=mean_mse - std_mse, color='gray', linestyle=':', alpha=0.5)
+        axes[0].set_xlabel('Subject ID', fontsize=12)
+        axes[0].set_ylabel('MSE', fontsize=12)
+        axes[0].set_title(f'MSE per Subject\n(Mean: {mean_mse:.6f} ± {std_mse:.6f})', fontsize=14)
+        axes[0].set_xticks(x_pos)
+        axes[0].set_xticklabels(valid_subjects, rotation=45, ha='right')
+        axes[0].legend(fontsize=10)
+        axes[0].grid(True, alpha=0.3, axis='y')
+        
+        # MAE plot
+        mean_mae = np.mean(valid_maes)
+        std_mae = np.std(valid_maes, ddof=1) if len(valid_maes) > 1 else 0
+        
+        axes[1].bar(x_pos, valid_maes, color='coral', alpha=0.7, edgecolor='black')
+        axes[1].axhline(y=mean_mae, color='red', linestyle='--', linewidth=2, 
+                       label=f'Mean: {mean_mae:.6f}', alpha=0.7)
+        axes[1].axhline(y=mean_mae + std_mae, color='gray', linestyle=':', alpha=0.5, label='±1 STD')
+        axes[1].axhline(y=mean_mae - std_mae, color='gray', linestyle=':', alpha=0.5)
+        axes[1].set_xlabel('Subject ID', fontsize=12)
+        axes[1].set_ylabel('MAE', fontsize=12)
+        axes[1].set_title(f'MAE per Subject\n(Mean: {mean_mae:.6f} ± {std_mae:.6f})', fontsize=14)
+        axes[1].set_xticks(x_pos)
+        axes[1].set_xticklabels(valid_subjects, rotation=45, ha='right')
+        axes[1].legend(fontsize=10)
+        axes[1].grid(True, alpha=0.3, axis='y')
+        
+        plt.tight_layout()
+        plt.savefig(op.join(self.plots_dir, 'timeseries_error_global_mse_mae.png'), dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        print(f"  ✅ Saved time series error plots")
+        
+        # Save summary data to CSV
+        ts_error_summary_data = pd.DataFrame({
+            'Subject': valid_subjects,
+            'MSE': valid_mses,
+            'MAE': valid_maes
+        })
+        ts_error_summary_data.to_csv(op.join(self.data_dir, 'timeseries_error_global_summary.csv'), index=False)
+        
+        # Save overall statistics to JSON
+        ts_error_stats = {
+            'overall_statistics': {
+                'mse_mean': float(mean_mse),
+                'mse_std': float(std_mse),
+                'mse_min': float(np.min(valid_mses)),
+                'mse_max': float(np.max(valid_mses)),
+                'mae_mean': float(mean_mae),
+                'mae_std': float(std_mae),
+                'mae_min': float(np.min(valid_maes)),
+                'mae_max': float(np.max(valid_maes)),
+                'n_subjects': len(valid_subjects)
+            },
+            'per_subject': {
+                subj: {
+                    'mse': float(mse_val),
+                    'mae': float(mae_val)
+                }
+                for subj, mse_val, mae_val in zip(valid_subjects, valid_mses, valid_maes)
+            }
+        }
+        
+        with open(op.join(self.data_dir, 'timeseries_error_statistics.json'), 'w') as f:
+            json.dump(ts_error_stats, f, indent=2)
+        
+        print(f"  💾 Saved time series error statistics to JSON")
+        print(f"     📊 Overall MSE: {mean_mse:.6f} ± {std_mse:.6f}")
+        print(f"     📊 Overall MAE: {mean_mae:.6f} ± {std_mae:.6f}")
+    
     def create_mne_topomap_plots(self):
         """Create MNE topographic plots for original, reconstructed, and NMSE data."""
         if not HAS_MNE:
@@ -1341,9 +1445,17 @@ class GlobalAnalyzer:
         n_markers = self.global_topo_data['n_markers']
         n_channels = self.global_topo_data['n_channels']
         
-        # Convert to numpy arrays
-        topos_orig_all = np.array(self.global_topo_data['topos_orig_all'])  # (n_subjects, n_markers, n_channels)
-        topos_recon_all = np.array(self.global_topo_data['topos_recon_all'])
+        # Convert to numpy arrays - handle potentially inhomogeneous shapes
+        try:
+            topos_orig_all = np.array(self.global_topo_data['topos_orig_all'])  # (n_subjects, n_markers, n_channels)
+            topos_recon_all = np.array(self.global_topo_data['topos_recon_all'])
+        except ValueError as e:
+            # Handle inhomogeneous shapes (different markers per subject)
+            print(f"  ⚠️  Warning: Subjects have different numbers of markers or channels")
+            print(f"  Cannot create topomap plots with inconsistent data shapes")
+            print(f"  Error: {e}")
+            print(f"  Skipping MNE topomap plots...")
+            return
         
         # Calculate mean across subjects for each marker
         topos_orig_mean = np.mean(topos_orig_all, axis=0)  # (n_markers, n_channels)
@@ -1387,11 +1499,11 @@ class GlobalAnalyzer:
                 try:
                     print(f"  Creating GSN-HydroCel-256 montage for {n_channels} channels")
                     montage = mne.channels.make_standard_montage('GSN-HydroCel-256')
-                    info = mne.create_info(ch_names =montage.ch_names, sfreq =100, ch_types ='eeg')
+                    info = mne.create_info(ch_names =montage.ch_names, sfreq =250, ch_types ='eeg')
                     info.set_montage(montage)
                 except:
                     montage = mne.channels.make_standard_montage('biosemi256')
-                    info = mne.create_info(montage.ch_names, 100, 'eeg')
+                    info = mne.create_info(montage.ch_names, 250, 'eeg')
                     info.set_montage(montage)
                     print(f"  ✅ Created biosemi256 montage for {n_channels} channels")
                 
@@ -1534,6 +1646,7 @@ class GlobalAnalyzer:
                 im1, _ = mne.viz.plot_topomap(orig_data, info, axes=axes[row, 0],
                                                  vlim=(data_min, data_max), 
                                                  show=False, cmap='viridis')
+                    
                 # Set title for original plot
                 if len(marker_name) > 15:
                     title_orig = f'{marker_name[:15]}\n{marker_name[15:]} Original'
@@ -2040,14 +2153,18 @@ class GlobalAnalyzer:
         self.create_scalar_global_plots()
         # self.create_topographic_global_plots()  # Commented out for now
         
+        # Create time series error plots
+        self.create_timeseries_error_plots()
+        
         # Create MNE topographic plots
         self.create_mne_topomap_plots()
         
-        # Create statistical tests plots
-        self.create_statistical_tests_plots()
+        # Create statistical tests plots - DISABLED (moved to statistical_analysis.py)
+        # self.create_statistical_tests_plots()
         
-        # Statistical tests
-        stats_results = self.global_statistical_tests()
+        # Statistical tests - DISABLED (moved to statistical_analysis.py)
+        # stats_results = self.global_statistical_tests()
+        stats_results = None  # Statistical tests moved to statistical_analysis.py
         
         # Summary
         print("\n" + "=" * 60)

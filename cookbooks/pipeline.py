@@ -17,7 +17,7 @@ Usage:
     python pipeline.py --all --markers-only --metadata-dir /path/to/metadata --data-dir /path/to/fifdata               # Only compute markers
     python pipeline.py --analysis-only --metadata-dir /path/to/metadata --data-dir /path/to/fifdata                    # Only run analysis on existing results
 
-     python pipeline.py --subject AD023 --metadata-dir /Users/trinidad.borrell/Documents/Work/PhD/Proyects/nice/doc_a_data/metadata --data-dir /Users/trinidad.borrell/Documents/Work/PhD/data/TOTEM/zero_shot_data/fifdata/fifdata
+    python pipeline.py --subject AD023 --metadata-dir /Users/trinidad.borrell/Documents/Work/PhD/Proyects/nice/doc_a_data/metadata --data-dir /Users/trinidad.borrell/Documents/Work/PhD/data/TOTEM/zero_shot_data/fifdata/fifdata
 Authors: Trinidad Borrell <trinidad.borrell@gmail.com>
 """
 
@@ -43,7 +43,8 @@ class Pipeline:
                  metadata_dir: str,
                  batch_size: int = 1,
                  verbose: bool = False,
-                 dry_run: bool = False):
+                 dry_run: bool = False,
+                 skip_smi: bool = False):
         """
         Initialize the pipeline.
         
@@ -55,23 +56,38 @@ class Pipeline:
             Path to save results
         src_dir : str
             Path to the source code directory
+        metadata_dir : str
+            Path to metadata directory
         batch_size : int
             Number of parallel processes
         verbose : bool
             Enable verbose logging
         dry_run : bool
             Show what would be done without executing
+        skip_smi : bool
+            Skip SymbolicMutualInformation computation (recommended for large datasets)
         """
         self.data_dir = Path(data_dir)
         self.results_dir = Path(results_dir)
         self.src_dir = Path(src_dir)
         self.metadata_dir = Path(metadata_dir)
-        self.batch_size = min(batch_size, max(1, multiprocessing.cpu_count() - 1))
+        
+        # Determine optimal batch size
+        max_workers = max(1, multiprocessing.cpu_count() - 1)
+        self.batch_size = min(batch_size, max_workers)
+        
         self.verbose = verbose
         self.dry_run = dry_run
+        self.skip_smi = skip_smi
         
-        # Setup logging
+        # Setup logging (must come before using self.logger)
         self._setup_logging()
+        
+        # Log parallelization info
+        if self.batch_size > 1:
+            self.logger.info(f"🚀 Parallel processing enabled: {self.batch_size} workers (CPU cores: {multiprocessing.cpu_count()})")
+        else:
+            self.logger.info(f"⚙️  Sequential processing (use --batch-size N for parallel processing)")
         
         # Validate directories
         self._validate_directories()
@@ -118,8 +134,10 @@ class Pipeline:
             "markers/compute_doc_forest_markers_variable.py",
             "markers/compute_doc_forest_features_variable.py",
             "model/extratrees.py",
-            "analysis/compare_markers.py",
-            "analysis/global_analysis.py"
+            "analysis/individual_analysis.py",
+            "analysis/global_analysis.py",
+            "analysis/statistical_analysis.py",
+            "decoder/decoder.py"
         ]
         
         missing_files = []
@@ -243,14 +261,15 @@ class Pipeline:
             
             # Process original data
             self.logger.info(f"  Step 1: Computing markers from {original_file.name}")
-            print('Here1')
-            if not self._run_command([
+            cmd = [
                 "python", str(self.src_dir / "markers/compute_doc_forest_markers_variable.py"),
                 str(original_file),
                 "--output", str(markers_dir / "markers_original.hdf5"),
                 "--plot"
-            ]):
-                print('Here2')
+            ]
+            if self.skip_smi:
+                cmd.append("--skip-smi")
+            if not self._run_command(cmd):
                 return False
                 
             self.logger.info("  Step 2: Computing features from markers_original.hdf5")
@@ -265,12 +284,15 @@ class Pipeline:
             
             # Process reconstructed data
             self.logger.info(f"  Step 3: Computing markers from {recon_file.name}")
-            if not self._run_command([
+            cmd = [
                 "python", str(self.src_dir / "markers/compute_doc_forest_markers_variable.py"),
                 str(recon_file),
                 "--output", str(markers_dir / "markers_reconstructed.hdf5"),
                 "--plot"
-            ]):
+            ]
+            if self.skip_smi:
+                cmd.append("--skip-smi")
+            if not self._run_command(cmd):
                 return False
                 
             self.logger.info("  Step 4: Computing features from markers_reconstructed.hdf5")
@@ -398,8 +420,8 @@ class Pipeline:
         """
         try:
             results_dir = self.results_dir / "SUBJECTS" / f"sub-{subject_id}" / session 
-            compare_dir = results_dir / "compare_markers"
-            compare_dir.mkdir(parents=True, exist_ok=True)
+            analysis_dir = results_dir / "individual_analysis"
+            analysis_dir.mkdir(parents=True, exist_ok=True)
             
             # Check if required feature files exist
             features_dir = results_dir / "features_variable"
@@ -418,11 +440,15 @@ class Pipeline:
             
             self.logger.info(f"Running analysis for {subject_id}/{session}")
             
-            # Run marker comparison
+            # Get the fif data directory for GFP analysis
+            fif_data_dir = self.data_dir / f"sub-{subject_id}" / session
+            
+            # Run individual analysis (replaces compare_markers.py)
             if not self._run_command([
-                "python", str(self.src_dir / "analysis/compare_markers.py"),
+                "python", str(self.src_dir / "analysis/individual_analysis.py"),
                 str(results_dir),
-                "--output", str(compare_dir)
+                str(fif_data_dir),
+                "--output", str(analysis_dir)
             ]):
                 return False
             
@@ -431,6 +457,44 @@ class Pipeline:
             
         except Exception as e:
             self.logger.error(f"✗ Analysis failed for {subject_id}/{session}: {e}")
+            return False
+    
+    def run_decoder_phase(self) -> bool:
+        """
+        Run decoder phase across all processed subjects.
+        This decodes original vs reconstructed EEG data.
+        
+        Returns
+        -------
+        bool
+            True if successful, False otherwise
+        """
+        try:
+            self.logger.info("Running decoder analysis")
+            
+            # Create decoder output directory
+            decoder_output_dir = self.results_dir / "DECODER" / f"decoder_results_{datetime.now().strftime('%Y-%m-%d_%H%M%S')}"
+            decoder_output_dir.mkdir(parents=True, exist_ok=True)
+            
+            self.logger.info(f"Decoder output directory: {decoder_output_dir}")
+            
+            # Run decoder on all available subjects for robust population-level analysis
+            # Memory optimization: decoder now uses float32 and n_jobs=1
+            if not self._run_command([
+                "python", str(self.src_dir / "decoder/decoder.py"),
+                "--main_path", str(self.data_dir),
+                "--output_dir", str(decoder_output_dir),
+                "--cv", "3",
+                "--n_jobs", "1",  # Avoid memory multiplication from parallelization
+                "--verbose"
+            ]):
+                return False
+            
+            self.logger.info("✓ Decoder analysis completed")
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"✗ Decoder analysis failed: {e}")
             return False
     
     def run_global_analysis(self) -> bool:
@@ -469,6 +533,44 @@ class Pipeline:
             
         except Exception as e:
             self.logger.error(f"✗ Global analysis failed: {e}")
+            return False
+    
+    def run_statistical_analysis(self) -> bool:
+        """
+        Run statistical analysis across all processed subjects.
+        
+        Returns
+        -------
+        bool
+            True if successful, False otherwise
+        """
+        try:
+            self.logger.info("Running statistical analysis")
+            
+            patient_labels_path = self.metadata_dir / "patient_labels_with_controls.csv"
+            
+            if not patient_labels_path.exists():
+                self.logger.error(f"Patient labels file not found at: {patient_labels_path}")
+                self.logger.error(f"Please check that the file exists and the --metadata-dir path is correct")
+                return False
+            
+            stats_output_dir = self.results_dir / "STATISTICS" / f"statistics_results_{datetime.now().strftime('%Y-%m-%d_%H%M%S')}"
+            stats_output_dir.mkdir(parents=True, exist_ok=True)
+            results_dir = self.results_dir / "SUBJECTS"
+            
+            if not self._run_command([
+                "python", str(self.src_dir / "analysis/statistical_analysis.py"),
+                "--results-dir", str(results_dir),
+                "--output-dir", str(stats_output_dir),
+                "--patient-labels", str(patient_labels_path)
+            ]):
+                return False
+            
+            self.logger.info("✓ Statistical analysis completed")
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"✗ Statistical analysis failed: {e}")
             return False
     
     def process_subject(self, subject_id: str, session: str, 
@@ -515,11 +617,11 @@ class Pipeline:
             if skip_analysis:
                 self.logger.info(f"Skipping analysis for {subject_id}/{session}")
         
+        # Don't modify instance variables here - will be handled by caller
+        # This is important for parallel processing
         if success:
-            self.completed_subjects.append((subject_id, session))
             self.logger.info(f"✓ Completed {subject_id}/{session}")
         else:
-            self.failed_subjects.append((subject_id, session))
             self.logger.error(f"✗ Failed {subject_id}/{session}")
             
         return success
@@ -528,14 +630,18 @@ class Pipeline:
                     skip_markers: bool = False,
                     skip_models: bool = False,
                     skip_analysis: bool = False,
-                    skip_global: bool = False) -> dict:
+                    skip_decoder: bool = False,
+                    skip_global: bool = False,
+                    skip_statistics: bool = False) -> dict:
         """
         Run the complete pipeline for multiple subjects.
         
         Pipeline order:
         1. Individual subject processing (markers + analysis)
-        2. Global analysis
-        3. Model training
+        2. Decoder analysis
+        3. Global analysis
+        4. Statistical analysis
+        5. Model training
 
         Parameters
         ----------
@@ -547,8 +653,12 @@ class Pipeline:
             Skip global models training phase
         skip_analysis : bool
             Skip individual analysis phase
+        skip_decoder : bool
+            Skip decoder analysis phase
         skip_global : bool
             Skip global analysis phase
+        skip_statistics : bool
+            Skip statistical analysis phase
             
         Returns
         -------
@@ -568,17 +678,31 @@ class Pipeline:
             self.logger.info("DRY RUN MODE - No actual processing")
             return {"status": "dry_run", "subjects": subjects}
         
-        # Process subjects
+        # Phase 1: Process subjects
         if self.batch_size > 1:
             self._run_parallel(subjects, skip_markers, skip_models, skip_analysis)
         else:
             self._run_sequential(subjects, skip_markers, skip_models, skip_analysis)
 
-        # Phase 2: Global Analysis  
+        # Phase 2: Decoder Analysis
+        if not skip_decoder and self.completed_subjects:
+            self.logger.info("Starting decoder analysis phase...")
+            decoder_success = self.run_decoder_phase()
+            if not decoder_success:
+                self.logger.error("Decoder analysis failed")
+
+        # Phase 3: Global Analysis  
         if not skip_global and self.completed_subjects:
             self.run_global_analysis()
         
-        # Phase 3: Models Training (run even if some subjects failed, as long as we have enough data)
+        # Phase 4: Statistical Analysis (after global)
+        if not skip_statistics and self.completed_subjects:
+            self.logger.info("Starting statistical analysis phase...")
+            stats_success = self.run_statistical_analysis()
+            if not stats_success:
+                self.logger.error("Statistical analysis failed")
+        
+        # Phase 5: Models Training (run even if some subjects failed, as long as we have enough data)
         if not skip_models:
             self.logger.info("Starting global models training phase...")
             models_success = self.run_models_phase()
@@ -642,7 +766,13 @@ class Pipeline:
         
         for i, (subject_id, session) in enumerate(subjects, 1):
             self.logger.info(f"Progress: {i}/{len(subjects)}")
-            self.process_subject(subject_id, session, skip_markers, skip_models, skip_analysis)
+            success = self.process_subject(subject_id, session, skip_markers, skip_models, skip_analysis)
+            
+            # Track completed/failed subjects
+            if success:
+                self.completed_subjects.append((subject_id, session))
+            else:
+                self.failed_subjects.append((subject_id, session))
     
     def _run_command(self, cmd: List[str]) -> bool:
         """
@@ -665,11 +795,11 @@ class Pipeline:
         try:
             self.logger.debug(f"Running: {' '.join(cmd)}")
             
-            # Use Popen for real-time output streaming
-            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, 
-                                     text=True, universal_newlines=True)
+            # Use Popen with stderr redirected to stdout to avoid deadlock
+            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, 
+                                     text=True, universal_newlines=True, bufsize=1)
             
-            # Stream stdout in real-time
+            # Stream output in real-time
             while True:
                 output = process.stdout.readline()
                 if output == '' and process.poll() is not None:
@@ -678,12 +808,7 @@ class Pipeline:
                     self.logger.info(f">> {output.strip()}")
             
             # Wait for process to complete and get return code
-            return_code = process.poll()
-            
-            # Get any remaining stderr
-            stderr = process.stderr.read()
-            if stderr:
-                self.logger.error(f"STDERR: {stderr}")
+            return_code = process.wait()
             
             if return_code != 0:
                 raise subprocess.CalledProcessError(return_code, cmd)
@@ -735,21 +860,33 @@ Examples:
     phase_group.add_argument('--markers-only', action='store_true',
                             help='Only run markers computation')
     phase_group.add_argument('--analysis-only', action='store_true',
-                            help='Only run analysis')
+                            help='Only run analysis (markers + individual analysis)')
+    phase_group.add_argument('--individual-analysis-only', action='store_true',
+                            help='Only run individual analysis (requires existing markers)')
+    phase_group.add_argument('--decoder-only', action='store_true',
+                            help='Only run decoder analysis')
     phase_group.add_argument('--global-only', action='store_true',
                             help='Only run global analysis')
     phase_group.add_argument('--models-only', action='store_true',
                             help='Only run model training')
+    phase_group.add_argument('--statistics-only', action='store_true',
+                            help='Only run statistical analysis')
     
     # Individual phase skipping
     parser.add_argument('--skip-markers', action='store_true',
                        help='Skip markers computation phase')
     parser.add_argument('--skip-analysis', action='store_true',
                        help='Skip analysis phase')
+    parser.add_argument('--skip-decoder', action='store_true',
+                       help='Skip decoder analysis phase')
     parser.add_argument('--skip-global', action='store_true',
                        help='Skip global analysis')
+    parser.add_argument('--skip-statistics', action='store_true',
+                       help='Skip statistical analysis phase')
     parser.add_argument('--skip-models', action='store_true', 
                        help='Skip model training phase')
+    parser.add_argument('--skip-smi', action='store_true',
+                       help='Skip SymbolicMutualInformation computation (recommended for large datasets)')
     
     # Configuration
     parser.add_argument('--data-dir', 
@@ -765,8 +902,8 @@ Examples:
                        required=True,
                        help='Path to metadata directory')
 
-    parser.add_argument('--batch-size', type=int, default=1,
-                       help='Number of parallel processes')
+    parser.add_argument('--batch-size', type=int, default=4,
+                       help='Number of parallel processes (default: 4)')
     
     # Other options
     parser.add_argument('--verbose', '-v', action='store_true',
@@ -788,53 +925,70 @@ Examples:
         subject_args = [f"RANDOM:{args.random}"]
     
     # Handle phase-only modes
-    skip_markers = args.skip_markers or args.models_only or args.analysis_only or args.global_only
-    skip_models = args.skip_models or args.markers_only or args.analysis_only or args.global_only  
-    skip_analysis = args.skip_analysis or args.markers_only or args.models_only or args.global_only
-    skip_global = args.skip_global or args.markers_only or args.models_only or args.analysis_only
+    skip_markers = (args.skip_markers or args.models_only or args.decoder_only or 
+                   args.global_only or args.statistics_only or args.individual_analysis_only)
+    skip_models = (args.skip_models or args.markers_only or args.analysis_only or 
+                  args.decoder_only or args.global_only or args.statistics_only or 
+                  args.individual_analysis_only)
+    skip_analysis = (args.skip_analysis or args.markers_only or args.models_only or 
+                    args.decoder_only or args.global_only or args.statistics_only)
+    skip_decoder = (args.skip_decoder or args.markers_only or args.models_only or 
+                   args.analysis_only or args.global_only or args.statistics_only or 
+                   args.individual_analysis_only)
+    skip_global = (args.skip_global or args.markers_only or args.models_only or 
+                  args.analysis_only or args.decoder_only or args.individual_analysis_only)
+    skip_statistics = (args.skip_statistics or args.markers_only or args.models_only or 
+                      args.analysis_only or args.decoder_only or args.individual_analysis_only)
     
-   # try:
-        # Create pipeline
+    # Create pipeline
     pipeline = Pipeline(
-            data_dir=args.data_dir,
-            results_dir=args.results_dir,
-            src_dir=args.src_dir,
-            metadata_dir=args.metadata_dir,
-            batch_size=args.batch_size,
-            verbose=args.verbose,
-            dry_run=args.dry_run
-        )
-        
-        # Handle global-only mode
+        data_dir=args.data_dir,
+        results_dir=args.results_dir,
+        src_dir=args.src_dir,
+        metadata_dir=args.metadata_dir,
+        batch_size=args.batch_size,
+        verbose=args.verbose,
+        dry_run=args.dry_run,
+        skip_smi=args.skip_smi
+    )
+    
+    # Handle statistics-only mode
+    if args.statistics_only:
+        pipeline.run_statistical_analysis()
+        return
+    
+    # Handle decoder-only mode
+    if args.decoder_only:
+        pipeline.run_decoder_phase()
+        return
+    
+    # Handle global-only mode
     if args.global_only:
-            pipeline.run_global_analysis()
-            return
-        
-        # Handle models-only mode  
+        pipeline.run_global_analysis()
+        return
+    
+    # Handle models-only mode  
     if args.models_only:
-            pipeline.run_models_phase()
-            return
+        pipeline.run_models_phase()
+        return
 
-        # Resolve subjects
+    # Resolve subjects
     subjects = pipeline.resolve_subjects(subject_args)
-        
+    
     if not subjects:
-            print("No subjects to process")
-            return
-            
-        # Run pipeline
-    pipeline.run_pipeline(
-            subjects=subjects,
-            skip_markers=skip_markers,
-            skip_models=skip_models, 
-            skip_analysis=skip_analysis,
-            skip_global=skip_global
-        )
+        print("No subjects to process")
+        return
         
-            
-   # except Exception as e:
-   #     print(f"Pipeline failed: {e}")
-   #     sys.exit(1)
+    # Run pipeline
+    pipeline.run_pipeline(
+        subjects=subjects,
+        skip_markers=skip_markers,
+        skip_models=skip_models, 
+        skip_analysis=skip_analysis,
+        skip_decoder=skip_decoder,
+        skip_global=skip_global,
+        skip_statistics=skip_statistics
+    )
 
 
 if __name__ == "__main__":

@@ -16,6 +16,13 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import make_pipeline
 
+# Set consistent plotting parameters
+plt.rcParams["font.family"] = "serif"
+plt.rcParams["mathtext.fontset"] = "cm"
+plt.rcParams["figure.dpi"] = 120
+plt.rcParams["legend.fontsize"] = "medium"
+plt.rcParams["axes.labelsize"] = "large"
+
 # Event ID mapping for trial types
 event_id_mapping = {
     # Based on nice/algorithms/information_theory/tests/test_komplexity.py mapping
@@ -144,7 +151,7 @@ def load_epochs_from_files(main_path, subjects, sessions, verbose=False):
             for fif_file in original_files:
                 try:
                     epochs = mne.read_epochs(fif_file, preload=True, verbose=False)
-                    data = epochs.get_data()  # Shape: (n_epochs, n_channels, n_times)
+                    data = epochs.get_data(copy=False).astype(np.float32)  # Use float32 to save memory
                     events = epochs.events[:, 2]  # Extract event IDs
                     
                     n_epochs, n_channels, n_times = data.shape
@@ -167,7 +174,7 @@ def load_epochs_from_files(main_path, subjects, sessions, verbose=False):
             for fif_file in recon_files:
                 try:
                     epochs = mne.read_epochs(fif_file, preload=True, verbose=False)
-                    data = epochs.get_data()  # Shape: (n_epochs, n_channels, n_times)
+                    data = epochs.get_data(copy=False).astype(np.float32)  # Use float32 to save memory
                     events = epochs.events[:, 2]  # Extract event IDs
 
                     subject_epochs.append(data)
@@ -204,111 +211,118 @@ def load_epochs_from_files(main_path, subjects, sessions, verbose=False):
     return subject_data, times
 
 def perform_decoding(subject_data, times, cv=3, n_jobs=None, verbose=False):
-    """Perform classification with subject-wise data where each epoch is a sample."""
-    print(f"\nPerforming classification with {cv}-fold cross-validation...")
+    """
+    Perform within-subject classification (one decoder per subject).
+    Returns AUC time series for each subject.
+    """
+    print(f"\nPerforming WITHIN-SUBJECT classification with {cv}-fold cross-validation...")
+    print(f"Training one decoder per subject, then averaging across subjects")
     
     # Create the classifier pipeline
     clf = make_pipeline(StandardScaler(), LogisticRegression(solver="liblinear"))
     
-    # Debug: Check the structure of the first subject's data
-    first_subject = list(subject_data.keys())[0]
-    X_first, y_first, events_first = subject_data[first_subject]
+    # Store results for each subject
+    subject_scores = []
+    subject_ids = []
+    all_X = []
+    all_y = []
+    all_events = []
     
-    print(f"Debug info for subject {first_subject}:")
-    print(f"  X_first type: {type(X_first)}, length: {len(X_first) if hasattr(X_first, '__len__') else 'no length'}")
-    print(f"  y_first type: {type(y_first)}, length: {len(y_first) if hasattr(y_first, '__len__') else 'no length'}")
-    print(f"  events_first type: {type(events_first)}, length: {len(events_first) if hasattr(events_first, '__len__') else 'no length'}")
-    
-    if len(X_first) > 0:
-        print(f"  X_first[0] shape: {np.shape(X_first[0])}")
-    if len(y_first) > 0:
-        print(f"  y_first[0] shape: {np.shape(y_first[0])}")
-        print(f"  y_first[0] type: {type(y_first[0])}")
-    
-    # Extract and concatenate X, y, and events data across all subjects
-    X_list = []
-    y_list = []
-    events_list = []
-    
+    # Process each subject independently
     for subject_id, (X_subject, y_subject, events_subject) in subject_data.items():
         print(f"\nProcessing subject {subject_id}:")
-        print(f"  X_subject length: {len(X_subject)}") # (trials, channels, timepoints)
-        print(f"  y_subject length: {len(y_subject)}") # (trials,)
-        print(f"  events_subject length: {len(events_subject)}") # (trials,)
+        print(f"  X_subject length: {len(X_subject)}")
+        print(f"  y_subject length: {len(y_subject)}")
+        print(f"  events_subject length: {len(events_subject)}")
 
-        # Handle X data
+        # Handle X data - concatenate sessions for this subject
         if len(X_subject) == 1:
-            # If there's only one array, no need to concatenate
             X_subject_concat = X_subject[0]
         else:
-            # Concatenate across the list elements for this subject
             X_subject_concat = np.concatenate(X_subject, axis=0)
         
-        # Handle y data - check if elements are scalars or arrays
+        # Handle y data
         if len(y_subject) == 1:
-            # If there's only one element
-            print('There is only one element')
             if np.ndim(y_subject[0]) == 0:
-                print('It is a scalar')
-                # It's a scalar, convert to array
                 y_subject_concat = np.array([y_subject[0]])
             else:
-                print('It is an array')
-                # It's already an array
                 y_subject_concat = y_subject[0]
         else:
-            # Multiple elements - check if they're scalars or arrays
             if all(np.ndim(y) == 0 for y in y_subject):
-                # All are scalars, convert to array
                 y_subject_concat = np.array(y_subject)
             else:
-                # They're arrays, concatenate them
                 y_subject_concat = np.concatenate(y_subject, axis=0)
         
         # Handle events data
         events_subject_concat = np.array(events_subject)
         
-        print(f"  Final shapes - X: {X_subject_concat.shape}, y: {y_subject_concat.shape}, events: {events_subject_concat.shape}")
-                #X is (n_trials, n_channels, n_times)
-                #y is (n_trials,)
-                #events is (n_trials,)
-
-        X_list.append(X_subject_concat)
-        y_list.append(y_subject_concat)
-        events_list.append(events_subject_concat)
+        print(f"  Shape - X: {X_subject_concat.shape}, y: {y_subject_concat.shape}, events: {events_subject_concat.shape}")
+        print(f"  Original trials: {np.sum(y_subject_concat == 0)}, Reconstructed trials: {np.sum(y_subject_concat == 1)}")
+        
+        # Check if we have enough data for this subject
+        if len(np.unique(y_subject_concat)) < 2:
+            print(f"  WARNING: Subject {subject_id} has only one class, skipping...")
+            continue
+        
+        if X_subject_concat.shape[0] < cv:
+            print(f"  WARNING: Subject {subject_id} has fewer trials ({X_subject_concat.shape[0]}) than CV folds ({cv}), skipping...")
+            continue
+        
+        # Train decoder for this subject
+        time_decod = SlidingEstimator(clf, n_jobs=1, scoring="roc_auc", verbose=False)
+        try:
+            scores = cross_val_multiscore(time_decod, X_subject_concat, y_subject_concat, cv=cv, n_jobs=1)
+            # scores shape: (n_cv_folds, n_timepoints)
+            
+            # Average across CV folds to get this subject's AUC time series
+            if scores.ndim == 2:
+                subject_auc_timeseries = np.mean(scores, axis=0)  # (n_timepoints,)
+            else:
+                subject_auc_timeseries = scores
+            
+            subject_scores.append(subject_auc_timeseries)
+            subject_ids.append(subject_id)
+            
+            overall_auc = np.mean(subject_auc_timeseries)
+            print(f"  ✓ Subject {subject_id} mean AUC: {overall_auc:.3f}")
+            
+            # Store data for overall statistics
+            all_X.append(X_subject_concat)
+            all_y.append(y_subject_concat)
+            all_events.append(events_subject_concat)
+            
+        except Exception as e:
+            print(f"  ERROR: Failed to decode subject {subject_id}: {e}")
+            continue
     
-    # Concatenate across all subjects
-    X = np.concatenate(X_list, axis=0)
-    y = np.concatenate(y_list, axis=0)
-    events = np.concatenate(events_list, axis=0)
+    # Convert to array: (n_subjects, n_timepoints)
+    subject_scores = np.array(subject_scores)
     
-    print("\nFinal concatenated shapes:")
-    print(f"  Total trials for decoding: {X.shape[0]}")
-    print(f"  Number of channels: {X.shape[1]}")
-    print(f"  Number of timepoints: {X.shape[2]}")
-    print(f"  Number of labels: {y.shape[0]}")
-    print(f"  Number of events: {events.shape[0]}")
-    print(f"  Number of subjects: {len(subject_data)}")
-    print(f"  Event types present: {np.unique(events)}")
+    print(f"\n{'='*60}")
+    print(f"Successfully decoded {len(subject_ids)} subjects")
+    print(f"Subject IDs: {subject_ids}")
+    print(f"Scores shape: {subject_scores.shape}")
     
-    time_decod = SlidingEstimator(clf, n_jobs=n_jobs, scoring="roc_auc", verbose=True)
-    scores = cross_val_multiscore(time_decod, X, y, cv=cv, n_jobs=n_jobs)
+    # Calculate mean and std ACROSS SUBJECTS for each timepoint
+    mean_auc_time = np.mean(subject_scores, axis=0)  # (n_timepoints,)
+    std_auc_time = np.std(subject_scores, axis=0)    # (n_timepoints,)
     
-    # Calculate mean and std correctly
-    # scores shape: (n_cv_folds, n_timepoints)
-    if scores.ndim == 2:
-        mean_scores_time = np.mean(scores, axis=0)  # Mean across CV folds for each timepoint
-        std_scores_time = np.std(scores, axis=0)    # Std across CV folds for each timepoint
-        overall_mean = np.mean(mean_scores_time)    # Overall mean across time
-        overall_std = np.std(mean_scores_time)      # Std across time points
-    else:
-        # Fallback for 1D scores
-        mean_scores_time = scores
-        std_scores_time = np.zeros_like(scores)
-        overall_mean = np.mean(scores)
-        overall_std = np.std(scores)
+    # Overall statistics
+    overall_mean = np.mean(mean_auc_time)
+    overall_std = np.std(mean_auc_time)
     
-    return scores, overall_mean, overall_std, X, y, events
+    print(f"\nOverall Results (across subjects):")
+    print(f"  Mean AUC: {overall_mean:.3f} ± {overall_std:.3f}")
+    print(f"  Peak AUC: {np.max(mean_auc_time):.3f} at time {times[np.argmax(mean_auc_time)]:.3f}s")
+    print(f"{'='*60}\n")
+    
+    # Concatenate all data for return (for compatibility with existing code)
+    X_all = np.concatenate(all_X, axis=0) if all_X else None
+    y_all = np.concatenate(all_y, axis=0) if all_y else None
+    events_all = np.concatenate(all_events, axis=0) if all_events else None
+    
+    # Return: subject_scores (n_subjects, n_timepoints), mean, std, and concatenated data
+    return subject_scores, overall_mean, overall_std, X_all, y_all, events_all
 
 def perform_trial_type_decoding(subject_data, times, cv=3, n_jobs=None, verbose=False):
     """Perform classification for each trial type separately."""
@@ -569,46 +583,79 @@ def plot_overall_results(mean_score, std_score, output_dir, title_suffix=""):
     return fig, ax
 
 def plot_time_resolved_results(scores, times, output_dir, title_suffix=""):
-    """Plot the time-resolved classification results."""
+    """
+    Plot the time-resolved classification results.
+    
+    Parameters:
+    -----------
+    scores : array
+        Shape (n_subjects, n_timepoints) - AUC time series for each subject
+    times : array
+        Time points
+    """
     # Create output directory if it doesn't exist
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     
     # Create figure for time-resolved classification performance
-    fig, ax = plt.subplots(1, 1, figsize=(12, 6))
+    fig, ax = plt.subplots(1, 1, figsize=(14, 7))
     
-    if scores.ndim == 2:  # Shape: (n_folds, n_timepoints)
-        mean_scores_time = np.mean(scores, axis=0)
-        std_scores_time = np.std(scores, axis=0)
-    else:  # Shape: (n_timepoints,)
+    if scores.ndim == 2:  # Shape: (n_subjects, n_timepoints)
+        n_subjects = scores.shape[0]
+        
+        # Calculate mean and std ACROSS SUBJECTS
+        mean_scores_time = np.mean(scores, axis=0)  # (n_timepoints,)
+        std_scores_time = np.std(scores, axis=0)    # (n_timepoints,)
+        sem_scores_time = std_scores_time / np.sqrt(n_subjects)  # Standard error
+        
+        # Plot individual subjects (light lines)
+        for i in range(n_subjects):
+            ax.plot(times, scores[i, :], 'gray', linewidth=0.5, alpha=0.3)
+        
+        # Plot mean AUC across subjects (bold line)
+        ax.plot(times, mean_scores_time, 'b-', linewidth=3, label=f'Mean AUC (n={n_subjects} subjects)', zorder=10)
+        
+        # Fill std band
+        ax.fill_between(times, 
+                         mean_scores_time - std_scores_time,
+                         mean_scores_time + std_scores_time,
+                         alpha=0.3, color='blue', label='±1 SD (across subjects)', zorder=5)
+        
+    else:  # Shape: (n_timepoints,) - fallback for old format
         mean_scores_time = scores
         std_scores_time = np.zeros_like(scores)
-    
-    # Plot time-resolved AUC
-    ax.plot(times, mean_scores_time, 'b-', linewidth=2, label='Mean AUC')
-    ax.fill_between(times, 
-                     mean_scores_time - std_scores_time,
-                     mean_scores_time + std_scores_time,
-                     alpha=0.3, color='blue', label='±1 std')
+        ax.plot(times, mean_scores_time, 'b-', linewidth=2, label='Mean AUC')
     
     # Add chance level line
-    ax.axhline(0.5, color="k", linestyle="--", label="Chance", alpha=0.7)
+    ax.axhline(0.5, color="k", linestyle="--", label="Chance level", alpha=0.7, linewidth=2)
     
-    # Formatting for time-resolved plot
-    ax.set_xlabel("Time (s)", fontsize=12)
-    ax.set_ylabel("AUC", fontsize=12)
-    ax.set_title(f"Time-resolved Classification: Original vs Reconstructed EEG Data{title_suffix}", fontsize=14)
-    ax.legend(fontsize=10)
-    ax.grid(True, alpha=0.3)
-    ax.set_ylim([0.4, 1.0])
+    # Add vertical line at t=0 (stimulus onset)
+    ax.axvline(0, color="red", linestyle=":", label="Stimulus onset", alpha=0.5, linewidth=1.5)
+    
+    # Formatting
+    ax.set_xlabel("Time (s)", fontsize=14, fontweight='bold')
+    ax.set_ylabel("AUC (Area Under ROC Curve)", fontsize=14, fontweight='bold')
+    ax.set_title(f"Within-Subject Decoding: Original vs Reconstructed EEG{title_suffix}\nMean ± SD across subjects", 
+                 fontsize=16, fontweight='bold')
+    ax.legend(fontsize=11, loc='best', framealpha=0.9)
+    ax.grid(True, alpha=0.3, linestyle='--')
+    ax.set_ylim([0.40, 1.0])
+    
+    # Add text with peak AUC
+    peak_idx = np.argmax(mean_scores_time)
+    peak_auc = mean_scores_time[peak_idx]
+    peak_time = times[peak_idx]
+    ax.text(0.02, 0.98, f'Peak: AUC={peak_auc:.3f} at t={peak_time:.3f}s', 
+            transform=ax.transAxes, fontsize=11, verticalalignment='top',
+            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
     
     plt.tight_layout()
     
     # Save the plot
-    plot_path = Path(output_dir) / f"time_resolved_classification_results{title_suffix.replace(' ', '_').replace('(', '').replace(')', '')}.png"
+    plot_path = Path(output_dir) / f"time_resolved_within_subject_classification{title_suffix.replace(' ', '_').replace('(', '').replace(')', '')}.png"
     plt.savefig(plot_path, dpi=300, bbox_inches='tight')
     print(f"Time-resolved plot saved to: {plot_path}")
     
-    plt.show()
+    plt.close(fig)
     return fig, ax
 
 def plot_trial_type_results(trial_scores_dict, times, output_dir):
@@ -736,19 +783,92 @@ def plot_local_global_effects(local_global_results, times, output_dir):
     plt.show()
     return fig, axes
 
-def save_results(mean_score, std_score, scores, output_dir):
-    """Save numerical results to files."""
+def save_results(mean_score, std_score, scores, output_dir, trial_scores_dict=None, 
+                local_global_results=None, n_subjects=0, model_info=None, subject_ids=None):
+    """Save numerical results to text and JSON files."""
+    import json
+    from datetime import datetime
+    
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     
-    # Save classification results
+    # Save classification results as text
     results_path = Path(output_dir) / "classification_results.txt"
     with open(results_path, 'w') as f:
-        f.write("Classification Results\n")
-        f.write("=====================\n")
-        f.write(f"Mean AUC: {mean_score:.6f}\n")
-        f.write(f"Std AUC: {std_score:.6f}\n")
-        f.write(f"Individual fold scores: {scores}\n")
+        f.write("Within-Subject Classification Results\n")
+        f.write("=" * 50 + "\n")
+        f.write(f"Analysis Type: Within-subject decoding\n")
+        f.write(f"Number of subjects: {n_subjects}\n")
+        f.write(f"Mean AUC (across subjects): {mean_score:.6f}\n")
+        f.write(f"Std AUC (across subjects): {std_score:.6f}\n")
+        f.write(f"\nSubject-wise results shape: {scores.shape}\n")
+        if subject_ids:
+            f.write(f"Subject IDs: {subject_ids}\n")
     print(f"Results saved to: {results_path}")
+    
+    # Prepare comprehensive JSON results
+    json_results = {
+        "analysis_date": datetime.now().isoformat(),
+        "analysis_type": "within_subject",
+        "n_subjects": n_subjects,
+        "subject_ids": subject_ids if subject_ids else [],
+        "model_info": model_info if model_info else {
+            "classifier": "LogisticRegression",
+            "solver": "liblinear",
+            "preprocessing": "StandardScaler",
+            "approach": "within_subject_sliding_estimator",
+            "scoring": "roc_auc"
+        },
+        "overall_classification": {
+            "mean_auc": float(mean_score),
+            "std_auc": float(std_score),
+            "description": "Mean and std calculated across subjects",
+            "per_subject_auc_timeseries": scores.tolist() if scores is not None else None
+        }
+    }
+    
+    # Add trial-type-specific results
+    if trial_scores_dict:
+        json_results["trial_type_classification"] = {}
+        for trial_type, trial_scores in trial_scores_dict.items():
+            if trial_scores.ndim == 2:
+                mean_scores = np.mean(trial_scores, axis=0)
+                overall_mean = np.mean(mean_scores)
+                overall_std = np.std(mean_scores)
+            else:
+                mean_scores = trial_scores
+                overall_mean = np.mean(trial_scores)
+                overall_std = np.std(trial_scores)
+            
+            json_results["trial_type_classification"][trial_type] = {
+                "mean_auc": float(overall_mean),
+                "std_auc": float(overall_std),
+                "auc_time_series": trial_scores.tolist()
+            }
+    
+    # Add local/global effect results
+    if local_global_results:
+        json_results["local_global_effects"] = {}
+        for effect_name, effect_scores in local_global_results.items():
+            if effect_scores.ndim == 2:
+                mean_scores = np.mean(effect_scores, axis=0)
+                overall_mean = np.mean(mean_scores)
+                overall_std = np.std(mean_scores)
+            else:
+                mean_scores = effect_scores
+                overall_mean = np.mean(effect_scores)
+                overall_std = np.std(effect_scores)
+            
+            json_results["local_global_effects"][effect_name] = {
+                "mean_auc": float(overall_mean),
+                "std_auc": float(overall_std),
+                "auc_time_series": effect_scores.tolist()
+            }
+    
+    # Save JSON results
+    json_path = Path(output_dir) / "decoder_results.json"
+    with open(json_path, 'w') as f:
+        json.dump(json_results, f, indent=2)
+    print(f"JSON results saved to: {json_path}")
 
 def main():
     """Main function."""
@@ -812,7 +932,15 @@ def main():
     plot_time_resolved_results(all_scores, times, args.output_dir)
     plot_trial_type_results(trial_scores_dict, times, args.output_dir)
     plot_local_global_effects(local_global_results, times, args.output_dir)
-    save_results(mean_score, std_score, all_scores, args.output_dir)
+    
+    # Save comprehensive results including JSON
+    save_results(
+        mean_score, std_score, all_scores, args.output_dir,
+        trial_scores_dict=trial_scores_dict,
+        local_global_results=local_global_results,
+        n_subjects=all_scores.shape[0] if all_scores.ndim == 2 else len(subjects),
+        subject_ids=list(subject_data.keys())
+    )
     
     print(f"\nAnalysis completed! Results saved in: {args.output_dir}")
 
