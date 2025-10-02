@@ -35,8 +35,10 @@ import os.path as op
 import mne
 import numpy as np
 import matplotlib.pyplot as plt
+import sys
 import argparse
 
+sys.path.append('/data/project/eeg_foundation/src/nice')
 from nice import Markers
 from nice.markers import (PowerSpectralDensity,
                           KolmogorovComplexity,
@@ -47,6 +49,13 @@ from nice.markers import (PowerSpectralDensity,
                           ContingentNegativeVariation,
                           TimeLockedTopography,
                           TimeLockedContrast)
+
+# Set consistent plotting parameters
+plt.rcParams["font.family"] = "serif"
+plt.rcParams["mathtext.fontset"] = "cm"
+plt.rcParams["figure.dpi"] = 120
+plt.rcParams["legend.fontsize"] = "medium"
+plt.rcParams["axes.labelsize"] = "large"
 
 
 def get_event_id_mapping():
@@ -122,7 +131,7 @@ def apply_event_id_mapping(epochs, event_id_mapping=None, verbose=True):
     epochs.event_id = new_event_id
     
     if verbose:
-        print(f"Remapped event_id: {epochs.event_id}")
+       # print(f"Remapped event_id: {epochs.event_id}")
         
         print("\nEvent counts after mapping:")
         for event_name, event_id in epochs.event_id.items():
@@ -256,7 +265,8 @@ def get_electrode_mapping(n_channels):
     }
 
 
-def compute_markers(epochs, output_file=None, apply_event_mapping=True, event_id_mapping=None):
+def compute_markers(epochs, output_file=None, apply_event_mapping=True, event_id_mapping=None,
+                   timeout_minutes=30, skip_smi=False):
     """Compute markers for given epochs.
     
     Parameters
@@ -270,6 +280,10 @@ def compute_markers(epochs, output_file=None, apply_event_mapping=True, event_id
     event_id_mapping : dict | None
         Custom event ID mapping. If None and apply_event_mapping is True, 
         uses the default mapping from get_event_id_mapping()
+    timeout_minutes : int
+        Timeout in minutes for the entire computation (default: 30)
+    skip_smi : bool
+        Whether to skip SymbolicMutualInformation computation (recommended for large datasets)
         
     Returns
     -------
@@ -326,12 +340,17 @@ def compute_markers(epochs, output_file=None, apply_event_mapping=True, event_id
         
         PermutationEntropy(tmin=None, tmax=0.6, backend='python'),
         
-        SymbolicMutualInformation(
-            tmin=None, tmax=0.6, method='weighted', backend='python',
-            comment='weighted'),
-        
         KolmogorovComplexity(tmin=None, tmax=0.6, backend='python'),
     ]
+    
+    # Add SymbolicMutualInformation only if not skipped
+    if not skip_smi:
+        print("Computing SymbolicMutualInformation (this may take a while for large datasets)...")
+        m_list.insert(-1, SymbolicMutualInformation(
+            tmin=None, tmax=0.6, method='weighted', backend='python',
+            comment='weighted'))
+    else:
+        print("Skipping SymbolicMutualInformation computation (--skip-smi flag enabled)")
     
     # Add evoked-related markers only if we have conditions
     if len(np.unique(epochs.events[:, 2])) > 1:
@@ -386,10 +405,13 @@ def main():
     parser.add_argument('--plot', action='store_true', help='Generate plots')
     parser.add_argument('--no-event-mapping', action='store_true', 
                         help='Skip automatic event ID mapping (keep original event IDs)')
+    parser.add_argument('--skip-smi', action='store_true',
+                        help='Skip SymbolicMutualInformation computation (recommended for large datasets)')
+    parser.add_argument('--timeout', type=int, default=30,
+                        help='Timeout in minutes for marker computation (default: 30)')
     
     args = parser.parse_args()
     
-    print('Here3')
     # Load epochs
     print(f"Loading epochs from: {args.input_file}")
     epochs = mne.read_epochs(args.input_file, preload=True)
@@ -403,7 +425,8 @@ def main():
     
     # Compute markers with or without event mapping
     apply_mapping = not args.no_event_mapping
-    mc = compute_markers(epochs, output_file, apply_event_mapping=apply_mapping)
+    mc = compute_markers(epochs, output_file, apply_event_mapping=apply_mapping, 
+                        timeout_minutes=args.timeout, skip_smi=args.skip_smi)
     
     # Optional plotting
     if args.plot:
@@ -415,9 +438,10 @@ def main():
                     freqs = marker.estimator.freqs_
                     
                     plt.figure(figsize=(10, 6))
-                    plt.semilogy(freqs, np.mean(psd, axis=0).T, alpha=0.1, color='black')
+                    psd_mean = np.mean(psd, axis=0)
+                    plt.semilogy(freqs, psd_mean.T, alpha=0.1, color='black')
                     plt.xlim(2, 40)
-                    plt.ylim(min(np.mean(psd, axis=0))*0.8, max(np.mean(psd, axis=0))*1.2)
+                    plt.ylim(np.min(psd_mean)*0.8, np.max(psd_mean)*1.2)
                     plt.ylabel('PSD')
                     plt.xlabel('Frequency [Hz]')
                     plt.title(f'Power Spectral Density - {len(epochs.ch_names)} channels')

@@ -126,15 +126,15 @@ sns.set_palette("husl")
 COLOR = "black"
 plt.rcParams.update(
     {
-        "figure.dpi": 100,
+        "figure.dpi": 120,
         "figure.figsize": (14, 9),
         "font.family": "serif",
         "mathtext.fontset": "cm",
         "axes.grid": True,
-        "legend.fontsize": 14,
+        "legend.fontsize": "medium",
         "legend.title_fontsize": 18,
         "axes.titlesize": 18,
-        "axes.labelsize": 16,
+        "axes.labelsize": "large",
         "ytick.labelsize": 12,
         "xtick.labelsize": 12,
         # colour‑consistent theme
@@ -1198,7 +1198,175 @@ class GlobalFieldPower:
         plt.close()
 
 
+class TimeSeriesErrorAnalyzer:
+    """Analyzer for computing MSE and MAE per trial and sensor from time series data."""
     
+    def __init__(self, output_dir, subject_id):
+        self.output_dir = output_dir
+        self.subject_id = subject_id
+        
+        # Create subdirectories
+        self.plots_dir = op.join(output_dir, 'timeseries_error', 'plots')
+        self.metrics_dir = op.join(output_dir, 'timeseries_error', 'metrics')
+        
+        for dir_path in [self.plots_dir, self.metrics_dir]:
+            os.makedirs(dir_path, exist_ok=True)
+    
+    def analyze(self, fif_dir):
+        """Compute MSE and MAE per trial and sensor."""
+        print("  📊 Computing time series MSE and MAE analysis...")
+        
+        # Load original and reconstructed epochs
+        epochs_orig, epochs_recon = self._load_epochs_data(fif_dir)
+        
+        if epochs_orig is None or epochs_recon is None:
+            print("     ❌ Could not load both original and reconstructed data. Skipping time series error analysis.")
+            return None
+        
+        # Get data arrays: shape (n_trials, n_sensors, n_timepoints)
+        data_orig = epochs_orig.get_data()
+        data_recon = epochs_recon.get_data()
+        
+        n_trials, n_sensors, n_timepoints = data_orig.shape
+        
+        print(f"     📈 Data shape: {n_trials} trials × {n_sensors} sensors × {n_timepoints} timepoints")
+        
+        # Calculate MSE and MAE per trial and sensor
+        # MSE: Mean across timepoints for each (trial, sensor) pair
+        mse_per_trial_sensor = np.mean((data_orig - data_recon) ** 2, axis=2)  # Shape: (n_trials, n_sensors)
+        mae_per_trial_sensor = np.mean(np.abs(data_orig - data_recon), axis=2)  # Shape: (n_trials, n_sensors)
+        
+        print(f"     ✅ Computed MSE and MAE matrices: {mse_per_trial_sensor.shape}")
+        print(f"        MSE range: [{np.min(mse_per_trial_sensor):.6f}, {np.max(mse_per_trial_sensor):.6f}]")
+        print(f"        MAE range: [{np.min(mae_per_trial_sensor):.6f}, {np.max(mae_per_trial_sensor):.6f}]")
+        
+        # Calculate overall statistics
+        overall_mse = np.mean(mse_per_trial_sensor)
+        overall_mae = np.mean(mae_per_trial_sensor)
+        
+        # Calculate per-sensor averages (across trials)
+        mse_per_sensor = np.mean(mse_per_trial_sensor, axis=0)  # Shape: (n_sensors,)
+        mae_per_sensor = np.mean(mae_per_trial_sensor, axis=0)  # Shape: (n_sensors,)
+        
+        # Calculate per-trial averages (across sensors)
+        mse_per_trial = np.mean(mse_per_trial_sensor, axis=1)  # Shape: (n_trials,)
+        mae_per_trial = np.mean(mae_per_trial_sensor, axis=1)  # Shape: (n_trials,)
+        
+        # Create heatmaps
+        self._create_heatmaps(mse_per_trial_sensor, mae_per_trial_sensor, n_trials, n_sensors)
+        
+        # Prepare results dictionary
+        results = {
+            'overall': {
+                'mse': float(overall_mse),
+                'mae': float(overall_mae),
+                'mse_std': float(np.std(mse_per_trial_sensor)),
+                'mae_std': float(np.std(mae_per_trial_sensor))
+            },
+            'per_sensor': {
+                'mse': mse_per_sensor.tolist(),
+                'mae': mae_per_sensor.tolist()
+            },
+            'per_trial': {
+                'mse': mse_per_trial.tolist(),
+                'mae': mae_per_trial.tolist()
+            },
+            'dimensions': {
+                'n_trials': int(n_trials),
+                'n_sensors': int(n_sensors),
+                'n_timepoints': int(n_timepoints)
+            }
+        }
+        
+        # Save results as JSON
+        results_file = op.join(self.metrics_dir, 'timeseries_error_metrics.json')
+        with open(results_file, 'w') as f:
+            json.dump(results, f, indent=2)
+        
+        print(f"     💾 Saved metrics to: {results_file}")
+        print(f"     📊 Overall MSE: {overall_mse:.6f} ± {np.std(mse_per_trial_sensor):.6f}")
+        print(f"     📊 Overall MAE: {overall_mae:.6f} ± {np.std(mae_per_trial_sensor):.6f}")
+        
+        return results
+    
+    def _load_epochs_data(self, data_dir):
+        """Load EEG epochs data from .fif files."""
+        print("     📁 Loading EEG epochs for time series error analysis...")
+        
+        # Look for original and reconstructed .fif files
+        orig_files = []
+        recon_files = []
+        
+        for root, dirs, files in os.walk(data_dir):
+            for file in files:
+                if file.endswith('.fif') and ('epo' in file or 'epochs' in file):
+                    file_path = op.join(root, file)
+                    if 'recon' in file.lower() or 'reconstructed' in file.lower():
+                        recon_files.append(file_path)
+                    elif 'original' in file.lower() or (not 'recon' in file.lower()):
+                        orig_files.append(file_path)
+        
+        print(f"     📊 Found {len(orig_files)} original .fif files")
+        print(f"     📊 Found {len(recon_files)} reconstructed .fif files")
+        
+        # Load original epochs
+        epochs_orig = None
+        if orig_files:
+            try:
+                epochs_orig = mne.read_epochs(orig_files[0], preload=True, verbose=False)
+                print(f"     ✅ Loaded original epochs: {len(epochs_orig)} trials, {len(epochs_orig.ch_names)} sensors")
+            except Exception as e:
+                print(f"     ❌ Error loading original epochs: {e}")
+                return None, None
+        
+        # Load reconstructed epochs
+        epochs_recon = None
+        if recon_files:
+            try:
+                epochs_recon = mne.read_epochs(recon_files[0], preload=True, verbose=False)
+                print(f"     ✅ Loaded reconstructed epochs: {len(epochs_recon)} trials, {len(epochs_recon.ch_names)} sensors")
+            except Exception as e:
+                print(f"     ❌ Error loading reconstructed epochs: {e}")
+                return epochs_orig, None
+        
+        # Validate that both have the same shape
+        if epochs_orig is not None and epochs_recon is not None:
+            if epochs_orig.get_data().shape != epochs_recon.get_data().shape:
+                print(f"     ⚠️  Shape mismatch: orig {epochs_orig.get_data().shape} vs recon {epochs_recon.get_data().shape}")
+                return None, None
+        
+        return epochs_orig, epochs_recon
+    
+    def _create_heatmaps(self, mse_matrix, mae_matrix, n_trials, n_sensors):
+        """Create heatmaps for MSE and MAE."""
+        print("     🎨 Creating MSE and MAE heatmaps...")
+        
+        # Create figure with 2 subplots side by side
+        fig, ax = plt.subplots(1, 1, figsize=(20, max(8, n_trials * 0.05)))
+        
+        # MSE Heatmap
+        im1 = ax.imshow(mse_matrix, aspect='auto', cmap='Reds', interpolation='nearest')
+        ax.set_title(f'MSE per Trial and Sensor\n{self.subject_id}', fontsize=14, fontweight='bold')
+        ax.set_xlabel('Sensors', fontsize=12)
+        ax.set_ylabel('Trials', fontsize=12)
+        plt.colorbar(im1, ax=ax, label='MSE')
+
+        plt.tight_layout()
+        plt.savefig(op.join(self.plots_dir, 'heatmap_mse.png'), dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        # MAE Heatmap
+        im2 = ax.imshow(mae_matrix, aspect='auto', cmap='Reds', interpolation='nearest')
+        ax.set_title(f'MAE per Trial and Sensor\n{self.subject_id}', fontsize=14, fontweight='bold')
+        ax.set_xlabel('Sensors', fontsize=12)
+        ax.set_ylabel('Trials', fontsize=12)
+        plt.colorbar(im2, ax=ax, label='MAE')
+        
+        plt.tight_layout()
+        plt.savefig(op.join(self.plots_dir, 'heatmap_mae.png'), dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        print(f"     ✅ Saved heatmaps to: {self.plots_dir}/heatmap_mse.png and {self.plots_dir}/heatmap_mae.png")
 
 
 def load_data(subject_dir):
@@ -1301,12 +1469,18 @@ def analyze_subject(subject_dir, fif_dir, output_dir, subject_id):
     gfp_analyzer = GlobalFieldPower(output_dir, subject_id)
     gfp_analyzer.analyze_event_types(fif_dir)
     
+    # Time Series Error Analysis (MSE/MAE per trial and sensor)
+    print("\n--- Time Series Error Analysis ---")
+    ts_error_analyzer = TimeSeriesErrorAnalyzer(output_dir, subject_id)
+    ts_error_metrics = ts_error_analyzer.analyze(fif_dir)
+    
     # Combined summary
     summary = {
         'subject_id': subject_id,
         'analysis_date': datetime.now().isoformat(),
         'scalar_metrics': scalar_metrics,
         'topographic_metrics': topo_metrics,
+        'timeseries_error_metrics': ts_error_metrics,
         'training_results': data['training_results']
     }
     

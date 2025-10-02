@@ -28,8 +28,11 @@ import numpy as np
 from scipy.stats import trim_mean
 import os.path as op
 import argparse
+import sys
 import mne
 
+
+sys.path.append('/data/project/eeg_foundation/src/nice')
 from nice import read_markers
 
 import matplotlib.pyplot as plt
@@ -37,6 +40,13 @@ from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 import seaborn as sns
 sns.set_color_codes()
+
+# Set consistent plotting parameters
+plt.rcParams["font.family"] = "serif"
+plt.rcParams["mathtext.fontset"] = "cm"
+plt.rcParams["figure.dpi"] = 120
+plt.rcParams["legend.fontsize"] = "medium"
+plt.rcParams["axes.labelsize"] = "large"
 
 
 def trim_mean80(a, axis=0):  # noqa
@@ -390,7 +400,8 @@ def create_montage_layout(n_channels):
         while len(ch_names) < n_channels:
             ch_names.append(f'CH{len(ch_names) + 1}')
     
-    info = mne.create_info(ch_names[:n_channels], 1, ch_types='eeg', montage=montage)
+    info = mne.create_info(ch_names[:n_channels], 1, ch_types='eeg')
+    info.set_montage(montage)
     layout = mne.channels.make_eeg_layout(info)
     pos = layout.pos[:, :2]
     

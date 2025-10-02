@@ -53,6 +53,13 @@ import joblib
 
 sns.set_style("whitegrid")
 
+# Set consistent plotting parameters
+plt.rcParams["font.family"] = "serif"
+plt.rcParams["mathtext.fontset"] = "cm"
+plt.rcParams["figure.dpi"] = 120
+plt.rcParams["legend.fontsize"] = "medium"
+plt.rcParams["axes.labelsize"] = "large"
+
 
 class CrossSubjectClassifier:
     """Cross-subject binary ExtraTrees classifier for VS vs MCS state prediction."""
@@ -1765,6 +1772,9 @@ class CrossDataClassifier:
             self._plot_scenario_results(scenario_results, scenario_dir, scenario_key, results)
             
             print(f"   ✓ {scenario_key} results saved to: {scenario_dir}")
+        
+        # After saving all scenario results, create the combined 4-heatmap figure
+        self._plot_combined_confusion_matrices(results)
     
     def _plot_scenario_results(self, scenario_results, output_dir, scenario_key, global_results):
         """Create plots for a single testing scenario."""
@@ -1828,14 +1838,14 @@ class CrossDataClassifier:
         ax.set_yticks(range(len(self.class_names)))
         ax.set_yticklabels(self.class_names)
         
-        # 3. Feature Importances (top 20)
+        # 3. Feature Importances (top 10)
         ax = axes[1, 0]
         if 'model_A' in scenario_key:
             importances = global_results['feature_importances_A']
         else:
             importances = global_results['feature_importances_B']
             
-        top_n = min(20, len(importances))
+        top_n = min(10, len(importances))
         top_indices = np.argsort(importances)[-top_n:]
         
         ax.barh(range(top_n), importances[top_indices])
@@ -1920,6 +1930,95 @@ class CrossDataClassifier:
         plot_file = op.join(output_dir, 'roc_curve.png')
         plt.savefig(plot_file, dpi=150, bbox_inches='tight')
         plt.close()
+    
+    def _plot_combined_confusion_matrices(self, results):
+        """
+        Create a 2x2 grid of confusion matrix heatmaps showing all cross-data scenarios.
+        
+        Layout:
+        - Row 1: Model A (trained on original data)
+        - Row 2: Model B (trained on reconstructed data)
+        - Column 1 (left): Tested on original data
+        - Column 2 (right): Tested on reconstructed data
+        
+        Each heatmap shows: (VS label, MCS label) x (VS pred, MCS pred)
+        """
+        print("\n📊 Creating combined 4-heatmap confusion matrix figure...")
+        
+        # Create figure with 2x2 subplots
+        fig, axes = plt.subplots(2, 2, figsize=(14, 12))
+        fig.suptitle(f'Cross-Data Classification: Confusion Matrices\n{self.marker_type.title()} Features',
+                    fontsize=18, fontweight='bold')
+        
+        # Define the 4 scenarios
+        scenarios = [
+            ('model_A_orig_test', 0, 0, 'Model A (Original)\n→ Original Test'),
+            ('model_A_recon_test', 0, 1, 'Model A (Original)\n→ Reconstructed Test'),
+            ('model_B_orig_test', 1, 0, 'Model B (Reconstructed)\n→ Original Test'),
+            ('model_B_recon_test', 1, 1, 'Model B (Reconstructed)\n→ Reconstructed Test')
+        ]
+        
+        for scenario_key, row, col, title in scenarios:
+            ax = axes[row, col]
+            scenario_results = results[scenario_key]
+            conf_matrix = scenario_results['confusion_matrix']
+            
+            # Plot heatmap
+            im = ax.imshow(conf_matrix, interpolation='nearest', cmap='Blues', aspect='auto')
+            
+            # Add colorbar
+            cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+            cbar.ax.set_ylabel('Count', rotation=270, labelpad=15)
+            
+            # Labels and title
+            ax.set_title(title, fontsize=14, fontweight='bold', pad=10)
+            ax.set_xlabel('Predicted Label', fontsize=12, fontweight='bold')
+            ax.set_ylabel('True Label', fontsize=12, fontweight='bold')
+            
+            # Set ticks
+            ax.set_xticks(range(len(self.class_names)))
+            ax.set_xticklabels(self.class_names, fontsize=11)
+            ax.set_yticks(range(len(self.class_names)))
+            ax.set_yticklabels(self.class_names, fontsize=11)
+            
+            # Add text annotations
+            thresh = conf_matrix.max() / 2.
+            for i in range(conf_matrix.shape[0]):
+                for j in range(conf_matrix.shape[1]):
+                    ax.text(j, i, format(conf_matrix[i, j], 'd'),
+                           ha="center", va="center", fontsize=16, fontweight='bold',
+                           color="white" if conf_matrix[i, j] > thresh else "black")
+            
+            # Add balanced accuracy text
+            bal_acc = scenario_results['balanced_accuracy']
+            ax.text(0.98, 0.02, f"Bal. Acc: {bal_acc:.3f}",
+                   transform=ax.transAxes, fontsize=10, fontweight='bold',
+                   verticalalignment='bottom', horizontalalignment='right',
+                   bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+        
+        # Add row and column labels
+        fig.text(0.08, 0.75, 'Trained on\nOriginal', fontsize=14, fontweight='bold',
+                ha='center', va='center', rotation=90,
+                bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.5))
+        fig.text(0.08, 0.25, 'Trained on\nReconstructed', fontsize=14, fontweight='bold',
+                ha='center', va='center', rotation=90,
+                bbox=dict(boxstyle='round', facecolor='lightcoral', alpha=0.5))
+        
+        fig.text(0.30, 0.93, 'Tested on Original', fontsize=14, fontweight='bold',
+                ha='center', va='center',
+                bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.5))
+        fig.text(0.70, 0.93, 'Tested on Reconstructed', fontsize=14, fontweight='bold',
+                ha='center', va='center',
+                bbox=dict(boxstyle='round', facecolor='lightcoral', alpha=0.5))
+        
+        plt.tight_layout(rect=[0.12, 0.0, 1.0, 0.95])
+        
+        # Save combined plot
+        combined_plot_file = op.join(self.output_dir, 'combined_confusion_matrices.png')
+        plt.savefig(combined_plot_file, dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        print(f"   ✓ Combined confusion matrices saved to: {combined_plot_file}")
 
 
 def main():
