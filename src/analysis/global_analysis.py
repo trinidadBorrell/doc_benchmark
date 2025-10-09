@@ -355,7 +355,7 @@ class GlobalAnalyzer:
             self._load_patient_labels()
     
     def _load_patient_labels(self):
-        """Load patient labels from CSV file."""
+        """Load patient labels from CSV file with diagnosis grouping."""
         try:
             print(f"📋 Loading patient labels from: {self.patient_labels_file}")
             df = pd.read_csv(self.patient_labels_file)
@@ -370,13 +370,22 @@ class GlobalAnalyzer:
                 if pd.isna(state) or state == 'n/a':
                     continue
                 
+                # Group diagnoses as requested:
+                # - Merge MCS+ and MCS- into MCS
+                # - Merge UWS and VS into VS/UWS (they are the same condition)
+                if state in ['MCS+', 'MCS-']:
+                    state = 'MCS'
+                elif state == 'VS':
+                    state = 'UWS'  # VS and UWS are the same, use UWS as standard
+                
                 # Create key compatible with our subject_session format
                 subject_session_key = f"{subject}_{session}"
                 self.patient_labels[subject_session_key] = state
                 self.available_states.add(state)
             
             print(f"   ✓ Loaded labels for {len(self.patient_labels)} subject/sessions")
-            print(f"   ✓ Available states: {sorted(self.available_states)}")
+            print(f"   ✓ Available states (after grouping): {sorted(self.available_states)}")
+            print(f"   ℹ️  Diagnosis grouping applied: MCS+/MCS- → MCS, VS → UWS")
             
             if self.target_state:
                 filtered_count = sum(1 for state in self.patient_labels.values() if state == self.target_state)
@@ -414,7 +423,8 @@ class GlobalAnalyzer:
             
             if len(session_dirs) == 0:
                 # Fallback: check if it's the old structure (no sessions)
-                summary_file = op.join(subject_dir, 'compare_markers', 'analysis_summary.json')
+                # Updated path: individual_analysis instead of compare_markers
+                summary_file = op.join(subject_dir, 'individual_analysis', 'analysis_summary.json')
                 features_dir = op.join(subject_dir, 'features_variable')
                 
                 if op.exists(summary_file) and op.exists(features_dir):
@@ -485,7 +495,8 @@ class GlobalAnalyzer:
         """Process a single subject/session combination."""
         
         # Check if analysis summary exists
-        summary_file = op.join(session_dir, 'compare_markers', 'analysis_summary.json')
+        # Updated path: individual_analysis instead of compare_markers
+        summary_file = op.join(session_dir, 'individual_analysis', 'analysis_summary.json')
         features_dir = op.join(session_dir, 'features_variable')
         
         # Create unique identifier for subject/session
@@ -1445,15 +1456,31 @@ class GlobalAnalyzer:
         n_markers = self.global_topo_data['n_markers']
         n_channels = self.global_topo_data['n_channels']
         
+        print(f"  📊 Data summary: {n_subjects} subjects, {n_markers} markers, {n_channels} channels")
+        
+        # Check for shape consistency across subjects
+        shapes_orig = [np.array(topo).shape for topo in self.global_topo_data['topos_orig_all']]
+        shapes_recon = [np.array(topo).shape for topo in self.global_topo_data['topos_recon_all']]
+        
+        print(f"  🔍 Checking data shapes across subjects...")
+        unique_shapes = set(shapes_orig)
+        if len(unique_shapes) > 1:
+            print(f"  ⚠️  WARNING: Found {len(unique_shapes)} different shapes across subjects:")
+            for shape in unique_shapes:
+                count = shapes_orig.count(shape)
+                print(f"     - Shape {shape}: {count} subjects")
+        
         # Convert to numpy arrays - handle potentially inhomogeneous shapes
         try:
             topos_orig_all = np.array(self.global_topo_data['topos_orig_all'])  # (n_subjects, n_markers, n_channels)
             topos_recon_all = np.array(self.global_topo_data['topos_recon_all'])
+            print(f"  ✅ Successfully converted data to arrays: {topos_orig_all.shape}")
         except ValueError as e:
             # Handle inhomogeneous shapes (different markers per subject)
-            print(f"  ⚠️  Warning: Subjects have different numbers of markers or channels")
+            print(f"  ⚠️  ERROR: Subjects have different numbers of markers or channels")
             print(f"  Cannot create topomap plots with inconsistent data shapes")
             print(f"  Error: {e}")
+            print(f"  💡 TIP: This usually happens when subjects have different acquisition parameters")
             print(f"  Skipping MNE topomap plots...")
             return
         

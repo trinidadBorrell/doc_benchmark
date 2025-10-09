@@ -1341,10 +1341,8 @@ class TimeSeriesErrorAnalyzer:
         """Create heatmaps for MSE and MAE."""
         print("     🎨 Creating MSE and MAE heatmaps...")
         
-        # Create figure with 2 subplots side by side
-        fig, ax = plt.subplots(1, 1, figsize=(20, max(8, n_trials * 0.05)))
-        
-        # MSE Heatmap
+        # Create MSE Heatmap
+        fig, ax = plt.subplots(1, 1, figsize=(20, 20))
         im1 = ax.imshow(mse_matrix, aspect='auto', cmap='Reds', interpolation='nearest')
         ax.set_title(f'MSE per Trial and Sensor\n{self.subject_id}', fontsize=14, fontweight='bold')
         ax.set_xlabel('Sensors', fontsize=12)
@@ -1355,8 +1353,9 @@ class TimeSeriesErrorAnalyzer:
         plt.savefig(op.join(self.plots_dir, 'heatmap_mse.png'), dpi=300, bbox_inches='tight')
         plt.close()
         
-        # MAE Heatmap
-        im2 = ax.imshow(mae_matrix, aspect='auto', cmap='Reds', interpolation='nearest')
+        # Create MAE Heatmap (separate figure)
+        fig, ax = plt.subplots(1, 1, figsize=(20, 20))
+        im2 = ax.imshow(mae_matrix, aspect='auto', cmap='Blues', interpolation='nearest')
         ax.set_title(f'MAE per Trial and Sensor\n{self.subject_id}', fontsize=14, fontweight='bold')
         ax.set_xlabel('Sensors', fontsize=12)
         ax.set_ylabel('Trials', fontsize=12)

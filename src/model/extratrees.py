@@ -337,9 +337,19 @@ class CrossSubjectClassifier:
                 marker_data = self.load_subject_data(session_path)
                 
                 if marker_data is None:
-                    print(f"   Skipping {subject_session_key}: failed to load data")
+                    print(f"   ⏭️  Skipping {subject_session_key}: failed to load data")
                     subjects_skipped += 1
                     continue
+                
+                # Validate shape consistency
+                if len(subject_data) > 0:
+                    expected_shape = subject_data[0].shape
+                    
+                    if marker_data.shape != expected_shape:
+                        print(f"   ⚠️  Skipping {subject_session_key}: shape mismatch")
+                        print(f"       Expected: {expected_shape}, got: {marker_data.shape}")
+                        subjects_skipped += 1
+                        continue
                 
                 # Store data
                 subject_data.append(marker_data)
@@ -349,12 +359,25 @@ class CrossSubjectClassifier:
                 
                 print(f"   ✓ Loaded {subject_session_key}: {marker_data.shape} features, state={labels_dict[subject_session_key]}")
         
-        print("\n DATA COLLECTION SUMMARY:")
+        print("\n📊 DATA COLLECTION SUMMARY:")
         print(f"    Successfully loaded: {subjects_processed} subject/sessions")
         print(f"    Skipped: {subjects_skipped} subject/sessions")
         
         if subjects_processed == 0:
             raise ValueError("No subjects could be loaded!")
+        
+        # Validate all shapes are consistent before converting to numpy
+        if len(subject_data) > 1:
+            first_shape = subject_data[0].shape
+            all_same = all(d.shape == first_shape for d in subject_data)
+            
+            if not all_same:
+                raise ValueError(
+                    f"Shape inconsistency detected after filtering!\n"
+                    f"  Shapes found: {set(d.shape for d in subject_data)}"
+                )
+            
+            print(f"    ✓ All data validated: {first_shape[0]} features per subject")
         
         # Convert to numpy arrays
         self.X = np.array(subject_data)
@@ -1391,9 +1414,26 @@ class CrossDataClassifier:
                 marker_data_orig, marker_data_recon = self.load_subject_data_both(session_path)
                 
                 if marker_data_orig is None or marker_data_recon is None:
-                    print(f"   Skipping {subject_session_key}: failed to load both data types")
+                    print(f"   ⏭️  Skipping {subject_session_key}: failed to load both data types")
                     subjects_skipped += 1
                     continue
+                
+                # Validate shape consistency
+                if len(subject_data_orig) > 0:
+                    expected_shape_orig = subject_data_orig[0].shape
+                    expected_shape_recon = subject_data_recon[0].shape
+                    
+                    if marker_data_orig.shape != expected_shape_orig:
+                        print(f"   ⚠️  Skipping {subject_session_key}: shape mismatch")
+                        print(f"       Expected orig: {expected_shape_orig}, got: {marker_data_orig.shape}")
+                        subjects_skipped += 1
+                        continue
+                    
+                    if marker_data_recon.shape != expected_shape_recon:
+                        print(f"   ⚠️  Skipping {subject_session_key}: shape mismatch")
+                        print(f"       Expected recon: {expected_shape_recon}, got: {marker_data_recon.shape}")
+                        subjects_skipped += 1
+                        continue
                 
                 # Store data
                 subject_data_orig.append(marker_data_orig)
@@ -1404,12 +1444,28 @@ class CrossDataClassifier:
                 
                 print(f"   ✓ Loaded {subject_session_key}: orig={marker_data_orig.shape}, recon={marker_data_recon.shape}, state={labels_dict[subject_session_key]}")
         
-        print("\n DATA COLLECTION SUMMARY:")
+        print("\n📊 DATA COLLECTION SUMMARY:")
         print(f"    Successfully loaded: {subjects_processed} subject/sessions")
         print(f"    Skipped: {subjects_skipped} subject/sessions")
         
         if subjects_processed == 0:
             raise ValueError("No subjects could be loaded!")
+        
+        # Validate all shapes are consistent before converting to numpy
+        if len(subject_data_orig) > 1:
+            first_shape_orig = subject_data_orig[0].shape
+            first_shape_recon = subject_data_recon[0].shape
+            all_same_orig = all(d.shape == first_shape_orig for d in subject_data_orig)
+            all_same_recon = all(d.shape == first_shape_recon for d in subject_data_recon)
+            
+            if not all_same_orig or not all_same_recon:
+                raise ValueError(
+                    f"Shape inconsistency detected after filtering!\n"
+                    f"  Original shapes: {set(d.shape for d in subject_data_orig)}\n"
+                    f"  Reconstructed shapes: {set(d.shape for d in subject_data_recon)}"
+                )
+            
+            print(f"    ✓ All data validated: {first_shape_orig[0]} features per subject")
         
         # Convert to numpy arrays
         self.X_original = np.array(subject_data_orig)
