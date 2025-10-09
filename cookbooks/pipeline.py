@@ -148,16 +148,103 @@ class Pipeline:
         if missing_files:
             raise FileNotFoundError(f"Missing required source files: {missing_files}")
     
-    def discover_subjects(self) -> List[Tuple[str, str]]:
+    def is_subject_complete(self, subject_id: str, session: str) -> bool:
+        """
+        Check if a subject/session is already complete based on required files and folders.
+        
+        Parameters
+        ----------
+        subject_id : str
+            Subject identifier
+        session : str
+            Session identifier
+            
+        Returns
+        -------
+        bool
+            True if subject/session is complete, False otherwise
+        """
+        results_dir = self.results_dir / "SUBJECTS" / f"sub-{subject_id}" / session
+        
+        # Check if the main result directory exists
+        if not results_dir.exists():
+            return False
+        
+        # Check features_variable folder and required .npy files
+        features_dir = results_dir / "features_variable"
+        required_npy_files = [
+            'scalars_reconstructed.npy',
+            'topos_reconstructed.npy', 
+            'topos_original.npy',
+            'scalars_original.npy'
+        ]
+        
+        if not features_dir.exists():
+            return False
+            
+        for npy_file in required_npy_files:
+            if not (features_dir / npy_file).exists():
+                return False
+        
+        # Check markers_variable folder and required .hdf5 files
+        # Both files should exist for a complete result
+        markers_dir = results_dir / "markers_variable"
+        required_hdf5_files = ['markers_original.hdf5', 'markers_reconstructed.hdf5']
+        
+        if not markers_dir.exists():
+            return False
+            
+        # Check that both hdf5 files exist (pipeline creates both)
+        for hdf5_file in required_hdf5_files:
+            if not (markers_dir / hdf5_file).exists():
+                return False
+        
+        # Check individual_analysis folder and required subfolders/files
+        analysis_dir = results_dir / "individual_analysis"
+        required_analysis_items = [
+            'analysis_summary.json',
+            'global_field_power',
+            'scalars', 
+            'timeseries_error',
+            'topography'
+        ]
+        
+        if not analysis_dir.exists():
+            return False
+            
+        for item in required_analysis_items:
+            item_path = analysis_dir / item
+            if not item_path.exists():
+                return False
+            
+            # For subfolders, check if they contain plots
+            if item_path.is_dir():
+                plots_dir = item_path / "plots"
+                if not plots_dir.exists():
+                    return False
+                # Check if there are any plot files (png, jpg, etc.)
+                plot_files = list(plots_dir.glob("*.png")) + list(plots_dir.glob("*.jpg")) + list(plots_dir.glob("*.jpeg"))
+                if not plot_files:
+                    return False
+        
+        return True
+
+    def discover_subjects(self, force_recompute: bool = False) -> List[Tuple[str, str]]:
         """
         Discover all subjects with available sessions.
         
+        Parameters
+        ----------
+        force_recompute : bool
+            If True, include subjects even if they are already complete
+            
         Returns
         -------
         List[Tuple[str, str]]
             List of (subject_id, session) tuples
         """
         subjects = []
+        skipped_complete = []
         
         for subject_dir in self.data_dir.glob("sub-*"):
             if not subject_dir.is_dir():
@@ -177,11 +264,22 @@ class Pipeline:
                 recon_files = list(session_dir.glob("*_recon.fif"))
                 
                 if original_files and recon_files:
-                    subjects.append((subject_id, session))
+                    # Check if subject is already complete
+                    if not force_recompute and self.is_subject_complete(subject_id, session):
+                        skipped_complete.append((subject_id, session))
+                        self.logger.info(f"⏭️  Skipping {subject_id}/{session} - already complete")
+                    else:
+                        subjects.append((subject_id, session))
+        
+        if skipped_complete:
+            self.logger.info(f"📋 Skipped {len(skipped_complete)} already completed subjects")
+            if self.verbose:
+                for subject_id, session in skipped_complete:
+                    self.logger.debug(f"   - {subject_id}/{session}")
                     
         return subjects
     
-    def resolve_subjects(self, subject_args: List[str]) -> List[Tuple[str, str]]:
+    def resolve_subjects(self, subject_args: List[str], force_recompute: bool = False) -> List[Tuple[str, str]]:
         """
         Resolve subject selection arguments to actual subject/session pairs.
         
@@ -189,13 +287,15 @@ class Pipeline:
         ----------
         subject_args : List[str]
             Subject selection arguments
+        force_recompute : bool
+            If True, include subjects even if they are already complete
             
         Returns
         -------
         List[Tuple[str, str]]
             List of (subject_id, session) tuples
         """
-        all_subjects = self.discover_subjects()
+        all_subjects = self.discover_subjects(force_recompute=force_recompute)
         
         if not all_subjects:
             raise ValueError("No subjects found in data directory")
@@ -277,8 +377,7 @@ class Pipeline:
                 "python", str(self.src_dir / "markers/compute_doc_forest_features_variable.py"),
                 str(markers_dir / "markers_original.hdf5"),
                 "--output-scalars", str(features_dir / "scalars_original.npy"),
-                "--output-topos", str(features_dir / "topos_original.npy"),
-                "--plot"
+                "--output-topos", str(features_dir / "topos_original.npy")
             ]):
                 return False
             
@@ -300,8 +399,7 @@ class Pipeline:
                 "python", str(self.src_dir / "markers/compute_doc_forest_features_variable.py"),
                 str(markers_dir / "markers_reconstructed.hdf5"),
                 "--output-scalars", str(features_dir / "scalars_reconstructed.npy"),
-                "--output-topos", str(features_dir / "topos_reconstructed.npy"),
-                "--plot"
+                "--output-topos", str(features_dir / "topos_reconstructed.npy")
             ]):
                 return False
             
@@ -887,6 +985,8 @@ Examples:
                        help='Skip model training phase')
     parser.add_argument('--skip-smi', action='store_true',
                        help='Skip SymbolicMutualInformation computation (recommended for large datasets)')
+    parser.add_argument('--force-recompute', action='store_true',
+                       help='Force recomputation of already completed subjects')
     
     # Configuration
     parser.add_argument('--data-dir', 
@@ -973,7 +1073,7 @@ Examples:
         return
 
     # Resolve subjects
-    subjects = pipeline.resolve_subjects(subject_args)
+    subjects = pipeline.resolve_subjects(subject_args, force_recompute=args.force_recompute)
     
     if not subjects:
         print("No subjects to process")
