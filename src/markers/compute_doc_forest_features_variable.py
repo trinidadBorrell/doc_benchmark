@@ -26,6 +26,7 @@ References
 
 import numpy as np
 from scipy.stats import trim_mean
+import os
 import os.path as op
 import argparse
 import sys
@@ -409,7 +410,7 @@ def create_montage_layout(n_channels):
 
 
 def compute_features(markers_file, output_scalars=None, output_topos=None, 
-                    n_channels=None, plot=True):
+                    n_channels=None, plot=True, cleanup_hdf5=True):
     """Compute features from markers with variable electrode support.
     
     Parameters
@@ -424,6 +425,10 @@ def compute_features(markers_file, output_scalars=None, output_topos=None,
         Number of channels (if None, inferred from markers)
     plot : bool
         Whether to generate plots
+    cleanup_hdf5 : bool
+        Whether to delete the HDF5 file after successfully creating .npy files.
+        This saves disk space as HDF5 files are large (~30MB each) and no longer
+        needed once the .npy files are created. Default: True
         
     Returns
     -------
@@ -504,13 +509,34 @@ def compute_features(markers_file, output_scalars=None, output_topos=None,
     print(f'Computed {topos.shape[0]} topographic markers with {topos.shape[1]} channels')
     
     # Save outputs
+    scalars_saved = False
+    topos_saved = False
+    
     if output_scalars:
         np.save(output_scalars, scalars)
         print(f"Scalar features saved to: {output_scalars}")
+        scalars_saved = True
     
     if output_topos:
         np.save(output_topos, topos)
         print(f"Topographic features saved to: {output_topos}")
+        topos_saved = True
+    
+    # Cleanup HDF5 file if requested and both outputs were successfully saved
+    if cleanup_hdf5 and scalars_saved and topos_saved:
+        try:
+            # Get file size before deletion for reporting
+            file_size_mb = os.path.getsize(markers_file) / (1024 * 1024)
+            
+            # Delete the HDF5 file
+            os.remove(markers_file)
+            print(f"🗑️  Deleted HDF5 file to save space: {markers_file}")
+            print(f"💾 Freed {file_size_mb:.1f} MB of disk space")
+        except Exception as e:
+            print(f"⚠️  Warning: Could not delete HDF5 file: {e}")
+            print(f"   You can manually delete: {markers_file}")
+    elif cleanup_hdf5 and not (scalars_saved and topos_saved):
+        print(f"ℹ️  Keeping HDF5 file (not all .npy outputs were created)")
     
     # Optional plotting
     if plot and topos.shape[0] > 0:
@@ -622,6 +648,8 @@ def main():
     parser.add_argument('--output-topos', '-t', help='Output topographies file (.npy)')
     parser.add_argument('--n-channels', '-n', type=int, help='Number of channels')
     parser.add_argument('--plot', action='store_true', help='Generate plots')
+    parser.add_argument('--no-cleanup', action='store_true', 
+                       help='Do not delete HDF5 file after creating .npy files (default: delete to save space)')
     
     args = parser.parse_args()
     
@@ -637,7 +665,8 @@ def main():
         output_scalars=scalars_file,
         output_topos=topos_file,
         n_channels=args.n_channels,
-        plot=args.plot
+        plot=args.plot,
+        cleanup_hdf5=not args.no_cleanup  # Delete by default unless --no-cleanup is specified
     )
 
 

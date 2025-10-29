@@ -523,7 +523,7 @@ class GlobalFieldPower:
             os.makedirs(dir_path, exist_ok=True)
     
     def analyze_event_types(self, fif_dir):
-        """Analyze Global Field Power for different event types."""
+        """Analyze Global Field Power for different event types and save metrics for reuse."""
         print("  🌍 Computing Global Field Power analysis...")
         
         # Event types to analyze
@@ -540,14 +540,20 @@ class GlobalFieldPower:
             print("     ⚠️  No reconstructed EEG data found. Will only analyze original data.")
             epochs_recon = None
         
-        print("     📊 Creating Global Field Power plots for event types:")
+        print("     📊 Computing and saving GFP metrics for event types:")
         for event_type in event_types:
             print(f"        - {event_type}")
         
-        # Create time-series plot for each event type
+        # Compute and save GFP metrics for global analysis reuse
+        gfp_metrics = self._compute_and_save_gfp_metrics(event_types, epochs_orig, epochs_recon)
+        
+        # Create time-series plots
         self._create_time_series_plots(event_types, epochs_orig, epochs_recon)
         
         print("     ✅ Global Field Power analysis completed")
+        print(f"     💾 GFP metrics cached for global analysis reuse")
+        
+        return gfp_metrics
     
     def _load_epochs_data(self, data_dir):
         """Load EEG epochs data from .fif files."""
@@ -616,6 +622,82 @@ class GlobalFieldPower:
         gfp_std = np.std(gfp, axis=0)
         
         return gfp_mean, gfp_std
+    
+    def _compute_and_save_gfp_metrics(self, event_types, epochs_orig, epochs_recon=None):
+        """
+        Compute GFP metrics for all event types and save for global analysis reuse.
+        
+        Saves JSON file with:
+        - Times array
+        - GFP data for each event type (original and reconstructed if available)
+        - Metadata (subject info, channel count, etc.)
+        """
+        print("     💾 Computing and caching GFP metrics...")
+        
+        # Get times from epochs
+        times = epochs_orig.times
+        
+        # Initialize metrics storage
+        metrics = {
+            'subject_id': self.subject_id,
+            'analysis_date': datetime.now().isoformat(),
+            'times': times.tolist(),  # Convert to list for JSON serialization
+            'n_channels': len(epochs_orig.ch_names),
+            'sampling_freq': epochs_orig.info['sfreq'],
+            'event_types': {},
+            'has_reconstructed': epochs_recon is not None
+        }
+        
+        # Compute GFP for each event type
+        for event_type in event_types:
+            if event_type in epochs_orig.event_id:
+                print(f"        🧠 Computing GFP for {event_type}...")
+                
+                # Original GFP
+                orig_gfp_mean, orig_gfp_std = self._compute_global_field_power(epochs_orig, event_type)
+                
+                if orig_gfp_mean is not None:
+                    event_metrics = {
+                        'original': {
+                            'gfp_mean': orig_gfp_mean.tolist(),
+                            'gfp_std': orig_gfp_std.tolist(),
+                            'n_epochs': len(epochs_orig[event_type])
+                        }
+                    }
+                    
+                    # Reconstructed GFP (if available)
+                    if epochs_recon is not None and event_type in epochs_recon.event_id:
+                        recon_gfp_mean, recon_gfp_std = self._compute_global_field_power(epochs_recon, event_type)
+                        
+                        if recon_gfp_mean is not None:
+                            event_metrics['reconstructed'] = {
+                                'gfp_mean': recon_gfp_mean.tolist(),
+                                'gfp_std': recon_gfp_std.tolist(),
+                                'n_epochs': len(epochs_recon[event_type])
+                            }
+                            
+                            # Compute difference metrics
+                            gfp_diff = orig_gfp_mean - recon_gfp_mean
+                            event_metrics['difference'] = {
+                                'gfp_diff': gfp_diff.tolist(),
+                                'rmse': float(np.sqrt(np.mean(gfp_diff**2))),
+                                'mae': float(np.mean(np.abs(gfp_diff)))
+                            }
+                    
+                    metrics['event_types'][event_type] = event_metrics
+                    print(f"        ✅ {event_type}: {len(epochs_orig[event_type])} epochs")
+                else:
+                    print(f"        ❌ Failed to compute GFP for {event_type}")
+        
+        # Save metrics to JSON file
+        metrics_file = op.join(self.metrics_dir, 'gfp_metrics.json')
+        with open(metrics_file, 'w') as f:
+            json.dump(metrics, f, indent=2)
+        
+        print(f"     💾 Saved GFP metrics to: {op.basename(metrics_file)}")
+        print(f"     📊 Cached data for {len(metrics['event_types'])} event types")
+        
+        return metrics
     
     def _create_time_series_plots(self, event_types, epochs_orig, epochs_recon=None):
         """Create time-series plots for Global Field Power using plot_gfp function."""
