@@ -28,7 +28,7 @@ import logging
 import random
 from pathlib import Path
 from datetime import datetime
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import multiprocessing
 
@@ -44,7 +44,8 @@ class Pipeline:
                  batch_size: int = 1,
                  verbose: bool = False,
                  dry_run: bool = False,
-                 skip_smi: bool = False):
+                 skip_smi: bool = False,
+                 skip_gfp: bool = False):
         """
         Initialize the pipeline.
         
@@ -66,6 +67,8 @@ class Pipeline:
             Show what would be done without executing
         skip_smi : bool
             Skip SymbolicMutualInformation computation (recommended for large datasets)
+        skip_gfp : bool
+            Skip Global Field Power analysis (speeds up global analysis)
         """
         self.data_dir = Path(data_dir)
         self.results_dir = Path(results_dir)
@@ -79,6 +82,7 @@ class Pipeline:
         self.verbose = verbose
         self.dry_run = dry_run
         self.skip_smi = skip_smi
+        self.skip_gfp = skip_gfp
         
         # Setup logging (must come before using self.logger)
         self._setup_logging()
@@ -152,6 +156,10 @@ class Pipeline:
         """
         Check if a subject/session is already complete based on required files and folders.
         
+        A subject is considered complete if all four .npy feature files exist.
+        The .hdf5 marker files and analysis files are optional for completeness check,
+        as the features are what's needed for downstream model training.
+        
         Parameters
         ----------
         subject_id : str
@@ -171,6 +179,7 @@ class Pipeline:
             return False
         
         # Check features_variable folder and required .npy files
+        # This is the PRIMARY requirement - if all features exist, subject is complete
         features_dir = results_dir / "features_variable"
         required_npy_files = [
             'scalars_reconstructed.npy',
@@ -186,48 +195,84 @@ class Pipeline:
             if not (features_dir / npy_file).exists():
                 return False
         
-        # Check markers_variable folder and required .hdf5 files
-        # Both files should exist for a complete result
-        markers_dir = results_dir / "markers_variable"
-        required_hdf5_files = ['markers_original.hdf5', 'markers_reconstructed.hdf5']
+        # If all feature files exist, the subject is considered complete
+        # We don't require .hdf5 marker files or analysis files to exist
+        # This allows users to delete intermediate .hdf5 files to save space
+        return True
+
+    def is_decoder_subject_complete(self, subject_id: str, session: str, decoder_output_dir: Path) -> bool:
+        """
+        Check if decoder results already exist for a subject/session.
         
-        if not markers_dir.exists():
-            return False
+        Parameters
+        ----------
+        subject_id : str
+            Subject identifier
+        session : str
+            Session identifier
+        decoder_output_dir : Path
+            Decoder output directory to check
             
-        # Check that both hdf5 files exist (pipeline creates both)
-        for hdf5_file in required_hdf5_files:
-            if not (markers_dir / hdf5_file).exists():
-                return False
+        Returns
+        -------
+        bool
+            True if decoder results exist, False otherwise
+        """
+        sub_ses_dir = decoder_output_dir / f"sub-{subject_id}" / f"ses-{session}"
         
-        # Check individual_analysis folder and required subfolders/files
-        analysis_dir = results_dir / "individual_analysis"
-        required_analysis_items = [
-            'analysis_summary.json',
-            'global_field_power',
-            'scalars', 
-            'timeseries_error',
-            'topography'
+        # Check for required decoder files
+        required_files = [
+            sub_ses_dir / "data" / "decoding_results.pkl",
+            sub_ses_dir / "data" / "decoding_summary.json", 
+            sub_ses_dir / "data" / "times.npy"
         ]
         
-        if not analysis_dir.exists():
-            return False
-            
-        for item in required_analysis_items:
-            item_path = analysis_dir / item
-            if not item_path.exists():
-                return False
-            
-            # For subfolders, check if they contain plots
-            if item_path.is_dir():
-                plots_dir = item_path / "plots"
-                if not plots_dir.exists():
-                    return False
-                # Check if there are any plot files (png, jpg, etc.)
-                plot_files = list(plots_dir.glob("*.png")) + list(plots_dir.glob("*.jpg")) + list(plots_dir.glob("*.jpeg"))
-                if not plot_files:
-                    return False
+        return all(f.exists() for f in required_files)
         
-        return True
+    def find_best_decoder_results_directory(self) -> Tuple[Path, dict]:
+        """
+        Find the best decoder results directory (one with most completed subjects).
+        
+        Returns
+        -------
+        Tuple[Path, dict]
+            Path to best decoder directory and dict with completion stats per directory
+        """
+        decoder_base_dir = self.results_dir / "DECODER"
+        if not decoder_base_dir.exists():
+            return None, {}
+            
+        # Find all decoder_results_* directories
+        decoder_dirs = list(decoder_base_dir.glob("decoder_results_*"))
+        if not decoder_dirs:
+            return None, {}
+        
+        # Get all subjects that could potentially be processed
+        subjects_with_data = self.discover_subjects(force_recompute=True)
+        
+        # Check completion status for each directory
+        directory_stats = {}
+        for decoder_dir in decoder_dirs:
+            completed_count = 0
+            completed_subjects = []
+            
+            for subject_id, session in subjects_with_data:
+                if self.is_decoder_subject_complete(subject_id, session, decoder_dir):
+                    completed_count += 1
+                    completed_subjects.append((subject_id, session))
+            
+            directory_stats[decoder_dir] = {
+                'completed_count': completed_count,
+                'completed_subjects': completed_subjects,
+                'total_possible': len(subjects_with_data)
+            }
+        
+        # Find directory with most completed subjects
+        if not directory_stats:
+            return None, {}
+        
+        best_dir = max(directory_stats.keys(), key=lambda d: directory_stats[d]['completed_count'])
+        return best_dir, directory_stats
 
     def discover_subjects(self, force_recompute: bool = False) -> List[Tuple[str, str]]:
         """
@@ -470,24 +515,37 @@ class Pipeline:
             success = True
             for marker_type in marker_types:
                 self.logger.info(f"Training cross-data {marker_type} models...")
+                self.logger.info("=" * 70)
+                self.logger.info("CROSS-DATA CLASSIFICATION APPROACH:")
+                self.logger.info("  This approach ensures NO SUBJECT BIAS and NO DATA LEAKAGE:")
+                self.logger.info("  1. Uses SAME train/test subject splits for both original and reconstructed")
+                self.logger.info("  2. Trains Model A on ORIGINAL data")
+                self.logger.info("  3. Trains Model B on RECONSTRUCTED data")
+                self.logger.info("  4. Tests BOTH models on BOTH test sets (original & reconstructed)")
+                self.logger.info("  5. All 4 test scenarios use the SAME test subjects")
+                self.logger.info("=" * 70)
                 
                 config_output_dir = models_output_dir / f"{marker_type}"
                 
                 # Use the new cross-data classification which trains both models and tests on both test sets
+                # CRITICAL: The --cross-data flag enables proper cross-testing with consistent subjects
                 if not self._run_command([
                     "python", str(self.src_dir / "model/extratrees.py"),
                     "--data-dir", str(self.results_dir / "SUBJECTS"),
                     "--patient-labels", str(patient_labels_path),
                     "--output-dir", str(config_output_dir),
                     "--marker-type", marker_type,
-                    "--cross-data"  # This tells the script to use CrossDataClassifier
+                    "--cross-data"  # CRITICAL: Enables CrossDataClassifier for proper cross-testing
                 ]):
                     self.logger.error(f"Failed to train cross-data {marker_type} models")
                     success = False
                 else:
                     self.logger.info(f"✓ Cross-data {marker_type} models completed")
-                    self.logger.info(f"   - Model A (original) trained and tested on both test sets")
-                    self.logger.info(f"   - Model B (reconstructed) trained and tested on both test sets")
+                    self.logger.info(f"   Results saved with 4 test scenarios:")
+                    self.logger.info(f"   - Model A (original) → Original test subjects")
+                    self.logger.info(f"   - Model A (original) → Reconstructed test subjects")
+                    self.logger.info(f"   - Model B (reconstructed) → Original test subjects")
+                    self.logger.info(f"   - Model B (reconstructed) → Reconstructed test subjects")
             
             if success:
                 self.logger.info("✓ Global models training completed")
@@ -557,10 +615,17 @@ class Pipeline:
             self.logger.error(f"✗ Analysis failed for {subject_id}/{session}: {e}")
             return False
     
-    def run_decoder_phase(self) -> bool:
+    def run_decoder_phase(self, force_recompute: bool = False, aggregate_only: bool = False) -> bool:
         """
         Run decoder phase across all processed subjects.
         This decodes original vs reconstructed EEG data.
+        
+        Parameters
+        ----------
+        force_recompute : bool
+            If True, recompute all subjects even if they already exist
+        aggregate_only : bool
+            If True, only aggregate existing results without processing subjects
         
         Returns
         -------
@@ -570,22 +635,74 @@ class Pipeline:
         try:
             self.logger.info("Running decoder analysis")
             
-            # Create decoder output directory
-            decoder_output_dir = self.results_dir / "DECODER" / f"decoder_results_{datetime.now().strftime('%Y-%m-%d_%H%M%S')}"
-            decoder_output_dir.mkdir(parents=True, exist_ok=True)
+            # Check for existing decoder results across ALL directories
+            best_decoder_dir, directory_stats = self.find_best_decoder_results_directory()
+            decoder_output_dir = None
             
-            self.logger.info(f"Decoder output directory: {decoder_output_dir}")
+            if best_decoder_dir and not force_recompute:
+                # Display summary of all decoder directories
+                self.logger.info("📊 Decoder directories found:")
+                for decoder_dir, stats in directory_stats.items():
+                    completion_pct = (stats['completed_count'] / stats['total_possible']) * 100 if stats['total_possible'] > 0 else 0
+                    status = "✅ BEST" if decoder_dir == best_decoder_dir else "📁"
+                    self.logger.info(f"   {status} {decoder_dir.name}: {stats['completed_count']}/{stats['total_possible']} subjects ({completion_pct:.1f}%)")
+                
+                # Get stats for best directory
+                best_stats = directory_stats[best_decoder_dir]
+                completed_subjects = best_stats['completed_subjects']
+                subjects_with_data = self.discover_subjects(force_recompute=True)
+                pending_subjects = [s for s in subjects_with_data if s not in completed_subjects]
+                
+                self.logger.info(f"🎯 Using best directory: {best_decoder_dir}")
+                self.logger.info(f"📈 Status: {len(completed_subjects)} completed, {len(pending_subjects)} pending")
+                
+                if pending_subjects:
+                    # Use best existing directory 
+                    decoder_output_dir = best_decoder_dir
+                    self.logger.info(f"🔄 Resuming decoder analysis in existing directory")
+                    self.logger.info(f"📋 Pending subjects: {[f'{s}/{ses}' for s, ses in pending_subjects[:5]]}{'...' if len(pending_subjects) > 5 else ''}")
+                else:
+                    self.logger.info("✅ All subjects already processed - skipping decoder analysis")
+                    return True
+            else:
+                if force_recompute:
+                    self.logger.info("🔄 Force recompute enabled - will create new directory")
+                else:
+                    self.logger.info("📁 No existing decoder directories found - will create new directory")
             
-            # Run decoder on all available subjects for robust population-level analysis
-            # Memory optimization: decoder now uses float32 and n_jobs=1
-            if not self._run_command([
+            if decoder_output_dir is None:
+                # Create new decoder output directory
+                decoder_output_dir = self.results_dir / "DECODER" / f"decoder_results_{datetime.now().strftime('%Y-%m-%d_%H%M%S')}"
+                decoder_output_dir.mkdir(parents=True, exist_ok=True)
+                self.logger.info(f"🆕 Created new decoder output directory: {decoder_output_dir}")
+            
+            self.logger.info(f"🎯 Final decoder directory: {decoder_output_dir}")
+            
+            # Build decoder command
+            cmd = [
                 "python", str(self.src_dir / "decoder/decoder.py"),
                 "--main_path", str(self.data_dir),
                 "--output_dir", str(decoder_output_dir),
                 "--cv", "3",
                 "--n_jobs", "1",  # Avoid memory multiplication from parallelization
                 "--verbose"
-            ]):
+            ]
+            
+            # Add patient labels for subject-type aggregation
+            patient_labels_path = self.metadata_dir / "patient_labels_with_controls.csv"
+            if patient_labels_path.exists():
+                cmd.extend(["--patient-labels", str(patient_labels_path)])
+                self.logger.info(f"📊 Using patient labels for subject-type aggregation: {patient_labels_path}")
+            
+            # Add aggregate-only flag if requested
+            if aggregate_only:
+                cmd.append("--aggregate-only")
+                self.logger.info("🔄 Aggregate-only mode: will only aggregate existing results")
+            
+            # Run decoder on all available subjects for robust population-level analysis
+            # Memory optimization: decoder now uses float32 and n_jobs=1
+            # The decoder script itself will skip subjects that are already complete
+            if not self._run_command(cmd):
                 return False
             
             self.logger.info("✓ Decoder analysis completed")
@@ -618,12 +735,20 @@ class Pipeline:
             global_output_dir.mkdir(parents=True, exist_ok=True)
             results_dir = self.results_dir / "SUBJECTS"
             
-            if not self._run_command([
+            # Build command with optional skip-gfp parameter
+            cmd = [
                 "python", str(self.src_dir / "analysis/global_analysis.py"),
                 "--results-dir", str(results_dir),
                 "--output-dir", str(global_output_dir),
-                "--patient-labels", str(patient_labels_path)
-            ]):
+                "--patient-labels", str(patient_labels_path),
+                "--data-dir", str(self.data_dir)
+            ]
+            
+            if self.skip_gfp:
+                cmd.append("--skip-gfp")
+                self.logger.info("🚫 Skip GFP option enabled for global analysis")
+            
+            if not self._run_command(cmd):
                 return False
             
             self.logger.info("✓ Global analysis completed")
@@ -730,7 +855,8 @@ class Pipeline:
                     skip_analysis: bool = False,
                     skip_decoder: bool = False,
                     skip_global: bool = False,
-                    skip_statistics: bool = False) -> dict:
+                    skip_statistics: bool = False,
+                    force_recompute: bool = False) -> dict:
         """
         Run the complete pipeline for multiple subjects.
         
@@ -757,6 +883,8 @@ class Pipeline:
             Skip global analysis phase
         skip_statistics : bool
             Skip statistical analysis phase
+        force_recompute : bool
+            Force recomputation of all phases, including decoder
             
         Returns
         -------
@@ -785,7 +913,7 @@ class Pipeline:
         # Phase 2: Decoder Analysis
         if not skip_decoder and self.completed_subjects:
             self.logger.info("Starting decoder analysis phase...")
-            decoder_success = self.run_decoder_phase()
+            decoder_success = self.run_decoder_phase(force_recompute=force_recompute)
             if not decoder_success:
                 self.logger.error("Decoder analysis failed")
 
@@ -793,12 +921,14 @@ class Pipeline:
         if not skip_global and self.completed_subjects:
             self.run_global_analysis()
         
-        # Phase 4: Statistical Analysis (after global)
-        if not skip_statistics and self.completed_subjects:
-            self.logger.info("Starting statistical analysis phase...")
+        # Phase 4: Statistical Analysis (after global) - only run if global analysis was skipped
+        if not skip_statistics and self.completed_subjects and skip_global:
+            self.logger.info("Starting standalone statistical analysis phase...")
             stats_success = self.run_statistical_analysis()
             if not stats_success:
                 self.logger.error("Statistical analysis failed")
+        elif not skip_statistics and not skip_global:
+            self.logger.info("✓ Statistical analysis was included in global analysis")
         
         # Phase 5: Models Training (run even if some subjects failed, as long as we have enough data)
         if not skip_models:
@@ -985,8 +1115,12 @@ Examples:
                        help='Skip model training phase')
     parser.add_argument('--skip-smi', action='store_true',
                        help='Skip SymbolicMutualInformation computation (recommended for large datasets)')
+    parser.add_argument('--skip-gfp', action='store_true',
+                       help='Skip Global Field Power analysis (speeds up global analysis)')
     parser.add_argument('--force-recompute', action='store_true',
                        help='Force recomputation of already completed subjects')
+    parser.add_argument('--aggregate', action='store_true',
+                       help='For --decoder-only: aggregate existing results without processing subjects')
     
     # Configuration
     parser.add_argument('--data-dir', 
@@ -1049,7 +1183,8 @@ Examples:
         batch_size=args.batch_size,
         verbose=args.verbose,
         dry_run=args.dry_run,
-        skip_smi=args.skip_smi
+        skip_smi=args.skip_smi,
+        skip_gfp=args.skip_gfp
     )
     
     # Handle statistics-only mode
@@ -1059,7 +1194,8 @@ Examples:
     
     # Handle decoder-only mode
     if args.decoder_only:
-        pipeline.run_decoder_phase()
+        aggregate_only = getattr(args, 'aggregate', False)
+        pipeline.run_decoder_phase(force_recompute=args.force_recompute, aggregate_only=aggregate_only)
         return
     
     # Handle global-only mode
@@ -1087,7 +1223,8 @@ Examples:
         skip_analysis=skip_analysis,
         skip_decoder=skip_decoder,
         skip_global=skip_global,
-        skip_statistics=skip_statistics
+        skip_statistics=skip_statistics,
+        force_recompute=args.force_recompute
     )
 
 

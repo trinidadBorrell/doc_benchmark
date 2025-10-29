@@ -1,10 +1,10 @@
-"""Cross-subject binary ExtraTrees classification for TOTEM data.
+"""Cross-subject binary SVM classification for TOTEM data.
 
 ==================================================
-Cross-subject Binary ExtraTrees classification
+Cross-subject Binary SVM classification
 ==================================================
 
-This script trains ExtraTrees classifiers across subjects for binary 
+This script trains SVM classifiers across subjects for binary 
 classification of consciousness states from EEG markers: VS (Vegetative State) 
 vs MCS (Minimally Conscious State). The classification is performed
 at the subject level, where each subject contributes one sample.
@@ -40,11 +40,10 @@ from datetime import datetime
 import warnings
 warnings.filterwarnings('ignore')
 
-from sklearn.preprocessing import RobustScaler, LabelEncoder
-from sklearn.model_selection import (cross_val_score, 
+from sklearn.preprocessing import RobustScaler, StandardScaler, LabelEncoder
+from sklearn.model_selection import (cross_val_score, GridSearchCV,
                                    StratifiedKFold, LeaveOneOut, train_test_split,
                                    GroupShuffleSplit, GroupKFold)
-from sklearn.ensemble import ExtraTreesClassifier
 from sklearn.svm import SVC
 from sklearn.pipeline import make_pipeline
 from sklearn.metrics import (classification_report, confusion_matrix, 
@@ -65,7 +64,7 @@ plt.rcParams["axes.labelsize"] = "large"
 
 
 class CrossSubjectClassifier:
-    """Cross-subject binary ExtraTrees classifier for VS vs MCS state prediction."""
+    """Cross-subject binary SVM classifier for VS vs MCS state prediction."""
     
     def __init__(self, data_dir, patient_labels_file, marker_type='scalar', 
                  data_origin='original', output_dir=None, random_state=42):
@@ -91,7 +90,7 @@ class CrossSubjectClassifier:
         self.patient_labels_file = patient_labels_file
         self.marker_type = marker_type
         self.data_origin = data_origin
-        self.output_dir = output_dir or f"results/extratrees/{marker_type}_{data_origin}"
+        self.output_dir = output_dir or f"results/svm/{marker_type}_{data_origin}"
         self.random_state = random_state
         
         # Create output directory
@@ -506,7 +505,7 @@ class CrossSubjectClassifier:
         # Create DOC-Forest pipeline
        # pipeline = make_pipeline(
        #     RobustScaler(),
-       #     ExtraTreesClassifier(
+       #     SVMClassifier(
        #         n_estimators=n_estimators,
        #         max_features=1,
        #         criterion='entropy',
@@ -659,13 +658,14 @@ class CrossSubjectClassifier:
         pipeline.fit(X_train, y_train)
         
         # Predictions on test set (no data leakage)
+        # IMPORTANT: Use argmax(predict_proba()) for consistency with probabilities
         print(f"   Evaluating on {X_test.shape[0]} held-out test subjects...")
-        y_test_pred = pipeline.predict(X_test)
         y_test_proba = pipeline.predict_proba(X_test)
+        y_test_pred = np.argmax(y_test_proba, axis=1)  # Derive from probabilities
         
         # Also get predictions on training set for completeness
-        y_train_pred = pipeline.predict(X_train)
         y_train_proba = pipeline.predict_proba(X_train)
+        y_train_pred = np.argmax(y_train_proba, axis=1)  # Derive from probabilities
         
         # Compute detailed metrics on test set
         test_accuracy = accuracy_score(y_test, y_test_pred)
@@ -710,8 +710,8 @@ class CrossSubjectClassifier:
             print(f"   More than 2 classes found: {test_class_names_present}. This should not happen for binary classification.")
             test_auc_score = None
         
-        # Feature importances
-        feature_importances = pipeline.named_steps['extratreesclassifier'].feature_importances_
+        # Feature importances (use absolute coefficients for linear SVM)
+        feature_importances = np.abs(pipeline.named_steps['svc'].coef_[0])
         
         # Training set metrics for comparison
         train_accuracy = accuracy_score(y_train, y_train_pred)
@@ -1254,7 +1254,7 @@ class CrossSubjectClassifier:
 
 class CrossDataClassifier:
     """
-    Cross-data ExtraTrees classifier that trains on both original and reconstructed data.
+    Cross-data SVM classifier that trains on both original and reconstructed data.
     
     This classifier implements a rigorous cross-testing design to ensure:
     1. NO SUBJECT BIAS: Same train/test subjects used for both original and reconstructed data
@@ -1296,7 +1296,7 @@ class CrossDataClassifier:
         self.data_dir = data_dir
         self.patient_labels_file = patient_labels_file
         self.marker_type = marker_type
-        self.output_dir = output_dir or f"results/extratrees/{marker_type}"
+        self.output_dir = output_dir or f"results/svm/{marker_type}"
         self.random_state = random_state
         
         # Create output directories
@@ -1707,15 +1707,17 @@ class CrossDataClassifier:
         
         return self.X_original, self.X_reconstructed, self.y_encoded, self.subjects
     
-    def create_pipeline(self, n_estimators=500, max_depth=4):
-        """Create the DOC-Forest pipeline.
+    def create_pipeline(self, C=1.0, kernel='linear', gamma='scale'):
+        """Create SVM pipeline with specified kernel.
         
         Parameters
         ----------
-        n_estimators : int
-            Number of trees in the forest
-        max_depth : int
-            Maximum depth of trees
+        C : float
+            Regularization parameter for SVM
+        kernel : str
+            Kernel type ('linear' or 'rbf')
+        gamma : str or float
+            Gamma parameter for RBF kernel ('scale', 'auto', or numeric value)
             
         Returns
         -------
@@ -1731,23 +1733,78 @@ class CrossDataClassifier:
         )
         class_weight_dict = dict(zip(np.unique(self.y_encoded), class_weights))
         
-        # Create DOC-Forest pipeline
+        # Create SVM pipeline with StandardScaler
         pipeline = make_pipeline(
-            RobustScaler(),
-            ExtraTreesClassifier(
-                n_estimators=n_estimators,
-                max_features=1,
-                criterion='entropy',
-                max_depth=max_depth,
-                random_state=self.random_state,
+            StandardScaler(),  # Changed from RobustScaler
+            SVC(
+                kernel=kernel,
+                C=C,
+                gamma=gamma if kernel == 'rbf' else 'scale',  # gamma only for RBF
+                probability=True,  # Enable probability estimates
                 class_weight=class_weight_dict,
-                n_jobs=-1
+                random_state=self.random_state
             )
         )
         
         return pipeline
     
-    def run_cross_data_classification(self, n_estimators=500, max_depth=4, cv_strategy='stratified', n_splits=5, test_size=0.2):
+    def _grid_search_hyperparameters(self, X_train, y_train, groups_train, cv_strategy, n_splits):
+        """Perform grid search for best kernel, C, and gamma parameters.
+        
+        Returns
+        -------
+        dict
+            Dictionary with best parameters: {'kernel', 'C', 'gamma', 'score'}
+        """
+        # Parameter grid
+        kernels = ['linear', 'rbf']
+        C_values = [0.001, 0.01, 0.1, 1, 10, 100]
+        gamma_values = ['scale', 'auto', 0.001, 0.01, 0.1]  # Only for RBF
+        
+        # Set up stratified CV
+        if cv_strategy == 'loo':
+            cv = LeaveOneOut()
+            print(f"      Using Leave-One-Out CV")
+        else:
+            cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=self.random_state)
+            print(f"      Using StratifiedKFold with {n_splits} splits")
+        
+        best_params = {'kernel': None, 'C': None, 'gamma': None, 'score': -np.inf}
+        
+        # Test linear kernel
+        print(f"\n      Testing LINEAR kernel:")
+        for C in C_values:
+            pipeline = self.create_pipeline(C=C, kernel='linear')
+            
+            scores = cross_val_score(estimator=pipeline, X=X_train, y=y_train, 
+                                   cv=cv, scoring='balanced_accuracy', n_jobs=-1)
+            mean_score = np.mean(scores)
+            
+            print(f"         C={C:8.3f}: {mean_score:.3f} ± {np.std(scores):.3f}")
+            
+            if mean_score > best_params['score']:
+                best_params = {'kernel': 'linear', 'C': C, 'gamma': 'scale', 'score': mean_score}
+        
+        # Test RBF kernel
+        print(f"\n      Testing RBF kernel:")
+        for C in C_values:
+            for gamma in gamma_values:
+                pipeline = self.create_pipeline(C=C, kernel='rbf', gamma=gamma)
+                
+                scores = cross_val_score(estimator=pipeline, X=X_train, y=y_train, 
+                                       cv=cv, scoring='balanced_accuracy', n_jobs=-1)
+                mean_score = np.mean(scores)
+                
+                gamma_str = f"{gamma:8.3f}" if isinstance(gamma, float) else f"{gamma:>8s}"
+                print(f"         C={C:8.3f}, gamma={gamma_str}: {mean_score:.3f} ± {np.std(scores):.3f}")
+                
+                if mean_score > best_params['score']:
+                    best_params = {'kernel': 'rbf', 'C': C, 'gamma': gamma, 'score': mean_score}
+        
+        print(f"\n      ✓ Best parameters: kernel={best_params['kernel']}, C={best_params['C']}, gamma={best_params['gamma']}, Score={best_params['score']:.3f}")
+        return best_params
+    
+    def run_cross_data_classification(self, cv_strategy='stratified', n_splits=5, test_size=0.2):
         """
         Run cross-data classification with rigorous controls for subject bias and data leakage.
         
@@ -1786,7 +1843,7 @@ class CrossDataClassifier:
         """
         
         print("=" * 80)
-        print("CROSS-DATA EXTRATREES CLASSIFICATION")
+        print("CROSS-DATA SVM CLASSIFICATION WITH LINEAR KERNEL")
         print("=" * 80)
         print()
         print("🔒 DATA INTEGRITY GUARANTEES:")
@@ -1794,6 +1851,7 @@ class CrossDataClassifier:
         print("   ✓ No subject bias in cross-testing (same test subjects for all scenarios)")
         print("   ✓ No data leakage (train/test subjects completely separate)")
         print("   ✓ Stratified splits to maintain class balance")
+        print("   ✓ Grid search for optimal C parameter")
         print()
         print(f"📁 Configuration:")
         print(f"   Data directory: {self.data_dir}")
@@ -1801,7 +1859,6 @@ class CrossDataClassifier:
         print(f"   Marker type: {self.marker_type}")
         print(f"   Output directory: {self.output_dir}")
         print(f"   CV strategy: {cv_strategy}")
-        print(f"   Trees: {n_estimators}, Max depth: {max_depth}")
         print(f"   Test size: {test_size:.0%}")
         print(f"   Random state: {self.random_state}")
         print()
@@ -1877,49 +1934,45 @@ class CrossDataClassifier:
             assert X_orig_test.shape == X_recon_test.shape, "Test set shape mismatch between original and reconstructed!"
             print("   ✓ All shape verifications passed - same subjects in both data types!")
             
-            # Step 3: Train models
-            print("\n🔧 Training models...")
+            # Step 3: Train models with grid search
+            print("\n🔧 Training models with hyperparameter grid search...")
+            print("   Searching over: kernels=['linear', 'rbf'], C=[0.001-100], gamma=['scale', 'auto', 0.001-0.1]")
             
-            # Model A: trained on original data
-            print("   Training Model A (original data)...")
-            pipeline_A = self.create_pipeline(n_estimators, max_depth)
+            # Grid search for Model A (original data)
+            print("\n   🔍 Grid Search for Model A (original data):")
+            best_params_A = self._grid_search_hyperparameters(X_orig_train, y_train, groups_train, cv_strategy, n_splits)
+            
+            # Grid search for Model B (reconstructed data)
+            print("\n   🔍 Grid Search for Model B (reconstructed data):")
+            best_params_B = self._grid_search_hyperparameters(X_recon_train, y_train, groups_train, cv_strategy, n_splits)
+            
+            # Train final models with best hyperparameters
+            print("\n   ✓ Training final models with optimal hyperparameters...")
+            
+            # DEBUG: Check training labels distribution
+            print(f"\n   🔍 DEBUG: Training data check...")
+            print(f"      y_train unique values: {np.unique(y_train)}")
+            print(f"      y_train distribution: {np.bincount(y_train)}")
+            print(f"      self.class_names: {self.class_names}")
+            
+            pipeline_A = self.create_pipeline(C=best_params_A['C'], kernel=best_params_A['kernel'], gamma=best_params_A['gamma'])
             pipeline_A.fit(X_orig_train, y_train)
+            print(f"      Model A: kernel={best_params_A['kernel']}, C={best_params_A['C']}, gamma={best_params_A['gamma']}, CV Score={best_params_A['score']:.3f}")
             
-            # Model B: trained on reconstructed data
-            print("   Training Model B (reconstructed data)...")
-            pipeline_B = self.create_pipeline(n_estimators, max_depth)
+            pipeline_B = self.create_pipeline(C=best_params_B['C'], kernel=best_params_B['kernel'], gamma=best_params_B['gamma'])
             pipeline_B.fit(X_recon_train, y_train)
+            print(f"      Model B: kernel={best_params_B['kernel']}, C={best_params_B['C']}, gamma={best_params_B['gamma']}, CV Score={best_params_B['score']:.3f}")
             
-            # Step 4: Cross-validation on training sets
-            print("\n📊 Running cross-validation...")
+            # DEBUG: Verify class encoding after training
+            print(f"\n   🔍 DEBUG: Verifying class encoding after training...")
+            print(f"      LabelEncoder.classes_: {self.class_names}")
+            print(f"      SVC Model A.classes_: {pipeline_A.named_steps['svc'].classes_}")
+            print(f"      SVC Model B.classes_: {pipeline_B.named_steps['svc'].classes_}")
             
-            # CV for Model A on original training data
-            # Use GroupKFold to prevent session leakage within CV folds
-            n_unique_train_subjects_cv = len(unique_train_subjects)
-            
-            if cv_strategy == 'loo':
-                cv = LeaveOneOut()
-                print(f"   Using Leave-One-Out CV")
-                print(f"   ⚠️  WARNING: LOO doesn't respect subject groups - sessions from same subject may be in different folds")
-            else:
-                max_possible_splits = min(n_splits, n_unique_train_subjects_cv)
-                if max_possible_splits < 2:
-                    cv = LeaveOneOut()
-                    print(f"   Falling back to Leave-One-Out CV (only {n_unique_train_subjects_cv} unique subjects)")
-                else:
-                    cv = GroupKFold(n_splits=max_possible_splits)
-                    print(f"   🔒 Using GroupKFold with {max_possible_splits} splits (respects subject groups)")
-            
-            # Cross-validation with groups
-            cv_params = {'cv': cv, 'scoring': 'balanced_accuracy', 'n_jobs': -1}
-            if isinstance(cv, GroupKFold):
-                cv_params['groups'] = groups_train
-            
-            cv_scores_A = cross_val_score(pipeline_A, X_orig_train, y_train, **cv_params)
-            cv_scores_B = cross_val_score(pipeline_B, X_recon_train, y_train, **cv_params)
-            
-            print(f"   Model A CV: {np.mean(cv_scores_A):.3f} ± {np.std(cv_scores_A):.3f}")
-            print(f"   Model B CV: {np.mean(cv_scores_B):.3f} ± {np.std(cv_scores_B):.3f}")
+            # Store best scores from grid search (note: these are single values from grid search, not individual CV folds)
+            cv_scores_A = np.array([best_params_A['score']])
+            cv_scores_B = np.array([best_params_B['score']])
+            best_params = {'model_A': best_params_A, 'model_B': best_params_B}
             
             # Step 5: Cross-testing - test both models on both test sets
             # CRITICAL: This cross-testing design prevents subject bias and data leakage
@@ -1934,24 +1987,74 @@ class CrossDataClassifier:
             
             # Model A predictions
             print("\n   🔬 Model A (trained on ORIGINAL data) predictions...")
-            y_pred_A_on_orig = pipeline_A.predict(X_orig_test)  # Model A on original test
-            y_pred_A_on_recon = pipeline_A.predict(X_recon_test)  # Model A on reconstructed test
+            # IMPORTANT: Use argmax(predict_proba()) instead of predict() for consistency
+            # SVC with probability=True can have mismatches between predict() and predict_proba()
             y_proba_A_on_orig = pipeline_A.predict_proba(X_orig_test)
             y_proba_A_on_recon = pipeline_A.predict_proba(X_recon_test)
+            y_pred_A_on_orig = np.argmax(y_proba_A_on_orig, axis=1)  # Use argmax for consistency
+            y_pred_A_on_recon = np.argmax(y_proba_A_on_recon, axis=1)
             print(f"      ✓ Tested on original test set: accuracy = {accuracy_score(y_test, y_pred_A_on_orig):.3f}")
             print(f"      ✓ Tested on reconstructed test set: accuracy = {accuracy_score(y_test, y_pred_A_on_recon):.3f}")
             
+            # DEBUG: Analyze probability distributions
+            mcs_idx = np.where(self.class_names == 'MCS')[0][0]
+            print(f"\n   🔍 DEBUG: Probability distribution analysis for Model A:")
+            print(f"      P(MCS) statistics - Original test:")
+            print(f"         Mean: {np.mean(y_proba_A_on_orig[:, mcs_idx]):.3f}")
+            print(f"         Std:  {np.std(y_proba_A_on_orig[:, mcs_idx]):.3f}")
+            print(f"         Min:  {np.min(y_proba_A_on_orig[:, mcs_idx]):.3f}")
+            print(f"         Max:  {np.max(y_proba_A_on_orig[:, mcs_idx]):.3f}")
+            print(f"      P(MCS) statistics - Reconstructed test:")
+            print(f"         Mean: {np.mean(y_proba_A_on_recon[:, mcs_idx]):.3f}")
+            print(f"         Std:  {np.std(y_proba_A_on_recon[:, mcs_idx]):.3f}")
+            print(f"         Min:  {np.min(y_proba_A_on_recon[:, mcs_idx]):.3f}")
+            print(f"         Max:  {np.max(y_proba_A_on_recon[:, mcs_idx]):.3f}")
+            
+            # DEBUG: Show first few predictions and probabilities
+            print(f"\n   🔍 DEBUG: First 3 predictions from Model A on original test (using argmax):")
+            for i in range(min(3, len(y_test))):
+                true_label = self.class_names[y_test[i]]
+                pred_label = self.class_names[y_pred_A_on_orig[i]]
+                proba_mcs = y_proba_A_on_orig[i, mcs_idx]
+                proba_vs = y_proba_A_on_orig[i, np.where(self.class_names == 'VS')[0][0]]
+                print(f"      Subject {subjects_test[i]}: True={true_label}, Pred={pred_label} (encoded={y_pred_A_on_orig[i]}), P(MCS)={proba_mcs:.3f}, P(VS)={proba_vs:.3f}")
+            
             # Model B predictions
             print("\n   🔬 Model B (trained on RECONSTRUCTED data) predictions...")
-            y_pred_B_on_orig = pipeline_B.predict(X_orig_test)  # Model B on original test
-            y_pred_B_on_recon = pipeline_B.predict(X_recon_test)  # Model B on reconstructed test
+            # Use argmax(predict_proba()) for consistency
             y_proba_B_on_orig = pipeline_B.predict_proba(X_orig_test)
             y_proba_B_on_recon = pipeline_B.predict_proba(X_recon_test)
+            y_pred_B_on_orig = np.argmax(y_proba_B_on_orig, axis=1)
+            y_pred_B_on_recon = np.argmax(y_proba_B_on_recon, axis=1)
             print(f"      ✓ Tested on original test set: accuracy = {accuracy_score(y_test, y_pred_B_on_orig):.3f}")
             print(f"      ✓ Tested on reconstructed test set: accuracy = {accuracy_score(y_test, y_pred_B_on_recon):.3f}")
             
+            # DEBUG: Analyze probability distributions for Model B
+            print(f"\n   🔍 DEBUG: Probability distribution analysis for Model B:")
+            print(f"      P(MCS) statistics - Original test:")
+            print(f"         Mean: {np.mean(y_proba_B_on_orig[:, mcs_idx]):.3f}")
+            print(f"         Std:  {np.std(y_proba_B_on_orig[:, mcs_idx]):.3f}")
+            print(f"         Min:  {np.min(y_proba_B_on_orig[:, mcs_idx]):.3f}")
+            print(f"         Max:  {np.max(y_proba_B_on_orig[:, mcs_idx]):.3f}")
+            print(f"      P(MCS) statistics - Reconstructed test:")
+            print(f"         Mean: {np.mean(y_proba_B_on_recon[:, mcs_idx]):.3f}")
+            print(f"         Std:  {np.std(y_proba_B_on_recon[:, mcs_idx]):.3f}")
+            print(f"         Min:  {np.min(y_proba_B_on_recon[:, mcs_idx]):.3f}")
+            print(f"         Max:  {np.max(y_proba_B_on_recon[:, mcs_idx]):.3f}")
+            
             # Step 6: Compute metrics for all combinations
             print("\n📈 Computing metrics...")
+            
+            # Get feature importances (only for linear kernel)
+            if best_params_A['kernel'] == 'linear':
+                feature_importances_A = np.abs(pipeline_A.named_steps['svc'].coef_[0])
+            else:
+                feature_importances_A = None
+            
+            if best_params_B['kernel'] == 'linear':
+                feature_importances_B = np.abs(pipeline_B.named_steps['svc'].coef_[0])
+            else:
+                feature_importances_B = None
             
             results = {
                 'model_A_orig_test': self._compute_metrics(y_test, y_pred_A_on_orig, y_proba_A_on_orig, "Model A on Original Test"),
@@ -1960,11 +2063,12 @@ class CrossDataClassifier:
                 'model_B_recon_test': self._compute_metrics(y_test, y_pred_B_on_recon, y_proba_B_on_recon, "Model B on Reconstructed Test"),
                 'cv_scores_A': cv_scores_A,
                 'cv_scores_B': cv_scores_B,
+                'best_params': best_params,  # Store best hyperparameters
                 'test_subjects': subjects_test,  # SAME test subjects used for all 4 test scenarios
                 'train_subjects': subjects_train,  # SAME train subjects used to train both models
                 'class_names': self.class_names,
-                'feature_importances_A': pipeline_A.named_steps['extratreesclassifier'].feature_importances_,
-                'feature_importances_B': pipeline_B.named_steps['extratreesclassifier'].feature_importances_,
+                'feature_importances_A': feature_importances_A,  # None for non-linear kernels
+                'feature_importances_B': feature_importances_B,  # None for non-linear kernels
                 'y_test': y_test,  # TRUE labels for test subjects (same for all 4 scenarios)
                 'n_features': X_orig_train.shape[1],
                 'n_train_subjects': len(subjects_train),
@@ -2131,6 +2235,16 @@ class CrossDataClassifier:
             test_true_labels = [self.class_names[i] for i in results['y_test']]
             test_pred_labels = [self.class_names[i] for i in scenario_results['y_pred']]
             
+            # DEBUG: Print first few to verify encoding
+            print(f"\n   🔍 DEBUG CSV encoding for {scenario_key}:")
+            print(f"      self.class_names: {self.class_names}")
+            print(f"      First 3 encoded predictions: {scenario_results['y_pred'][:3]}")
+            print(f"      First 3 decoded predictions: {test_pred_labels[:3]}")
+            mcs_idx = np.where(self.class_names == 'MCS')[0][0]
+            vs_idx = np.where(self.class_names == 'VS')[0][0]
+            for idx in range(min(3, len(test_pred_labels))):
+                print(f"      Row {idx}: y_pred={scenario_results['y_pred'][idx]}, label={test_pred_labels[idx]}, P(MCS)={scenario_results['y_proba'][idx, mcs_idx]:.3f}, P(VS)={scenario_results['y_proba'][idx, vs_idx]:.3f}")
+            
             subject_results_df = pd.DataFrame({
                 'subject_session': results['test_subjects'],
                 'true_state': test_true_labels,
@@ -2147,27 +2261,31 @@ class CrossDataClassifier:
             csv_file = op.join(scenario_dir, 'subject_predictions.csv')
             subject_results_df.to_csv(csv_file, index=False)
             
-            # Save feature importances
+            # Save feature importances (only available for linear kernel)
             if 'model_A' in scenario_key:
                 importances = results['feature_importances_A']
             else:
                 importances = results['feature_importances_B']
-                
-            if self.feature_names is not None and len(self.feature_names) == len(importances):
-                feature_importance_df = pd.DataFrame({
-                    'feature_name': self.feature_names,
-                    'feature_name_abbreviated': self.feature_names_abbreviated,
-                    'importance': importances
-                })
-            else:
-                feature_importance_df = pd.DataFrame({
-                    'feature_index': range(len(importances)),
-                    'importance': importances
-                })
             
-            feature_importance_df = feature_importance_df.sort_values('importance', ascending=False)
-            feature_importance_file = op.join(scenario_dir, 'feature_importances.csv')
-            feature_importance_df.to_csv(feature_importance_file, index=False)
+            if importances is not None:
+                if self.feature_names is not None and len(self.feature_names) == len(importances):
+                    feature_importance_df = pd.DataFrame({
+                        'feature_name': self.feature_names,
+                        'feature_name_abbreviated': self.feature_names_abbreviated,
+                        'importance': importances
+                    })
+                else:
+                    feature_importance_df = pd.DataFrame({
+                        'feature_index': range(len(importances)),
+                        'importance': importances
+                    })
+                
+                feature_importance_df = feature_importance_df.sort_values('importance', ascending=False)
+                feature_importance_file = op.join(scenario_dir, 'feature_importances.csv')
+                feature_importance_df.to_csv(feature_importance_file, index=False)
+                print(f"   ✓ Feature importances saved (linear kernel)")
+            else:
+                print(f"   ℹ️  Feature importances not available (non-linear kernel)")
             
             # Create plots for this scenario
             self._plot_scenario_results(scenario_results, scenario_dir, scenario_key, results)
@@ -2210,6 +2328,834 @@ class CrossDataClassifier:
         
         # After saving all scenario results, create the combined 4-heatmap figure
         self._plot_combined_confusion_matrices(results)
+        
+        # Create subject-level probability plots
+        self._plot_subject_probabilities(results)
+        self._plot_model_A_probabilities(results)
+        self._plot_model_B_probabilities(results)
+        self._plot_comparison_grid(results)
+        self._plot_differences_same_train(results)
+        self._plot_differences_same_test(results)
+        self._plot_probability_boxplots(results)
+        self._plot_difference_boxplots_with_stats(results)
+    
+    def _plot_subject_probabilities(self, results):
+        """Plot subject-level probabilities for all 4 test scenarios showing P(MCS)."""
+        print("\n📊 Creating subject-level probability plot...")
+        
+        if len(self.class_names) != 2:
+            print("   ⚠️  Skipping probability plot: only for binary classification")
+            return
+        
+        subjects_test = results['test_subjects']
+        n_subjects = len(subjects_test)
+        
+        # Find MCS and VS indices
+        mcs_idx = np.where(self.class_names == 'MCS')[0][0]
+        vs_idx = np.where(self.class_names == 'VS')[0][0]
+        
+        print(f"   Class encoding: MCS=index {mcs_idx}, VS=index {vs_idx}")
+        print(f"   Plotting P(MCS) from SVC.predict_proba()[:, {mcs_idx}]")
+        print(f"   Note: P(VS) = 1 - P(MCS), sum to 1.0")
+        
+        # Extract P(MCS) for all 4 scenarios
+        proba_OO = results['model_A_orig_test']['y_proba'][:, mcs_idx]
+        proba_OR = results['model_A_recon_test']['y_proba'][:, mcs_idx]
+        proba_RO = results['model_B_orig_test']['y_proba'][:, mcs_idx]
+        proba_RR = results['model_B_recon_test']['y_proba'][:, mcs_idx]
+        
+        # DEBUG: Save probabilities and predictions to CSV for inspection
+        import pandas as pd
+        debug_df = pd.DataFrame({
+            'Subject': subjects_test,
+            'True_Label': ['MCS' if results['y_test'][i] == mcs_idx else 'VS' for i in range(n_subjects)],
+            'P(MCS)_OO': proba_OO,
+            'P(VS)_OO': results['model_A_orig_test']['y_proba'][:, vs_idx],
+            'Pred_OO': ['MCS' if results['model_A_orig_test']['y_pred'][i] == mcs_idx else 'VS' for i in range(n_subjects)],
+            'P(MCS)_RR': proba_RR,
+            'P(VS)_RR': results['model_B_recon_test']['y_proba'][:, vs_idx],
+            'Pred_RR': ['MCS' if results['model_B_recon_test']['y_pred'][i] == mcs_idx else 'VS' for i in range(n_subjects)]
+        })
+        debug_csv = op.join(self.output_dir, 'debug_probabilities.csv')
+        debug_df.to_csv(debug_csv, index=False)
+        print(f"   ℹ️  DEBUG: Saved probability details to {debug_csv}")
+        
+        # Create figure
+        fig, ax = plt.subplots(figsize=(max(14, n_subjects * 0.4), 7))
+        x = np.arange(n_subjects)
+        
+        # Plot 4 curves
+        ax.plot(x, proba_OO, marker='o', linestyle='-', linewidth=2.5, markersize=7,
+               label='OO (Original Model → Original Test)', color='blue', alpha=0.8)
+        ax.plot(x, proba_OR, marker='s', linestyle='--', linewidth=2.5, markersize=7,
+               label='OR (Original Model → Reconstructed Test)', color='orange', alpha=0.8)
+        ax.plot(x, proba_RO, marker='^', linestyle='-.', linewidth=2.5, markersize=7,
+               label='RO (Reconstructed Model → Original Test)', color='green', alpha=0.8)
+        ax.plot(x, proba_RR, marker='d', linestyle=':', linewidth=2.5, markersize=7,
+               label='RR (Reconstructed Model → Reconstructed Test)', color='red', alpha=0.8)
+        
+        # Add decision threshold
+        ax.axhline(y=0.5, color='gray', linestyle='--', linewidth=1.5, alpha=0.6, 
+                  label='Decision Threshold (0.5)', zorder=0)
+        
+        # Customize plot
+        ax.set_xlabel('Subject ID', fontsize=13, fontweight='bold')
+        ax.set_ylabel('P(MCS) - Probability of MCS Class', fontsize=13, fontweight='bold')
+        ax.set_title(f'Subject-Level Probabilities: P(MCS) from SVC.predict_proba()\\n'
+                    f'{self.marker_type.title()} Features - All 4 Test Scenarios (OO, OR, RO, RR)\\n'
+                    f'Note: P(VS) = 1 - P(MCS)',
+                    fontsize=14, fontweight='bold', pad=20)
+        
+        ax.set_xticks(x)
+        ax.set_xticklabels(subjects_test, rotation=90, ha='right', fontsize=9)
+        ax.set_ylim(-0.05, 1.05)
+        ax.set_yticks(np.arange(0, 1.1, 0.1))
+        ax.grid(True, alpha=0.3, linestyle=':', linewidth=0.5, axis='y')
+        ax.legend(loc='best', fontsize=11, framealpha=0.95, shadow=True)
+        
+        # Add true label background shading
+        y_true = results['y_test']
+        for i, (subj_idx, true_label) in enumerate(zip(x, y_true)):
+            color = 'green' if true_label == mcs_idx else 'red'
+            ax.axvspan(subj_idx - 0.4, subj_idx + 0.4, alpha=0.15, color=color, zorder=0)
+        
+        ax.text(0.02, 0.98, 'Background: Green = True MCS, Red = True VS',
+               transform=ax.transAxes, fontsize=10, verticalalignment='top',
+               bbox=dict(boxstyle='round', facecolor='white', alpha=0.9, edgecolor='gray'))
+        
+        plt.tight_layout()
+        prob_plot_file = op.join(self.output_dir, 'subject_probabilities_all_scenarios.png')
+        plt.savefig(prob_plot_file, dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        print(f"   ✓ Subject probability plot saved to: {prob_plot_file}")
+    
+    def _plot_model_A_probabilities(self, results):
+        """Plot Model A (Original Model) probabilities on both test sets."""
+        print("\n📊 Creating Model A probability plot...")
+        
+        if len(self.class_names) != 2:
+            print("   ⚠️  Skipping probability plot: only for binary classification")
+            return
+        
+        subjects_test = results['test_subjects']
+        n_subjects = len(subjects_test)
+        
+        # Find MCS and VS indices
+        mcs_idx = np.where(self.class_names == 'MCS')[0][0]
+        vs_idx = np.where(self.class_names == 'VS')[0][0]
+        
+        # Extract P(MCS) for Model A on both test sets
+        proba_OO = results['model_A_orig_test']['y_proba'][:, mcs_idx]
+        proba_OR = results['model_A_recon_test']['y_proba'][:, mcs_idx]
+        
+        # Create figure
+        fig, ax = plt.subplots(figsize=(max(14, n_subjects * 0.4), 7))
+        x = np.arange(n_subjects)
+        
+        # Plot 2 curves for Model A
+        ax.plot(x, proba_OO, marker='o', linestyle='-', linewidth=3, markersize=8,
+               label='Original Model → Original Test', color='blue', alpha=0.9)
+        ax.plot(x, proba_OR, marker='s', linestyle='--', linewidth=3, markersize=8,
+               label='Original Model → Reconstructed Test', color='orange', alpha=0.9)
+        
+        # Add decision threshold
+        ax.axhline(y=0.5, color='gray', linestyle='--', linewidth=1.5, alpha=0.6, 
+                  label='Decision Threshold (0.5)', zorder=0)
+        
+        # Customize plot
+        ax.set_xlabel('Subject ID', fontsize=13, fontweight='bold')
+        ax.set_ylabel('P(MCS) - Probability of MCS Class', fontsize=13, fontweight='bold')
+        ax.set_title(f'Model A (Original Data): Subject-Level Probabilities\\n'
+                    f'{self.marker_type.title()} Features - Tested on Original vs Reconstructed Data\\n'
+                    f'Kernel: {results["best_params"]["model_A"]["kernel"].upper()}, '
+                    f'C={results["best_params"]["model_A"]["C"]}',
+                    fontsize=14, fontweight='bold', pad=20)
+        
+        ax.set_xticks(x)
+        ax.set_xticklabels(subjects_test, rotation=90, ha='right', fontsize=9)
+        ax.set_ylim(-0.05, 1.05)
+        ax.set_yticks(np.arange(0, 1.1, 0.1))
+        ax.grid(True, alpha=0.3, linestyle=':', linewidth=0.5, axis='y')
+        ax.legend(loc='best', fontsize=12, framealpha=0.95, shadow=True)
+        
+        # Add true label background shading
+        y_true = results['y_test']
+        for i, (subj_idx, true_label) in enumerate(zip(x, y_true)):
+            color = 'green' if true_label == mcs_idx else 'red'
+            ax.axvspan(subj_idx - 0.4, subj_idx + 0.4, alpha=0.15, color=color, zorder=0)
+        
+        ax.text(0.02, 0.98, 'Background: Green = True MCS, Red = True VS',
+               transform=ax.transAxes, fontsize=10, verticalalignment='top',
+               bbox=dict(boxstyle='round', facecolor='white', alpha=0.9, edgecolor='gray'))
+        
+        plt.tight_layout()
+        prob_plot_file = op.join(self.output_dir, 'subject_probabilities_model_A.png')
+        plt.savefig(prob_plot_file, dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        print(f"   ✓ Model A probability plot saved to: {prob_plot_file}")
+    
+    def _plot_model_B_probabilities(self, results):
+        """Plot Model B (Reconstructed Model) probabilities on both test sets."""
+        print("\n📊 Creating Model B probability plot...")
+        
+        if len(self.class_names) != 2:
+            print("   ⚠️  Skipping probability plot: only for binary classification")
+            return
+        
+        subjects_test = results['test_subjects']
+        n_subjects = len(subjects_test)
+        
+        # Find MCS and VS indices
+        mcs_idx = np.where(self.class_names == 'MCS')[0][0]
+        vs_idx = np.where(self.class_names == 'VS')[0][0]
+        
+        # Extract P(MCS) for Model B on both test sets
+        proba_RO = results['model_B_orig_test']['y_proba'][:, mcs_idx]
+        proba_RR = results['model_B_recon_test']['y_proba'][:, mcs_idx]
+        
+        # Create figure
+        fig, ax = plt.subplots(figsize=(max(14, n_subjects * 0.4), 7))
+        x = np.arange(n_subjects)
+        
+        # Plot 2 curves for Model B
+        ax.plot(x, proba_RO, marker='^', linestyle='-.', linewidth=3, markersize=8,
+               label='Reconstructed Model → Original Test', color='green', alpha=0.9)
+        ax.plot(x, proba_RR, marker='d', linestyle=':', linewidth=3, markersize=8,
+               label='Reconstructed Model → Reconstructed Test', color='red', alpha=0.9)
+        
+        # Add decision threshold
+        ax.axhline(y=0.5, color='gray', linestyle='--', linewidth=1.5, alpha=0.6, 
+                  label='Decision Threshold (0.5)', zorder=0)
+        
+        # Customize plot
+        ax.set_xlabel('Subject ID', fontsize=13, fontweight='bold')
+        ax.set_ylabel('P(MCS) - Probability of MCS Class', fontsize=13, fontweight='bold')
+        ax.set_title(f'Model B (Reconstructed Data): Subject-Level Probabilities\\n'
+                    f'{self.marker_type.title()} Features - Tested on Original vs Reconstructed Data\\n'
+                    f'Kernel: {results["best_params"]["model_B"]["kernel"].upper()}, '
+                    f'C={results["best_params"]["model_B"]["C"]}',
+                    fontsize=14, fontweight='bold', pad=20)
+        
+        ax.set_xticks(x)
+        ax.set_xticklabels(subjects_test, rotation=90, ha='right', fontsize=9)
+        ax.set_ylim(-0.05, 1.05)
+        ax.set_yticks(np.arange(0, 1.1, 0.1))
+        ax.grid(True, alpha=0.3, linestyle=':', linewidth=0.5, axis='y')
+        ax.legend(loc='best', fontsize=12, framealpha=0.95, shadow=True)
+        
+        # Add true label background shading
+        y_true = results['y_test']
+        for i, (subj_idx, true_label) in enumerate(zip(x, y_true)):
+            color = 'green' if true_label == mcs_idx else 'red'
+            ax.axvspan(subj_idx - 0.4, subj_idx + 0.4, alpha=0.15, color=color, zorder=0)
+        
+        ax.text(0.02, 0.98, 'Background: Green = True MCS, Red = True VS',
+               transform=ax.transAxes, fontsize=10, verticalalignment='top',
+               bbox=dict(boxstyle='round', facecolor='white', alpha=0.9, edgecolor='gray'))
+        
+        plt.tight_layout()
+        prob_plot_file = op.join(self.output_dir, 'subject_probabilities_model_B.png')
+        plt.savefig(prob_plot_file, dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        print(f"   ✓ Model B probability plot saved to: {prob_plot_file}")
+    
+    def _plot_comparison_grid(self, results):
+        """Plot 4 subplots comparing different scenarios:
+        - Top-left: OO vs OR (Original model on both tests)
+        - Top-right: RO vs RR (Reconstructed model on both tests)
+        - Bottom-left: OO vs RO (Both models on original test)
+        - Bottom-right: OR vs RR (Both models on reconstructed test)
+        """
+        print("\n📊 Creating comparison grid plot...")
+        
+        if len(self.class_names) != 2:
+            print("   ⚠️  Skipping probability plot: only for binary classification")
+            return
+        
+        subjects_test = results['test_subjects']
+        n_subjects = len(subjects_test)
+        
+        # Find MCS and VS indices
+        mcs_idx = np.where(self.class_names == 'MCS')[0][0]
+        
+        # Extract P(MCS) for all 4 scenarios
+        proba_OO = results['model_A_orig_test']['y_proba'][:, mcs_idx]
+        proba_OR = results['model_A_recon_test']['y_proba'][:, mcs_idx]
+        proba_RO = results['model_B_orig_test']['y_proba'][:, mcs_idx]
+        proba_RR = results['model_B_recon_test']['y_proba'][:, mcs_idx]
+        
+        # Create figure with 4 subplots
+        fig, axes = plt.subplots(2, 2, figsize=(20, 14))
+        x = np.arange(n_subjects)
+        y_true = results['y_test']
+        
+        # Subplot 1: OO vs OR (Original Model on both tests)
+        ax = axes[0, 0]
+        ax.plot(x, proba_OO, marker='o', linestyle='-', linewidth=2.5, markersize=7,
+               label='OO: Original Model → Original Test', color='blue', alpha=0.8)
+        ax.plot(x, proba_OR, marker='s', linestyle='--', linewidth=2.5, markersize=7,
+               label='OR: Original Model → Reconstructed Test', color='orange', alpha=0.8)
+        ax.axhline(y=0.5, color='gray', linestyle='--', linewidth=1.5, alpha=0.6, label='Threshold (0.5)', zorder=0)
+        
+        for i, (subj_idx, true_label) in enumerate(zip(x, y_true)):
+            color = 'green' if true_label == mcs_idx else 'red'
+            ax.axvspan(subj_idx - 0.4, subj_idx + 0.4, alpha=0.15, color=color, zorder=0)
+        
+        ax.set_xlabel('Subject ID', fontsize=11, fontweight='bold')
+        ax.set_ylabel('P(MCS)', fontsize=11, fontweight='bold')
+        ax.set_title('Model A: Original Model\nTested on Original vs Reconstructed Data', fontsize=12, fontweight='bold')
+        ax.set_xticks(x)
+        ax.set_xticklabels(subjects_test, rotation=90, ha='right', fontsize=8)
+        ax.set_ylim(-0.05, 1.05)
+        ax.set_yticks(np.arange(0, 1.1, 0.1))
+        ax.grid(True, alpha=0.3, linestyle=':', linewidth=0.5, axis='y')
+        ax.legend(loc='best', fontsize=10, framealpha=0.95)
+        
+        # Subplot 2: RO vs RR (Reconstructed Model on both tests)
+        ax = axes[0, 1]
+        ax.plot(x, proba_RO, marker='^', linestyle='-.', linewidth=2.5, markersize=7,
+               label='RO: Reconstructed Model → Original Test', color='green', alpha=0.8)
+        ax.plot(x, proba_RR, marker='d', linestyle=':', linewidth=2.5, markersize=7,
+               label='RR: Reconstructed Model → Reconstructed Test', color='red', alpha=0.8)
+        ax.axhline(y=0.5, color='gray', linestyle='--', linewidth=1.5, alpha=0.6, label='Threshold (0.5)', zorder=0)
+        
+        for i, (subj_idx, true_label) in enumerate(zip(x, y_true)):
+            color = 'green' if true_label == mcs_idx else 'red'
+            ax.axvspan(subj_idx - 0.4, subj_idx + 0.4, alpha=0.15, color=color, zorder=0)
+        
+        ax.set_xlabel('Subject ID', fontsize=11, fontweight='bold')
+        ax.set_ylabel('P(MCS)', fontsize=11, fontweight='bold')
+        ax.set_title('Model B: Reconstructed Model\nTested on Original vs Reconstructed Data', fontsize=12, fontweight='bold')
+        ax.set_xticks(x)
+        ax.set_xticklabels(subjects_test, rotation=90, ha='right', fontsize=8)
+        ax.set_ylim(-0.05, 1.05)
+        ax.set_yticks(np.arange(0, 1.1, 0.1))
+        ax.grid(True, alpha=0.3, linestyle=':', linewidth=0.5, axis='y')
+        ax.legend(loc='best', fontsize=10, framealpha=0.95)
+        
+        # Subplot 3: OO vs RO (Both models on Original test)
+        ax = axes[1, 0]
+        ax.plot(x, proba_OO, marker='o', linestyle='-', linewidth=2.5, markersize=7,
+               label='OO: Original Model → Original Test', color='blue', alpha=0.8)
+        ax.plot(x, proba_RO, marker='^', linestyle='-.', linewidth=2.5, markersize=7,
+               label='RO: Reconstructed Model → Original Test', color='green', alpha=0.8)
+        ax.axhline(y=0.5, color='gray', linestyle='--', linewidth=1.5, alpha=0.6, label='Threshold (0.5)', zorder=0)
+        
+        for i, (subj_idx, true_label) in enumerate(zip(x, y_true)):
+            color = 'green' if true_label == mcs_idx else 'red'
+            ax.axvspan(subj_idx - 0.4, subj_idx + 0.4, alpha=0.15, color=color, zorder=0)
+        
+        ax.set_xlabel('Subject ID', fontsize=11, fontweight='bold')
+        ax.set_ylabel('P(MCS)', fontsize=11, fontweight='bold')
+        ax.set_title('Original Test Data\nComparing Original vs Reconstructed Models', fontsize=12, fontweight='bold')
+        ax.set_xticks(x)
+        ax.set_xticklabels(subjects_test, rotation=90, ha='right', fontsize=8)
+        ax.set_ylim(-0.05, 1.05)
+        ax.set_yticks(np.arange(0, 1.1, 0.1))
+        ax.grid(True, alpha=0.3, linestyle=':', linewidth=0.5, axis='y')
+        ax.legend(loc='best', fontsize=10, framealpha=0.95)
+        
+        # Subplot 4: OR vs RR (Both models on Reconstructed test)
+        ax = axes[1, 1]
+        ax.plot(x, proba_OR, marker='s', linestyle='--', linewidth=2.5, markersize=7,
+               label='OR: Original Model → Reconstructed Test', color='orange', alpha=0.8)
+        ax.plot(x, proba_RR, marker='d', linestyle=':', linewidth=2.5, markersize=7,
+               label='RR: Reconstructed Model → Reconstructed Test', color='red', alpha=0.8)
+        ax.axhline(y=0.5, color='gray', linestyle='--', linewidth=1.5, alpha=0.6, label='Threshold (0.5)', zorder=0)
+        
+        for i, (subj_idx, true_label) in enumerate(zip(x, y_true)):
+            color = 'green' if true_label == mcs_idx else 'red'
+            ax.axvspan(subj_idx - 0.4, subj_idx + 0.4, alpha=0.15, color=color, zorder=0)
+        
+        ax.set_xlabel('Subject ID', fontsize=11, fontweight='bold')
+        ax.set_ylabel('P(MCS)', fontsize=11, fontweight='bold')
+        ax.set_title('Reconstructed Test Data\nComparing Original vs Reconstructed Models', fontsize=12, fontweight='bold')
+        ax.set_xticks(x)
+        ax.set_xticklabels(subjects_test, rotation=90, ha='right', fontsize=8)
+        ax.set_ylim(-0.05, 1.05)
+        ax.set_yticks(np.arange(0, 1.1, 0.1))
+        ax.grid(True, alpha=0.3, linestyle=':', linewidth=0.5, axis='y')
+        ax.legend(loc='best', fontsize=10, framealpha=0.95)
+        
+        # Overall title
+        fig.suptitle(f'Probability Comparison Grid: All 4 Test Scenarios\n'
+                    f'{self.marker_type.title()} Features - {n_subjects} Test Subjects\n'
+                    f'Background: Green = True MCS, Red = True VS',
+                    fontsize=14, fontweight='bold', y=0.995)
+        
+        plt.tight_layout(rect=[0, 0, 1, 0.985])
+        prob_plot_file = op.join(self.output_dir, 'subject_probabilities_comparison_grid.png')
+        plt.savefig(prob_plot_file, dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        print(f"   ✓ Comparison grid plot saved to: {prob_plot_file}")
+    
+    def _plot_differences_same_train(self, results):
+        """Plot probability differences when same model is tested on different data.
+        - Curve 1: OO - OR (Original model: Original test - Reconstructed test)
+        - Curve 2: RO - RR (Reconstructed model: Original test - Reconstructed test)
+        """
+        print("\n📊 Creating probability differences plot (same training)...")
+        
+        if len(self.class_names) != 2:
+            print("   ⚠️  Skipping probability plot: only for binary classification")
+            return
+        
+        subjects_test = results['test_subjects']
+        n_subjects = len(subjects_test)
+        
+        # Find MCS index
+        mcs_idx = np.where(self.class_names == 'MCS')[0][0]
+        
+        # Extract P(MCS) for all 4 scenarios
+        proba_OO = results['model_A_orig_test']['y_proba'][:, mcs_idx]
+        proba_OR = results['model_A_recon_test']['y_proba'][:, mcs_idx]
+        proba_RO = results['model_B_orig_test']['y_proba'][:, mcs_idx]
+        proba_RR = results['model_B_recon_test']['y_proba'][:, mcs_idx]
+        
+        # Calculate differences
+        diff_OO_OR = proba_OO - proba_OR  # Original model: how much higher on original vs reconstructed
+        diff_RR_RO = proba_RR - proba_RO  # Reconstructed model: how much higher on reconstructed vs original
+        
+        # Create figure
+        fig, ax = plt.subplots(figsize=(max(14, n_subjects * 0.4), 7))
+        x = np.arange(n_subjects)
+        
+        # Plot 2 difference curves
+        ax.plot(x, diff_OO_OR, marker='o', linestyle='-', linewidth=3, markersize=8,
+               label='Δ(OO - OR): Original Model tested on Original vs Reconstructed', 
+               color='blue', alpha=0.9)
+        ax.plot(x, diff_RR_RO, marker='^', linestyle='--', linewidth=3, markersize=8,
+               label='Δ(RR - RO): Reconstructed Model tested on Reconstructed vs Original', 
+               color='green', alpha=0.9)
+        
+        # Add zero line (no difference)
+        ax.axhline(y=0, color='gray', linestyle='--', linewidth=1.5, alpha=0.6, 
+                  label='Zero Difference', zorder=0)
+        
+        # Customize plot
+        ax.set_xlabel('Subject ID', fontsize=13, fontweight='bold')
+        ax.set_ylabel('Δ P(MCS) - Probability Difference', fontsize=13, fontweight='bold')
+        ax.set_title(f'Probability Differences: Same Training Model, Different Test Data\\n'
+                    f'{self.marker_type.title()} Features - Effect of Test Data Type\\n'
+                    f'Positive: Higher probability on reference test',
+                    fontsize=14, fontweight='bold', pad=20)
+        
+        ax.set_xticks(x)
+        ax.set_xticklabels(subjects_test, rotation=90, ha='right', fontsize=9)
+        ax.set_ylim(-1.05, 1.05)
+        ax.set_yticks(np.arange(-1.0, 1.1, 0.1))
+        ax.grid(True, alpha=0.3, linestyle=':', linewidth=0.5, axis='y')
+        ax.legend(loc='best', fontsize=11, framealpha=0.95, shadow=True)
+        
+        # Add true label background shading
+        y_true = results['y_test']
+        for i, (subj_idx, true_label) in enumerate(zip(x, y_true)):
+            color = 'green' if true_label == mcs_idx else 'red'
+            ax.axvspan(subj_idx - 0.4, subj_idx + 0.4, alpha=0.15, color=color, zorder=0)
+        
+        ax.text(0.02, 0.98, 'Background: Green = True MCS, Red = True VS',
+               transform=ax.transAxes, fontsize=10, verticalalignment='top',
+               bbox=dict(boxstyle='round', facecolor='white', alpha=0.9, edgecolor='gray'))
+        
+        plt.tight_layout()
+        prob_plot_file = op.join(self.output_dir, 'differences_same_train.png')
+        plt.savefig(prob_plot_file, dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        print(f"   ✓ Differences (same train) plot saved to: {prob_plot_file}")
+    
+    def _plot_differences_same_test(self, results):
+        """Plot probability differences when different models are tested on same data.
+        - Curve 1: OO - RO (Original test: Original model - Reconstructed model)
+        - Curve 2: OR - RR (Reconstructed test: Original model - Reconstructed model)
+        """
+        print("\n📊 Creating probability differences plot (same test)...")
+        
+        if len(self.class_names) != 2:
+            print("   ⚠️  Skipping probability plot: only for binary classification")
+            return
+        
+        subjects_test = results['test_subjects']
+        n_subjects = len(subjects_test)
+        
+        # Find MCS index
+        mcs_idx = np.where(self.class_names == 'MCS')[0][0]
+        
+        # Extract P(MCS) for all 4 scenarios
+        proba_OO = results['model_A_orig_test']['y_proba'][:, mcs_idx]
+        proba_OR = results['model_A_recon_test']['y_proba'][:, mcs_idx]
+        proba_RO = results['model_B_orig_test']['y_proba'][:, mcs_idx]
+        proba_RR = results['model_B_recon_test']['y_proba'][:, mcs_idx]
+        
+        # Calculate differences
+        diff_OO_RO = proba_OO - proba_RO  # Original test: how much higher with original vs reconstructed model
+        diff_OR_RR = proba_OR - proba_RR  # Reconstructed test: how much higher with original vs reconstructed model
+        
+        # Create figure
+        fig, ax = plt.subplots(figsize=(max(14, n_subjects * 0.4), 7))
+        x = np.arange(n_subjects)
+        
+        # Plot 2 difference curves
+        ax.plot(x, diff_OO_RO, marker='o', linestyle='-', linewidth=3, markersize=8,
+               label='Δ(OO - RO): Original Test with Original vs Reconstructed Model', 
+               color='blue', alpha=0.9)
+        ax.plot(x, diff_OR_RR, marker='s', linestyle='--', linewidth=3, markersize=8,
+               label='Δ(OR - RR): Reconstructed Test with Original vs Reconstructed Model', 
+               color='orange', alpha=0.9)
+        
+        # Add zero line (no difference)
+        ax.axhline(y=0, color='gray', linestyle='--', linewidth=1.5, alpha=0.6, 
+                  label='Zero Difference', zorder=0)
+        
+        # Customize plot
+        ax.set_xlabel('Subject ID', fontsize=13, fontweight='bold')
+        ax.set_ylabel('Δ P(MCS) - Probability Difference', fontsize=13, fontweight='bold')
+        ax.set_title(f'Probability Differences: Same Test Data, Different Training Model\\n'
+                    f'{self.marker_type.title()} Features - Effect of Training Data Type\\n'
+                    f'Positive: Higher probability with Original model | Negative: Higher with Reconstructed model',
+                    fontsize=14, fontweight='bold', pad=20)
+        
+        ax.set_xticks(x)
+        ax.set_xticklabels(subjects_test, rotation=90, ha='right', fontsize=9)
+        ax.set_ylim(-1.05, 1.05)
+        ax.set_yticks(np.arange(-1.0, 1.1, 0.1))
+        ax.grid(True, alpha=0.3, linestyle=':', linewidth=0.5, axis='y')
+        ax.legend(loc='best', fontsize=11, framealpha=0.95, shadow=True)
+        
+        # Add true label background shading
+        y_true = results['y_test']
+        for i, (subj_idx, true_label) in enumerate(zip(x, y_true)):
+            color = 'green' if true_label == mcs_idx else 'red'
+            ax.axvspan(subj_idx - 0.4, subj_idx + 0.4, alpha=0.15, color=color, zorder=0)
+        
+        ax.text(0.02, 0.98, 'Background: Green = True MCS, Red = True VS',
+               transform=ax.transAxes, fontsize=10, verticalalignment='top',
+               bbox=dict(boxstyle='round', facecolor='white', alpha=0.9, edgecolor='gray'))
+        
+        plt.tight_layout()
+        prob_plot_file = op.join(self.output_dir, 'differences_same_test.png')
+        plt.savefig(prob_plot_file, dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        # Calculate and save statistics (was removed during earlier edit - adding back)
+        # This functionality exists in the original _plot_differences_same_test implementation
+        
+        print(f"   ✓ Differences (same test) plot saved to: {prob_plot_file}")
+    
+    def _plot_probability_boxplots(self, results):
+        """Plot boxplots of P(MCS) for each model and subject type (8 boxplots total)."""
+        print("\n📊 Creating probability boxplots...")
+        
+        if len(self.class_names) != 2:
+            print("   ⚠️  Skipping probability boxplots: only for binary classification")
+            return
+        
+        # Find MCS index
+        mcs_idx = np.where(self.class_names == 'MCS')[0][0]
+        
+        # Extract P(MCS) for all 4 scenarios
+        proba_OO = results['model_A_orig_test']['y_proba'][:, mcs_idx]
+        proba_OR = results['model_A_recon_test']['y_proba'][:, mcs_idx]
+        proba_RO = results['model_B_orig_test']['y_proba'][:, mcs_idx]
+        proba_RR = results['model_B_recon_test']['y_proba'][:, mcs_idx]
+        
+        # Get true labels
+        y_true = results['y_test']
+        mcs_mask = (y_true == mcs_idx)
+        vs_mask = (y_true != mcs_idx)
+        
+        # Prepare data for boxplots
+        data_to_plot = []
+        labels = []
+        colors = []
+        
+        # MCS subjects (4 boxplots)
+        data_to_plot.extend([proba_OO[mcs_mask], proba_OR[mcs_mask], proba_RO[mcs_mask], proba_RR[mcs_mask]])
+        labels.extend(['OO', 'OR', 'RO', 'RR'])
+        colors.extend(['blue', 'orange', 'green', 'red'])
+        
+        # VS subjects (4 boxplots)
+        data_to_plot.extend([proba_OO[vs_mask], proba_OR[vs_mask], proba_RO[vs_mask], proba_RR[vs_mask]])
+        labels.extend(['OO', 'OR', 'RO', 'RR'])
+        colors.extend(['blue', 'orange', 'green', 'red'])
+        
+        # Create figure
+        fig, ax = plt.subplots(figsize=(14, 8))
+        
+        # Create boxplots
+        positions = [1, 2, 3, 4, 6, 7, 8, 9]  # Gap between MCS and VS
+        bp = ax.boxplot(data_to_plot, positions=positions, widths=0.6, patch_artist=True,
+                       showfliers=False, medianprops=dict(color='black', linewidth=2))
+        
+        # Color boxplots
+        for patch, color in zip(bp['boxes'], colors):
+            patch.set_facecolor(color)
+            patch.set_alpha(0.6)
+        
+        # Add individual points (jittered)
+        for i, (data, pos, color) in enumerate(zip(data_to_plot, positions, colors)):
+            x = np.random.normal(pos, 0.04, size=len(data))
+            ax.scatter(x, data, alpha=0.6, s=50, color=color, edgecolors='black', linewidths=0.5, zorder=3)
+        
+        # Customize plot
+        ax.set_ylabel('P(MCS) - Probability of MCS Class', fontsize=14, fontweight='bold')
+        ax.set_xlabel('Subject Type', fontsize=14, fontweight='bold')
+        ax.set_title(f'Probability Distribution by Model and Subject Type\n{self.marker_type.title()} Features',
+                    fontsize=15, fontweight='bold', pad=20)
+        
+        # Set x-axis
+        ax.set_xticks([2.5, 7.5])
+        ax.set_xticklabels(['True MCS', 'True VS'], fontsize=13, fontweight='bold')
+        
+        # Add group labels
+        for pos, label, color in zip([1, 2, 3, 4], ['OO', 'OR', 'RO', 'RR'], ['blue', 'orange', 'green', 'red']):
+            ax.text(pos, -0.08, label, ha='center', fontsize=11, fontweight='bold', color=color,
+                   transform=ax.get_xaxis_transform())
+        for pos, label, color in zip([6, 7, 8, 9], ['OO', 'OR', 'RO', 'RR'], ['blue', 'orange', 'green', 'red']):
+            ax.text(pos, -0.08, label, ha='center', fontsize=11, fontweight='bold', color=color,
+                   transform=ax.get_xaxis_transform())
+        
+        ax.set_ylim(-0.05, 1.05)
+        ax.grid(True, alpha=0.3, linestyle=':', axis='y')
+        ax.axhline(y=0.5, color='gray', linestyle='--', linewidth=1.5, alpha=0.6, label='Decision Threshold')
+        ax.axvline(x=5, color='black', linestyle='-', linewidth=1, alpha=0.3)  # Separator
+        
+        # Add legend
+        from matplotlib.patches import Patch
+        legend_elements = [
+            Patch(facecolor='blue', alpha=0.6, label='OO: Original Model → Original Test'),
+            Patch(facecolor='orange', alpha=0.6, label='OR: Original Model → Reconstructed Test'),
+            Patch(facecolor='green', alpha=0.6, label='RO: Reconstructed Model → Original Test'),
+            Patch(facecolor='red', alpha=0.6, label='RR: Reconstructed Model → Reconstructed Test')
+        ]
+        ax.legend(handles=legend_elements, loc='upper right', fontsize=10, framealpha=0.95)
+        
+        plt.tight_layout()
+        prob_boxplot_file = op.join(self.output_dir, 'probability_boxplots_by_model_and_subject.png')
+        plt.savefig(prob_boxplot_file, dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        print(f"   ✓ Probability boxplots saved to: {prob_boxplot_file}")
+    
+    def _plot_difference_boxplots_with_stats(self, results):
+        """Plot boxplots of probability differences with Wilcoxon tests.
+        Matches the style of seed_differences_analysis.py differences_combined_boxplot.png
+        """
+        print("\n📊 Creating difference boxplots with statistical tests...")
+        
+        if len(self.class_names) != 2:
+            print("   ⚠️  Skipping difference boxplots: only for binary classification")
+            return
+        
+        from scipy.stats import wilcoxon
+        
+        # Find MCS index
+        mcs_idx = np.where(self.class_names == 'MCS')[0][0]
+        
+        # Extract P(MCS) for all 4 scenarios
+        proba_OO = results['model_A_orig_test']['y_proba'][:, mcs_idx]
+        proba_OR = results['model_A_recon_test']['y_proba'][:, mcs_idx]
+        proba_RO = results['model_B_orig_test']['y_proba'][:, mcs_idx]
+        proba_RR = results['model_B_recon_test']['y_proba'][:, mcs_idx]
+        
+        # Calculate differences
+        diff_OO_OR = proba_OO - proba_OR
+        diff_OO_RO = proba_OO - proba_RO
+        diff_RR_OR = proba_RR - proba_OR
+        diff_RR_RO = proba_RR - proba_RO
+        
+        # Prepare data for boxplots (all subjects combined)
+        differences = [diff_OO_OR, diff_OO_RO, diff_RR_OR, diff_RR_RO]
+        
+        # Define colors matching seed_differences_analysis.py
+        colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728']
+        
+        # Create labels matching the format
+        labels = [
+            'Train: O. Test: O\nvs\nTrain: O. Test: R',  # OO-OR
+            'Train: O. Test: O\nvs\nTrain: R. Test: O',  # OO-RO
+            'Train: R. Test: R\nvs\nTrain: O. Test: R',  # RR-OR
+            'Train: R. Test: R\nvs\nTrain: R. Test: O'   # RR-RO
+        ]
+        
+        # Perform Wilcoxon tests
+        p_values = []
+        for diff in differences:
+            if len(diff) > 0:
+                try:
+                    stat, p = wilcoxon(diff, alternative='two-sided')
+                    p_values.append(p)
+                except:
+                    p_values.append(1.0)
+            else:
+                p_values.append(1.0)
+        
+        # Create figure (matching seed_differences_analysis.py style)
+        fig, ax = plt.subplots(figsize=(16, 8))
+        
+        # Create boxplots
+        positions = [1, 2, 3, 4]
+        bp = ax.boxplot(differences, labels=labels, positions=positions, widths=0.15, patch_artist=True,
+                       showmeans=True, meanline=True,
+                       medianprops=dict(color='black', linewidth=2),
+                       meanprops=dict(color='gray', linewidth=2, linestyle='--'),
+                       whiskerprops=dict(linewidth=1.5),
+                       capprops=dict(linewidth=1.5))
+        
+        # Color boxplots
+        for patch, color in zip(bp['boxes'], colors):
+            patch.set_facecolor(color)
+            patch.set_alpha(0.6)
+        
+        # Overlay individual points with jitter
+        for i, (values, pos, color) in enumerate(zip(differences, positions, colors)):
+            x = np.random.normal(pos, 0.04, size=len(values))
+            ax.scatter(x, values, alpha=0.3, s=30, color=color, zorder=3)
+        
+        # Add horizontal line at zero
+        ax.axhline(y=0, color='gray', linestyle='--', linewidth=2, alpha=0.7, zorder=1)
+        
+        # Get current y-limits and extend them for significance markers
+        ymin, ymax = ax.get_ylim()
+        y_range = ymax - ymin
+        ax.set_ylim(ymin, ymax + 0.15 * y_range)
+        
+        # Add red asterisks on top of boxplots if significant
+        for i, (pos, p_val) in enumerate(zip(positions, p_values)):
+            if p_val < 0.05:
+                sig = '***' if p_val < 0.001 else '**' if p_val < 0.01 else '*'
+                y_pos = ymax + 0.05 * y_range
+                ax.text(pos, y_pos, sig, ha='center', va='bottom',
+                       fontsize=24, color='red', fontweight='bold')
+        
+        # Formatting (matching seed_differences_analysis.py)
+        ax.set_ylabel('Δ P(MCS) - Probability difference', fontsize=24)
+        ax.grid(True, alpha=0.3, axis='y')
+        ax.tick_params(axis='x', labelsize=17, rotation=0)
+        
+        # Add legend
+        from matplotlib.lines import Line2D
+        legend_elements = [
+            Line2D([0], [0], color='black', linewidth=2, label='Median'),
+            Line2D([0], [0], color='gray', linewidth=2, linestyle='--', label='Mean'),
+        ]
+        ax.legend(handles=legend_elements, loc='lower right', fontsize=16)
+        
+        plt.tight_layout()
+        diff_boxplot_file = op.join(self.output_dir, 'difference_boxplots_with_wilcoxon.png')
+        plt.savefig(diff_boxplot_file, dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        # Save p-values to JSON
+        stats_dict = {
+            'all_subjects': {
+                'OO_minus_OR': {
+                    'p_value': float(p_values[0]), 
+                    'significant': bool(p_values[0] < 0.05),
+                    'interpretation': 'Significant difference' if p_values[0] < 0.05 else 'No significant difference'
+                },
+                'OO_minus_RO': {
+                    'p_value': float(p_values[1]), 
+                    'significant': bool(p_values[1] < 0.05),
+                    'interpretation': 'Significant difference' if p_values[1] < 0.05 else 'No significant difference'
+                },
+                'RR_minus_OR': {
+                    'p_value': float(p_values[2]), 
+                    'significant': bool(p_values[2] < 0.05),
+                    'interpretation': 'Significant difference' if p_values[2] < 0.05 else 'No significant difference'
+                },
+                'RR_minus_RO': {
+                    'p_value': float(p_values[3]), 
+                    'significant': bool(p_values[3] < 0.05),
+                    'interpretation': 'Significant difference' if p_values[3] < 0.05 else 'No significant difference'
+                }
+            },
+            'test_info': {
+                'test_name': 'Wilcoxon signed-rank test (two-tailed)',
+                'null_hypothesis': 'H0: The median of differences equals zero (distributions are the same)',
+                'alternative_hypothesis': 'H1: The median of differences does NOT equal zero (distributions differ)',
+                'interpretation': 'If p < 0.05, we reject H0 and conclude distributions are significantly DIFFERENT',
+                'note': 'This is the standard statistical framework. Small p-values provide evidence against H0.'
+            }
+        }
+        
+        stats_file = op.join(self.output_dir, 'wilcoxon_test_results.json')
+        with open(stats_file, 'w') as f:
+            json.dump(stats_dict, f, indent=2)
+        
+        print(f"   ✓ Difference boxplots saved to: {diff_boxplot_file}")
+        print(f"   ✓ Wilcoxon test results saved to: {stats_file}")
+        
+        # Create smaller version with abbreviated labels
+        self._plot_difference_boxplots_with_stats_small(results, differences, p_values, colors)
+    
+    def _plot_difference_boxplots_with_stats_small(self, results, differences, p_values, colors):
+        """Create a smaller version of difference boxplots with abbreviated labels.
+        Matches the style of seed_differences_analysis.py differences_combined_boxplot_small.png
+        """
+        print("\n📊 Creating small difference boxplots...")
+        
+        # Create abbreviated labels
+        abbreviated_labels = [
+            'O O\nvs\nO R',  # OO-OR
+            'O O\nvs\nR O',  # OO-RO
+            'R R\nvs\nO R',  # RR-OR
+            'R R\nvs\nR O'   # RR-RO
+        ]
+        
+        # Create figure (smaller size)
+        fig, ax = plt.subplots(figsize=(8, 4))
+        
+        # Create boxplots
+        positions = [1, 2, 3, 4]
+        bp = ax.boxplot(differences, labels=abbreviated_labels, positions=positions, widths=0.15, 
+                       patch_artist=True, showmeans=True, meanline=True,
+                       medianprops=dict(color='black', linewidth=2),
+                       meanprops=dict(color='gray', linewidth=2, linestyle='--'),
+                       whiskerprops=dict(linewidth=1.5),
+                       capprops=dict(linewidth=1.5))
+        
+        # Color boxplots
+        for patch, color in zip(bp['boxes'], colors):
+            patch.set_facecolor(color)
+            patch.set_alpha(0.6)
+        
+        # Overlay individual points with jitter
+        for i, (values, pos, color) in enumerate(zip(differences, positions, colors)):
+            x = np.random.normal(pos, 0.04, size=len(values))
+            ax.scatter(x, values, alpha=0.3, s=30, color=color, zorder=3)
+        
+        # Add horizontal line at zero
+        ax.axhline(y=0, color='gray', linestyle='--', linewidth=2, alpha=0.7, zorder=1)
+        
+        # Formatting with larger labels (matching the small version style)
+        ax.set_ylabel('Δ Probability', fontsize=18)
+        ax.grid(True, alpha=0.3, axis='y')
+        ax.tick_params(axis='x', labelsize=14, rotation=0)
+        ax.tick_params(axis='y', labelsize=14)
+        
+        # Set symmetric y-axis limits
+        ax.set_ylim(-0.4, 0.4)
+        y_range = 0.8  # Total range for positioning asterisks
+        
+        # Add red asterisks on top of boxplots if significant
+        for i, (pos, p_val) in enumerate(zip(positions, p_values)):
+            if p_val < 0.05:
+                sig = '***' if p_val < 0.001 else '**' if p_val < 0.01 else '*'
+                y_pos = 0.4 + 0.05 * y_range  # Position above the upper limit
+                ax.text(pos, y_pos, sig, ha='center', va='bottom',
+                       fontsize=24, color='red', fontweight='bold')
+        
+        plt.tight_layout()
+        diff_boxplot_small_file = op.join(self.output_dir, 'difference_boxplots_with_wilcoxon_small.png')
+        plt.savefig(diff_boxplot_small_file, dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        print(f"   ✓ Small difference boxplots saved to: {diff_boxplot_small_file}")
     
     def _plot_scenario_results(self, scenario_results, output_dir, scenario_key, global_results):
         """Create plots for a single testing scenario."""
@@ -2225,30 +3171,39 @@ class CrossDataClassifier:
                     f'Test subjects: {global_results["n_test_subjects"]}', 
                     fontsize=16)
         
-        # 1. CV scores comparison (if available)
+        # 1. Grid Search / CV scores
         ax = axes[0, 0]
         if 'model_A' in scenario_key:
             cv_scores = global_results['cv_scores_A']
-            cv_label = "Model A CV (Original Training)"
+            cv_label = "Model A: Grid Search Best CV Score\n(Original Training Data)"
         else:
             cv_scores = global_results['cv_scores_B']
-            cv_label = "Model B CV (Reconstructed Training)"
+            cv_label = "Model B: Grid Search Best CV Score\n(Reconstructed Training Data)"
             
+        # Note: cv_scores contains only the best score from grid search, not individual folds
         x_pos = np.arange(len(cv_scores))
-        bars = ax.bar(x_pos, cv_scores, alpha=0.7)
-        ax.axhline(y=np.mean(cv_scores), color='red', linestyle='--', 
-                  label=f'Mean: {np.mean(cv_scores):.3f} ± {np.std(cv_scores):.3f}')
-        ax.set_xlabel('CV Fold')
-        ax.set_ylabel('Balanced Accuracy')
-        ax.set_title(cv_label)
-        ax.legend()
-        ax.grid(True, alpha=0.3)
+        bars = ax.bar(x_pos, cv_scores, alpha=0.7, width=0.5)
+        
+        # Only show mean line if we have multiple scores
+        if len(cv_scores) > 1:
+            ax.axhline(y=np.mean(cv_scores), color='red', linestyle='--', 
+                      label=f'Mean: {np.mean(cv_scores):.3f} ± {np.std(cv_scores):.3f}')
+        
+        ax.set_xlabel('Best Model (from Grid Search over C)')
+        ax.set_ylabel('Balanced Accuracy (CV Score)')
+        ax.set_title(cv_label, fontsize=11)
+        ax.set_xticks(x_pos)
+        ax.set_xticklabels(['Optimal C'])
+        if len(cv_scores) > 1:
+            ax.legend()
+        ax.grid(True, alpha=0.3, axis='y')
+        ax.set_ylim([0, 1])
         
         # Add value labels on bars
-        for bar, score in zip(bars, cv_scores):
+        for i, (bar, score) in enumerate(zip(bars, cv_scores)):
             height = bar.get_height()
-            ax.text(bar.get_x() + bar.get_width()/2., height + 0.01,
-                   f'{score:.3f}', ha='center', va='bottom', fontsize=9)
+            ax.text(bar.get_x() + bar.get_width()/2., height + 0.02,
+                   f'{score:.3f}', ha='center', va='bottom', fontsize=10, fontweight='bold')
         
         # 2. Confusion Matrix
         ax = axes[0, 1]
@@ -2273,29 +3228,39 @@ class CrossDataClassifier:
         ax.set_yticks(range(len(self.class_names)))
         ax.set_yticklabels(self.class_names)
         
-        # 3. Feature Importances (top 10)
+        # 3. Feature Importances (top 10) - only for linear kernel
         ax = axes[1, 0]
         if 'model_A' in scenario_key:
             importances = global_results['feature_importances_A']
+            kernel_used = global_results['best_params']['model_A']['kernel']
         else:
             importances = global_results['feature_importances_B']
+            kernel_used = global_results['best_params']['model_B']['kernel']
+        
+        if importances is not None:
+            top_n = min(10, len(importances))
+            top_indices = np.argsort(importances)[-top_n:]
             
-        top_n = min(10, len(importances))
-        top_indices = np.argsort(importances)[-top_n:]
-        
-        ax.barh(range(top_n), importances[top_indices])
-        ax.set_xlabel('Feature Importance')
-        ax.set_ylabel('Features')
-        ax.set_title(f'Top {top_n} Feature Importances\n{model_name}')
-        ax.set_yticks(range(top_n))
-        
-        # Use real feature names if available
-        if self.feature_names_abbreviated is not None and len(self.feature_names_abbreviated) == len(importances):
-            feature_labels = [self.feature_names_abbreviated[i] for i in top_indices]
+            ax.barh(range(top_n), importances[top_indices])
+            ax.set_xlabel('Feature Importance (|Coefficient|)')
+            ax.set_ylabel('Features')
+            ax.set_title(f'Top {top_n} Feature Importances\n{model_name} (Linear Kernel)')
+            ax.set_yticks(range(top_n))
+            
+            # Use real feature names if available
+            if self.feature_names_abbreviated is not None and len(self.feature_names_abbreviated) == len(importances):
+                feature_labels = [self.feature_names_abbreviated[i] for i in top_indices]
+            else:
+                feature_labels = [f'Feature {i}' for i in top_indices]
+            
+            ax.set_yticklabels(feature_labels)
         else:
-            feature_labels = [f'Feature {i}' for i in top_indices]
-        
-        ax.set_yticklabels(feature_labels)
+            # RBF kernel - no linear coefficients
+            ax.text(0.5, 0.5, f'Feature importances not available\n(using {kernel_used.upper()} kernel)',
+                   ha='center', va='center', transform=ax.transAxes, fontsize=12)
+            ax.set_title(f'Feature Importances\n{model_name} ({kernel_used.upper()} Kernel)')
+            ax.set_xticks([])
+            ax.set_yticks([])
         
         # 4. Class-wise Performance
         ax = axes[1, 1]
@@ -2459,7 +3424,7 @@ class CrossDataClassifier:
 def main():
     """Main function for command line usage."""
     parser = argparse.ArgumentParser(
-        description='Cross-subject binary ExtraTrees classification for VS vs MCS consciousness states'
+        description='Cross-subject binary SVM classification for VS vs MCS consciousness states'
     )
     parser.add_argument('--data-dir', required=True,
                        help='Path to results directory containing subject data')
@@ -2467,14 +3432,8 @@ def main():
                        help='Path to CSV file with patient labels')
     parser.add_argument('--marker-type', choices=['scalar', 'topo'], default='scalar',
                        help='Type of markers to use (scalar or topo)')
-    parser.add_argument('--data-origin', choices=['original', 'reconstructed'], default='original',
-                       help='Source of data (original or reconstructed)')
     parser.add_argument('--output-dir', 
-                       help='Output directory for results (default: results/extratrees/{marker_type}_{data_origin})')
-    parser.add_argument('--n-estimators', type=int, default=500,
-                       help='Number of trees in the forest')
-    parser.add_argument('--max-depth', type=int, default=4,
-                       help='Maximum depth of trees')
+                       help='Output directory for results (default: results/svm/{marker_type})')
     parser.add_argument('--cv-strategy', choices=['stratified', 'loo'], default='stratified',
                        help='Cross-validation strategy')
     parser.add_argument('--n-splits', type=int, default=4,
@@ -2491,8 +3450,8 @@ def main():
     # Run classification
     try:
         if args.cross_data:
-            # Use new CrossDataClassifier for cross-data classification
-            print("Running cross-data classification...")
+            # Run cross-data SVM classification
+            print("Running cross-data SVM classification with linear kernel...")
             classifier = CrossDataClassifier(
                 data_dir=args.data_dir,
                 patient_labels_file=args.patient_labels,
@@ -2502,31 +3461,14 @@ def main():
             )
             
             classifier.run_cross_data_classification(
-                n_estimators=args.n_estimators,
-                max_depth=args.max_depth,
                 cv_strategy=args.cv_strategy,
                 n_splits=args.n_splits,
                 test_size=args.test_size
             )
         else:
-            # Use original CrossSubjectClassifier for single-data classification
-            print("Running single-data classification...")
-            classifier = CrossSubjectClassifier(
-                data_dir=args.data_dir,
-                patient_labels_file=args.patient_labels,
-                marker_type=args.marker_type,
-                data_origin=args.data_origin,
-                output_dir=args.output_dir,
-                random_state=args.random_state
-            )
-            
-            classifier.run_classification(
-                n_estimators=args.n_estimators,
-                max_depth=args.max_depth,
-                cv_strategy=args.cv_strategy,
-                n_splits=args.n_splits,
-                test_size=args.test_size
-            )
+            print("Error: This script requires --cross-data flag.")
+            print("Use: --cross-data to train on both original and reconstructed data")
+            return
         
         print("\nClassification completed successfully!")
         

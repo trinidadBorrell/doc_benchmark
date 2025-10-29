@@ -20,16 +20,297 @@ from scipy import stats
 import warnings
 warnings.filterwarnings('ignore')
 
+# Import statistical analysis with robust approach
+HAS_STATISTICAL_ANALYSIS = False
+StatisticalAnalyzer = None
+
+def _import_statistical_analyzer():
+    """Import StatisticalAnalyzer with multiple fallback approaches."""
+    global HAS_STATISTICAL_ANALYSIS, StatisticalAnalyzer
+    
+    try:
+        # First try relative import
+        from .statistical_analysis import StatisticalAnalyzer
+        HAS_STATISTICAL_ANALYSIS = True
+        print("✅ StatisticalAnalyzer imported successfully (relative import)")
+        return
+    except ImportError:
+        pass
+    
+    try:
+        # Try absolute import from same directory
+        import sys
+        import os.path as op
+        analysis_dir = op.dirname(op.abspath(__file__))
+        if analysis_dir not in sys.path:
+            sys.path.insert(0, analysis_dir)
+        
+        from statistical_analysis import StatisticalAnalyzer
+        HAS_STATISTICAL_ANALYSIS = True
+        print("✅ StatisticalAnalyzer imported successfully (absolute import)")
+        return
+    except ImportError:
+        pass
+    
+    try:
+        # Try importing with explicit module reloading
+        import importlib.util
+        import sys
+        
+        analysis_dir = op.dirname(op.abspath(__file__))
+        stat_analysis_path = op.join(analysis_dir, 'statistical_analysis.py')
+        
+        if op.exists(stat_analysis_path):
+            spec = importlib.util.spec_from_file_location("statistical_analysis", stat_analysis_path)
+            statistical_analysis_module = importlib.util.module_from_spec(spec)
+            sys.modules["statistical_analysis"] = statistical_analysis_module
+            spec.loader.exec_module(statistical_analysis_module)
+            
+            StatisticalAnalyzer = statistical_analysis_module.StatisticalAnalyzer
+            HAS_STATISTICAL_ANALYSIS = True
+            print("✅ StatisticalAnalyzer imported successfully (dynamic import)")
+            return
+    except Exception:
+        pass
+    
+    print("⚠️  Warning: StatisticalAnalyzer not available. Statistical tests will be skipped.")
+    HAS_STATISTICAL_ANALYSIS = False
+
+# Try to import the StatisticalAnalyzer
+_import_statistical_analyzer()
+
 # Try to import MNE for topographic plotting
 try:
     import mne
     HAS_MNE = True
     mne.set_log_level('WARNING')
-except ImportError:
+    
+    # Import and register EGI montage tools
+    import sys
+    montage_tools_path = op.join(op.dirname(op.abspath(__file__)), '..', 'montage_tools')
+    if montage_tools_path not in sys.path:
+        sys.path.insert(0, montage_tools_path)
+    
+    from montage_tools import egi, montages
+    egi.register()  # Register EGI equipment system
+    print("✅ EGI montage tools registered successfully")
+    HAS_EGI_TOOLS = True
+except ImportError as e:
     HAS_MNE = False
-    print("Warning: MNE-Python not available. Topographic plots will be skipped.")
+    HAS_EGI_TOOLS = False
+    print(f"Warning: MNE-Python or EGI tools not available. Topographic plots will be skipped. Error: {e}")
+
+# Import plot_gfp from nice-extensions
+try:
+    from nice_ext.viz.evokeds import plot_gfp
+    HAS_NICE_EXT = True
+except ImportError:
+    # Try adding nice-extensions to path
+    import sys
+    nice_ext_path = '/Users/trinidad.borrell/Documents/Work/PhD/Proyects/nice/nice-extensions'
+    if nice_ext_path not in sys.path:
+        sys.path.insert(0, nice_ext_path)
+    try:
+        from nice_ext.viz.evokeds import plot_gfp
+        HAS_NICE_EXT = True
+    except ImportError:
+        print("Warning: nice-extensions not found. Using basic GFP plotting.")
+        HAS_NICE_EXT = False
 
 from scipy.stats import zscore
+from scipy.stats import chi2
+from matplotlib.path import Path
+from matplotlib.patches import PathPatch
+
+# EGI-256 Configuration for Topoplots
+# These definitions ensure proper electrode outlines for EGI 256-channel montage
+# Note: Electrode numbers are 1-indexed in EGI naming, subtract 1 for Python 0-indexing
+_egi256_outlines = {
+    'ear1': np.array([190, 191, 201, 209, 218, 217, 216, 208, 200, 190]) ,
+    'ear2': np.array([81, 72, 66, 67, 68, 73, 82, 92, 91, 81]) ,
+    'outer': np.array([9, 17, 24, 30, 31, 36, 45, 243, 240, 241, 242, 246, 250,
+                       255, 90, 101, 110, 119, 132, 144, 164, 173, 186, 198,
+                       207, 215, 228, 232, 236, 239, 238, 237, 233, 9]) ,
+}
+
+_egi256_rois = {
+    'p3a': np.array([6, 7, 9, 14, 15, 16, 22, 23, 45, 81, 132, 186]) - 1,
+    'p3b': np.array([9, 45, 81, 100, 101, 110, 119, 128, 129, 132, 186]) - 1,
+    'mmn': np.array([6, 7, 9, 14, 15, 16, 22, 23, 45, 81, 132, 186]) - 1,
+    'cnv': np.array([6, 7, 14, 15, 16, 22, 23]) - 1,
+    'Fz': np.array([6, 7, 14, 15, 16, 22, 23]) - 1,
+    'Cz': np.array([9, 45, 81, 132, 186]) - 1,
+    'Pz': np.array([100, 101, 110, 119, 128, 129]) - 1,
+    'scalp': np.arange(224),
+    'nonscalp': np.arange(224, 256),
+    'Fp1': np.array([26, 27, 32, 33, 34, 37, 38]) - 1,
+    'Fp2': np.array([11, 12, 18, 19, 20, 25, 26]) - 1,
+    'F3': np.array([30, 36, 40, 41, 42, 49, 50]) - 1,
+    'F4': np.array([205, 206, 213, 214, 215, 223, 224]) - 1,
+    'C3': np.array([51, 52, 58, 59, 60, 65, 66]) - 1,
+    'C4': np.array([155, 164, 182, 183, 184, 195, 196]) - 1,
+    'P3': np.array([76, 77, 85, 86, 87, 97, 98]) - 1,
+    'P4': np.array([152, 153, 161, 162, 163, 171, 172]) - 1,
+    'T5': np.array([83, 84, 85, 94, 95, 96, 104, 105, 106]) - 1,
+    'T6': np.array([169, 170, 171, 177, 178, 179, 189, 190, 191]) - 1,
+    'Oz': np.array([125, 136, 137, 138, 148]) - 1,
+}
+
+_egi_outlines = {
+    256: _egi256_outlines
+}
+
+_egi_ch_names = {}
+for i in [64, 65, 128, 129, 256, 257]:
+    _egi_ch_names['{}'.format(i)] = ['E{}'.format(c) for c in range(1, i + 1)]
+
+for i in [2, 4, 8, 16, 32, 64]:
+    _egi_ch_names['{}a'.format(i)] = ['E{}'.format(c) for c in range(1, i + 1)]
+
+
+def _prepare_egi256_sphere_and_outlines(evoked):
+    """
+    Prepare sphere and outlines for EGI-256 topographic plotting.
+    
+    Parameters
+    ----------
+    evoked : mne.Evoked
+        Evoked object with EGI-256 montage set.
+        
+    Returns
+    -------
+    sphere : tuple or None
+        Sphere definition (x, y, z, radius) for the head model.
+    outlines : dict
+        Outlines dictionary with proper boundaries and patch for plotting.
+    """
+    # Define sphere for EGI 256 (based on specific electrodes)
+    _egi256_outlines = { 'ear1': np.array([190, 191, 201, 209, 218, 217, 216, 208, 200, 190]),
+        'ear2': np.array([81, 72, 66, 67, 68, 73, 82, 92, 91, 81]),
+        'outer': np.array([9, 17, 24, 30, 31, 36, 45, 243, 240, 241, 242, 246, 250,
+                       255, 90, 101, 110, 119, 132, 144, 164, 173, 186, 198,
+                       207, 215, 228, 232, 236, 239, 238, 237, 233, 9]),
+    }
+
+    sphere_ch_names = ['E137', 'E26', 'E69', 'E202']
+    ch_names = evoked.ch_names
+    ch_idx = [ch_names.index(ch) for ch in sphere_ch_names if ch in ch_names]
+    
+    if len(ch_idx) == 4:
+        pos_3d = np.stack([evoked.info['chs'][idx]['loc'][:3] for idx in ch_idx])
+        radius = np.abs(pos_3d[[2, 3], 0]).mean()
+        x = pos_3d[0, 0]
+        y = pos_3d[-1, 1]
+        z = pos_3d[:, -1].mean()
+        sphere = (x, y, z, radius)
+        print('Defined Esphere')
+    #else:
+    #    sphere = None
+    
+    # Get 2D positions for topomap
+    _, pos, _, _, _, this_sphere, clip_origin = \
+        mne.viz.topomap._prepare_topomap_plot(evoked.info, 'eeg', sphere=sphere)
+    
+    # Build the outlines dictionary properly
+    outlines = {}
+    codes = []
+    vertices = []
+    for k, v in _egi256_outlines.items():
+        t_verts = pos[v, :]
+        outlines[k] = (t_verts[:, 0], t_verts[:, 1])
+        t_codes = 2 * np.ones(v.shape[0])
+        t_codes[0] = 1
+        codes.append(t_codes)
+        vertices.append(t_verts)
+    
+    vertices = np.concatenate(vertices, axis=0)
+    codes = np.concatenate(codes, axis=0)
+    
+    # Add all required keys for MNE
+    outlines['mask_pos'] = outlines['outer']
+    outlines['clip_radius'] = clip_origin
+    
+    # Create path patch
+    path = Path(vertices=vertices, codes=codes)
+    
+    def patch():
+        return PathPatch(path, alpha=0.1)
+    
+    outlines['patch'] = patch
+    
+    return this_sphere, outlines
+
+
+def _setup_montage_and_sphere(n_channels, topos_mean=None):
+    """
+    Set up MNE montage, info object, sphere, and outlines for topographic plotting.
+    
+    Parameters
+    ----------
+    n_channels : int
+        Number of EEG channels
+    topos_mean : array, optional
+        Mean topographic data (n_markers, n_channels) for creating evoked object.
+        Required for 256-channel custom sphere/outlines.
+        
+    Returns
+    -------
+    info : mne.Info
+        MNE info object with montage set
+    sphere : tuple or str
+        Sphere definition for plotting
+    outlines : dict or str
+        Outlines definition for plotting
+    """
+    if n_channels == 256:
+        print('  Setting up EGI-256 montage with custom sphere and outlines')
+        # Use standard GSN-HydroCel-256 montage
+        montage = mne.channels.make_standard_montage('GSN-HydroCel-256')
+        info = mne.create_info(montage.ch_names, 250, ch_types='eeg')
+        info.set_montage(montage, on_missing='warn')
+        
+        if topos_mean is not None:
+            # Create evoked object to calculate proper sphere and outlines
+            evoked = mne.EvokedArray(topos_mean.T, info, tmin=0)
+            sphere, outlines = _prepare_egi256_sphere_and_outlines(evoked)
+            print(f'  ✓ Created EGI-256 montage with custom sphere: {sphere}')
+        else:
+            # Fallback if no data provided
+            sphere = 'auto'
+            outlines = 'head'
+            print('  ⚠️  No data provided for custom sphere, using auto')
+            
+    elif n_channels == 128:
+        montage = mne.channels.make_standard_montage('GSN-HydroCel-128')
+        info = mne.create_info(montage.ch_names, 250, ch_types='eeg')
+        info.set_montage(montage)
+        sphere = 'auto'
+        outlines = 'head'
+        print(f'  Created standard montage for 128 channels')
+        
+    elif n_channels == 64:
+        montage = mne.channels.make_standard_montage('GSN-HydroCel-64_1.0')
+        info = mne.create_info(montage.ch_names, 250, ch_types='eeg')
+        info.set_montage(montage)
+        sphere = 'auto'
+        outlines = 'head'
+        print(f'  Created standard montage for 64 channels')
+        
+    else:
+        # Create spherical layout as last resort
+        print(f'  ⚠️  No standard montage for {n_channels} channels, creating generic layout')
+        ch_names = [f'EEG{i+1:03d}' for i in range(n_channels)]
+        info = mne.create_info(ch_names, 100, 'eeg')
+        from mne.channels.layout import _auto_topomap_coords
+        pos = _auto_topomap_coords(info, picks=None, sphere=None, ignore_overlap=True)
+        montage_dict = dict(zip(ch_names, pos))
+        montage = mne.channels.make_dig_montage(montage_dict, coord_frame='head')
+        info.set_montage(montage)
+        sphere = 'auto'
+        outlines = 'head'
+    
+    return info, sphere, outlines
+
 
 # Set plotting style - apply seaborn first, then override with custom settings
 plt.style.use('seaborn-v0_8')
@@ -326,14 +607,1646 @@ class OutlierDetector:
         return im1, im2
 
 
+# Define local compute_gfp function for fallback
+def compute_gfp_local(x, alpha=0.05):
+    """Compute GFP with confidence intervals - simplified version."""
+    # Estimate degrees of freedom
+    try:
+        df = mne.rank.estimate_rank(x * 1e12, norm=False)
+    except:
+        df = x.shape[0] - 1
+    
+    std = x.std(axis=0, ddof=1)
+    
+    # Compute confidence intervals using chi-squared distribution
+    ci_lower = np.sqrt(df * std ** 2 / chi2.ppf(alpha / 2, df))
+    ci_upper = np.sqrt(df * std ** 2 / chi2.ppf(1 - (alpha / 2), df))
+    
+    return std, ci_lower, ci_upper
+
+def plot_gfp_local(epochs, conditions=None, colors=None, linestyles=None,
+                   shift_time=0, labels=None, ax=None, fig_kwargs=None):
+    """Local implementation of plot_gfp function."""
+    import matplotlib.pyplot as plt
+    import matplotlib as mpl
+    
+    if fig_kwargs is None:
+        fig_kwargs = {}
+    if ax is None:
+        fig, ax = plt.subplots(1, 1, **fig_kwargs)
+    else:
+        fig = None
+        
+    if conditions is None:
+        conditions = list(epochs.event_id.keys())
+    if colors is None:
+        colors = [None for x in conditions]
+    if linestyles is None:
+        linestyles = ['-' for x in conditions]
+    if labels is None:
+        labels = [None for x in conditions]
+        
+    this_times = (epochs.times + shift_time) * 1e3
+    
+    for condition, color, ls, label in zip(conditions, colors, linestyles, labels):
+        if label is None:
+            label = '{}'.format(condition)
+            
+        if condition not in epochs.event_id:
+            print(f"Warning: Condition '{condition}' not found in epochs")
+            continue
+            
+        # Get data for this condition
+        data = epochs[condition].get_data()
+        
+        # Average across epochs first
+        data = np.mean(data, axis=0)
+        
+        # Compute Global Field Power and confidence intervals
+        gfp, ci1, ci2 = compute_gfp_local(data)
+        
+        # Plot the GFP
+        lines = ax.plot(this_times, gfp * 1e6, color=color, linestyle=ls, label=label)
+        
+        # Add confidence interval
+        ax.fill_between(this_times, y1=ci1 * 1e6, y2=ci2 * 1e6,
+                       color=lines[0].get_color(), alpha=0.5)
+    
+    # Add stimulus onset line
+    ax.axvline(x=0, color='black', linestyle='--', alpha=0.7)
+    ax.axvline(x=150, color='black', linestyle='--', alpha=0.7)
+    ax.axvline(x=300, color='black', linestyle='--', alpha=0.7)
+    ax.axvline(x=450, color='black', linestyle='--', alpha=0.7)
+    ax.axvline(x=600, color='black', linestyle='--', alpha=0.7)
+    
+    ax.set_xlim(this_times[[0, -1]])
+    ax.set_ylabel(r'Global Field Power ($\mu{V}$)')
+    ax.set_xlabel('Time (ms)')
+    ax.legend(loc='upper left')
+    ax.grid(True, alpha=0.3)
+    
+    return fig
+
+
+class GlobalFieldPowerGlobal:
+    """Global Field Power analysis across all subjects."""
+    
+    def __init__(self, output_dir, subjects_data, results_dir, fif_data_dir=None):
+        self.output_dir = output_dir
+        self.subjects_data = subjects_data  # Dictionary with subject_id -> subject_info
+        self.results_dir = results_dir
+        self.fif_data_dir = fif_data_dir  # Directory containing raw .fif files
+        
+        # Create subdirectories
+        self.plots_dir = op.join(output_dir, 'global_field_power', 'plots')
+        self.metrics_dir = op.join(output_dir, 'global_field_power', 'metrics')
+        
+        for dir_path in [self.plots_dir, self.metrics_dir]:
+            os.makedirs(dir_path, exist_ok=True)
+    
+    def analyze_all_subjects(self):
+        """Analyze Global Field Power across all subjects."""
+        print("  🌍 Computing Global Field Power analysis across all subjects...")
+        
+        if not HAS_MNE:
+            print("     ⚠️  MNE-Python not available. Skipping GFP analysis.")
+            return
+        
+        # Event types to analyze
+        event_types = ['LSGS', 'LSGD', 'LDGS', 'LDGD']
+        
+        # Collect epochs from all subjects
+        all_epochs_orig = []
+        all_epochs_recon = []
+        
+        # Try to load cached GFP metrics first (much faster!)
+        cached_gfp_data = self._load_cached_gfp_metrics()
+        
+        if cached_gfp_data:
+            print(f"     🚀 Using cached GFP metrics from {len(cached_gfp_data)} subjects")
+            print("     💡 This avoids expensive recomputation of individual GFP data")
+            return self._analyze_gfp_from_cache(cached_gfp_data, event_types)
+        
+        # Fallback: compute from .fif files (legacy method)
+        print("     ⚠️  No cached GFP metrics found. Computing from .fif files (slower)...")
+        print("     💡 To speed up future runs, ensure individual analysis has been completed")
+        
+        for subject_id, subject_info in self.subjects_data.items():
+            # [Previous .fif loading logic remains as fallback]
+            # Reconstruct subject directory paths
+            # subject_id format is like "sub-001_ses-01" or "AA069_ses-02"
+            # Extract the actual subject and session parts
+            if '_ses-' in subject_id:
+                subj_part, sess_part = subject_id.split('_ses-')
+                if not subj_part.startswith('sub-'):
+                    subj_part = f'sub-{subj_part}'
+                session_name = f'ses-{sess_part}'
+            else:
+                # Old structure without sessions
+                if not subject_id.startswith('sub-'):
+                    subj_part = f'sub-{subject_id}'
+                else:
+                    subj_part = subject_id
+                session_name = None
+            
+            # Build possible directories to search for .fif files
+            possible_dirs = []
+            
+            # If fif_data_dir is provided, use it as the primary location
+            if self.fif_data_dir:
+                if session_name:
+                    fif_dir = op.join(self.fif_data_dir, subj_part, session_name)
+                else:
+                    fif_dir = op.join(self.fif_data_dir, subj_part)
+                possible_dirs.append(fif_dir)
+            
+            # Fallback: try results directory structure
+            if session_name:
+                subject_dir = op.join(self.results_dir, subj_part, session_name)
+            else:
+                subject_dir = op.join(self.results_dir, subj_part)
+            
+            possible_dirs.extend([
+                subject_dir,
+                op.dirname(subject_dir),  # Go up one level
+                op.join(op.dirname(op.dirname(subject_dir)), 'data'),  # data folder
+            ])
+            
+            epochs_orig, epochs_recon = None, None
+            for search_dir in possible_dirs:
+                if op.exists(search_dir):
+                    epochs_orig, epochs_recon = self._load_subject_epochs(search_dir, subject_id)
+                    if epochs_orig is not None:
+                        break
+            
+            if epochs_orig is not None:
+                all_epochs_orig.append(epochs_orig)
+                print(f"     ✅ Loaded epochs for subject {subject_id}")
+            else:
+                print(f"     ⚠️  Could not find .fif files for subject {subject_id}")
+            
+            if epochs_recon is not None:
+                all_epochs_recon.append(epochs_recon)
+        
+        if len(all_epochs_orig) == 0:
+            print("     ❌ No epochs loaded. Cannot perform GFP analysis.")
+            return
+        
+        print(f"     📊 Loaded epochs from {len(all_epochs_orig)} subjects")
+        
+        # Use per-subject GFP analysis to avoid concatenation issues
+        print("     🎯 Using per-subject GFP analysis (recommended approach)")
+        print("     💡 This computes GFP for each subject individually, then aggregates statistically")
+        return self._analyze_gfp_per_subject_alternative(all_epochs_orig, all_epochs_recon, event_types)
+    
+    def _analyze_gfp_per_subject_alternative(self, all_epochs_orig, all_epochs_recon, event_types):
+        """
+        GFP Difference Analysis: compute GFP difference (original - reconstructed) per subject,
+        then aggregate statistically.
+        
+        This approach:
+        1. Computes GFP for original and reconstructed data for each subject
+        2. Computes GFP difference (original - reconstructed) for each subject  
+        3. Aggregates differences: mean ± std across subjects for each time point
+        4. Shows how reconstruction affects global brain activity strength
+        """
+        print("     🔄 Using per-subject GFP difference analysis")
+        print("     💡 Computing: GFP_difference = GFP_original - GFP_reconstructed")
+        print("     💡 Then: mean(differences) ± std(differences) across subjects")
+        
+        n_subjects_orig = len(all_epochs_orig)
+        n_subjects_recon = len(all_epochs_recon)
+        
+        print(f"     📊 Processing {n_subjects_orig} subjects with original data")
+        print(f"     📊 Processing {n_subjects_recon} subjects with reconstructed data")
+        
+        # Storage for per-subject GFP differences
+        subject_gfp_differences = {}
+        
+        # Get times from first subject (should be consistent across subjects)
+        times = all_epochs_orig[0].times
+        
+        # Process each subject individually - compute differences
+        subjects_with_both_data = 0
+        for i in range(min(n_subjects_orig, n_subjects_recon)):
+            epochs_orig = all_epochs_orig[i]
+            epochs_recon = all_epochs_recon[i] if i < len(all_epochs_recon) else None
+            
+            if epochs_recon is None:
+                continue
+                
+            subject_id = f"subject_{i+1}"
+            subject_gfp_differences[subject_id] = {}
+            
+            for event_type in event_types:
+                # Check if event exists in both original and reconstructed data
+                if (event_type in epochs_orig.event_id and 
+                    event_type in epochs_recon.event_id):
+                    
+                    # Compute GFP for original data
+                    orig_data = epochs_orig[event_type].get_data()  # (n_epochs, n_channels, n_times)
+                    orig_gfp = self._compute_gfp_from_data(orig_data)  # (n_times,)
+                    
+                    # Compute GFP for reconstructed data  
+                    recon_data = epochs_recon[event_type].get_data()
+                    recon_gfp = self._compute_gfp_from_data(recon_data)  # (n_times,)
+                    
+                    # Compute GFP difference: original - reconstructed
+                    gfp_difference = orig_gfp - recon_gfp  # (n_times,)
+                    
+                    subject_gfp_differences[subject_id][event_type] = gfp_difference
+            
+            subjects_with_both_data += 1
+            
+            if (i + 1) % 10 == 0:  # Progress indicator
+                print(f"     📈 Processed {i + 1}/{min(n_subjects_orig, n_subjects_recon)} subjects")
+        
+        print(f"     ✅ Computed GFP differences for {subjects_with_both_data} subjects")
+        
+        if subjects_with_both_data == 0:
+            print("     ❌ No subjects have both original and reconstructed data!")
+            return
+        
+        # Now aggregate both individual GFP data AND differences
+        print("     📊 Aggregating GFP data across subjects...")
+        
+        # Convert differences to include original GFP data too
+        subject_gfp_complete = self._convert_to_complete_gfp_data(subject_gfp_differences, all_epochs_orig, all_epochs_recon, event_types)
+        
+        # Aggregate all data (original, reconstructed, and differences)
+        aggregated_complete = self._aggregate_complete_gfp_data(subject_gfp_complete, event_types, times)
+        
+        # Create comprehensive plots
+        print("     📈 Creating comprehensive Global Field Power plots...")
+        self._create_comprehensive_gfp_plots(aggregated_complete, times, event_types)
+        
+        print("     ✅ Complete GFP analysis finished successfully")
+    
+    def _compute_gfp_from_data(self, data):
+        """
+        Compute Global Field Power from epoch data.
+        
+        DETAILED EXPLANATION OF GFP:
+        ----------------------------
+        Global Field Power (GFP) represents the "global strength" of electrical brain activity.
+        
+        Mathematical steps:
+        1. Average across epochs: get typical response pattern for this condition
+        2. For each time point: compute standard deviation across all EEG channels
+        3. Result: single time series showing how "strong" the spatial brain pattern is
+        
+        Physical meaning:
+        - HIGH GFP = Large voltage differences between channels → Strong spatial pattern
+        - LOW GFP = Small voltage differences → Weak/diffuse activity  
+        - PEAKS = Moments of synchronized, strong brain activity
+        - VALLEYS = Moments of weak/desynchronized activity
+        
+        Why it's useful:
+        - Reference-independent (doesn't depend on choice of reference electrode)
+        - Summarizes complex multichannel data into interpretable time series
+        - Shows temporal dynamics of global brain responses
+        - Sensitive to reconstruction quality (differences reveal artifacts)
+        
+        Parameters:
+        -----------
+        data : array, shape (n_epochs, n_channels, n_times)
+            EEG epoch data
+            
+        Returns:
+        --------
+        gfp : array, shape (n_times,)
+            Global Field Power time series
+            
+        Mathematical formula:
+        GFP(t) = std([V₁(t), V₂(t), ..., Vₙ(t)]) 
+        where Vᵢ(t) is the voltage at channel i and time t
+        """
+        # Step 1: Average across epochs to get typical response pattern
+        data_avg = np.mean(data, axis=0)  # (n_channels, n_times)
+        
+        # Step 2: Compute GFP = standard deviation across channels for each time point
+        gfp = np.std(data_avg, axis=0)  # (n_times,)
+        
+        return gfp
+    
+    def _convert_to_complete_gfp_data(self, subject_gfp_differences, all_epochs_orig, all_epochs_recon, event_types):
+        """
+        Convert difference data to include original and reconstructed GFP data.
+        
+        This re-computes original and reconstructed GFP to provide complete data
+        for comprehensive plotting.
+        """
+        complete_data = {
+            'original': {},
+            'reconstructed': {},
+            'differences': subject_gfp_differences
+        }
+        
+        # Re-compute original and reconstructed GFP for subjects with both data
+        n_subjects = min(len(all_epochs_orig), len(all_epochs_recon))
+        
+        for i in range(n_subjects):
+            epochs_orig = all_epochs_orig[i]
+            epochs_recon = all_epochs_recon[i] if i < len(all_epochs_recon) else None
+            
+            if epochs_recon is None:
+                continue
+                
+            subject_id = f"subject_{i+1}"
+            complete_data['original'][subject_id] = {}
+            complete_data['reconstructed'][subject_id] = {}
+            
+            for event_type in event_types:
+                if (event_type in epochs_orig.event_id and 
+                    event_type in epochs_recon.event_id):
+                    
+                    # Original GFP
+                    orig_data = epochs_orig[event_type].get_data()
+                    orig_gfp = self._compute_gfp_from_data(orig_data)
+                    complete_data['original'][subject_id][event_type] = orig_gfp
+                    
+                    # Reconstructed GFP
+                    recon_data = epochs_recon[event_type].get_data()
+                    recon_gfp = self._compute_gfp_from_data(recon_data)
+                    complete_data['reconstructed'][subject_id][event_type] = recon_gfp
+        
+        return complete_data
+    
+    def _aggregate_complete_gfp_data(self, subject_gfp_complete, event_types, times):
+        """
+        Aggregate complete GFP data with both empirical and chi-squared statistics.
+        
+        For GFP (which are standard deviations), we compute:
+        1. Empirical statistics: mean ± std of GFP values across subjects
+        2. Chi-squared confidence intervals: theoretical CI for standard deviations
+        """
+        from scipy.stats import chi2
+        
+        aggregated = {
+            'times': times,
+            'original': {},
+            'reconstructed': {},
+            'differences': {},
+            'statistics_info': {}
+        }
+        
+        # Process original, reconstructed, and differences
+        for data_type in ['original', 'reconstructed', 'differences']:
+            aggregated[data_type] = {}
+            
+            for event_type in event_types:
+                # Collect data from all subjects for this event type
+                all_subject_data = []
+                
+                for subject_id, subject_data in subject_gfp_complete[data_type].items():
+                    if event_type in subject_data:
+                        all_subject_data.append(subject_data[event_type])
+                
+                if all_subject_data:
+                    # Convert to array: (n_subjects, n_times)
+                    data_matrix = np.array(all_subject_data)
+                    n_subjects = len(all_subject_data)
+                    
+                    # Empirical statistics
+                    mean_data = np.mean(data_matrix, axis=0)
+                    std_data = np.std(data_matrix, axis=0, ddof=1)  # Sample std
+                 #   sem_data = std_data / np.sqrt(n_subjects)  # Standard error of mean
+                    
+                    # For original and reconstructed (which are standard deviations),
+                    # also compute chi-squared confidence intervals
+                    if data_type in ['original', 'reconstructed'] and n_subjects > 1:
+                        # Chi-squared confidence intervals for standard deviations
+                        alpha = 0.05  # 95% CI
+                        df = n_subjects - 1
+                        
+                        # Compute chi-squared CI bounds for each time point
+                        chi2_lower = chi2.ppf(alpha/2, df) 
+                        chi2_upper = chi2.ppf(1-alpha/2, df)
+                        
+                        # Convert to confidence bounds for standard deviation
+                        chi2_ci_lower = np.sqrt(df * std_data**2 / chi2_upper)
+                        chi2_ci_upper = np.sqrt(df * std_data**2 / chi2_lower)
+                    else:
+                        chi2_ci_lower = chi2_ci_upper = None
+                    
+                    aggregated[data_type][event_type] = {
+                        'mean': mean_data,
+                        'std': std_data,
+                 #       'sem': sem_data,
+                        'n_subjects': n_subjects,
+                        'chi2_ci_lower': chi2_ci_lower,
+                        'chi2_ci_upper': chi2_ci_upper,
+                        'raw_data_matrix': data_matrix  # Keep for advanced analysis
+                    }
+                    
+                    ci_info = f" (Chi² CI available)" if chi2_ci_lower is not None else ""
+                    print(f"     📊 {data_type.capitalize()} {event_type}: {n_subjects} subjects{ci_info}")
+        
+        # Store statistical approach info
+        aggregated['statistics_info'] = {
+            'empirical_approach': 'Standard empirical mean ± std across subjects',
+            'chi2_approach': 'Chi-squared confidence intervals for standard deviations',
+            'recommendation': 'Empirical is more robust for non-normal EEG data'
+        }
+        
+        return aggregated
+    
+    def _aggregate_gfp_differences(self, subject_gfp_differences, event_types, times):
+        """
+        Aggregate per-subject GFP differences into population statistics.
+        
+        This computes the mean and standard deviation of GFP differences across subjects.
+        
+        Returns:
+        --------
+        aggregated_differences : dict
+            Contains mean and std of GFP differences for each event type
+        """
+        aggregated = {
+            'times': times,
+            'event_data': {}
+        }
+        
+        # For each event type, collect GFP differences from all subjects
+        for event_type in event_types:
+            all_subject_differences = []
+            
+            # Collect differences from all subjects for this event type
+            for subject_id, subject_data in subject_gfp_differences.items():
+                if event_type in subject_data:
+                    all_subject_differences.append(subject_data[event_type])
+            
+            if all_subject_differences:
+                # Convert to array: (n_subjects, n_times)
+                differences_matrix = np.array(all_subject_differences)
+                
+                # Compute population statistics across subjects
+                mean_difference = np.mean(differences_matrix, axis=0)  # (n_times,) - mean difference per time point
+                std_difference = np.std(differences_matrix, axis=0)    # (n_times,) - std of differences per time point
+                
+                aggregated['event_data'][event_type] = {
+                    'mean_difference': mean_difference,
+                    'std_difference': std_difference,
+                    'n_subjects': len(all_subject_differences),
+                    'all_differences': differences_matrix  # Keep for additional analysis
+                }
+                
+                print(f"     📊 {event_type}: {len(all_subject_differences)} subjects with differences")
+        
+        return aggregated
+    
+    def _create_gfp_difference_plots(self, aggregated_differences, times, event_types):
+        """
+        Create GFP difference plots showing mean ± std of (Original - Reconstructed) differences.
+        
+        This visualization shows:
+        - How reconstruction affects global brain activity strength
+        - Population-level patterns (mean across subjects)  
+        - Individual variability (std across subjects)
+        - Time points where reconstruction has biggest impact
+        """
+        times_ms = times * 1000  # Convert to milliseconds
+        
+        print(f"     📊 Creating difference plots for {len(aggregated_differences['event_data'])} event types")
+        
+        # 1. Individual event type difference plots
+        for event_type in event_types:
+            if event_type in aggregated_differences['event_data']:
+                fig, ax = plt.subplots(1, 1, figsize=(12, 6))
+                
+                data = aggregated_differences['event_data'][event_type]
+                mean_diff = data['mean_difference']
+                std_diff = data['std_difference']
+                n_subjects = data['n_subjects']
+                
+                # Plot mean difference
+                ax.plot(times_ms, mean_diff * 1e6, 'purple', linewidth=3, 
+                       label=f'Mean Difference (n={n_subjects})')
+                
+                # Plot ± 1 standard deviation band
+                ax.fill_between(times_ms,
+                               (mean_diff - std_diff) * 1e6,
+                               (mean_diff + std_diff) * 1e6,
+                               alpha=0.3, color='purple', label='±1 STD')
+                
+                # Add reference lines
+                ax.axhline(y=0, color='black', linestyle='-', alpha=0.5, label='No difference')
+                ax.axvline(x=0, color='gray', linestyle='--', alpha=0.7, label='Stimulus onset')
+                
+                # Add stimulus timing markers (typical ERP experiment)
+                stimulus_times = [150, 300, 450, 600]  # Common ERP component timings
+                for stim_time in stimulus_times:
+                    ax.axvline(x=stim_time, color='gray', linestyle=':', alpha=0.5)
+                
+                ax.set_xlabel('Time (ms)')
+                ax.set_ylabel('GFP Difference (μV)\n(Original - Reconstructed)')
+                ax.set_title(f'Global Field Power Difference - {event_type}\n'
+                           f'Mean ± STD across {n_subjects} subjects\n'
+                           f'Positive = Original > Reconstructed, Negative = Original < Reconstructed')
+                ax.legend()
+                ax.grid(True, alpha=0.3)
+                
+                plt.tight_layout()
+                plt.savefig(op.join(self.plots_dir, f'gfp_difference_{event_type}_population.png'), 
+                           dpi=300, bbox_inches='tight')
+                plt.close()
+                
+                print(f"     ✅ Created {event_type} difference plot")
+        
+        # 2. Combined plot showing all event types differences
+        if aggregated_differences['event_data']:
+            fig, ax = plt.subplots(1, 1, figsize=(14, 8))
+            fig.suptitle('Global Field Power Differences - All Event Types\n'
+                        'Mean ± STD of (Original - Reconstructed) across subjects', fontsize=16)
+            
+            colors = ['purple', 'blue', 'green', 'orange', 'red']
+            
+            for i, event_type in enumerate(event_types):
+                if event_type in aggregated_differences['event_data']:
+                    data = aggregated_differences['event_data'][event_type]
+                    mean_diff = data['mean_difference']
+                    std_diff = data['std_difference']
+                    n_subjects = data['n_subjects']
+                    color = colors[i % len(colors)]
+                    
+                    # Plot mean difference
+                    ax.plot(times_ms, mean_diff * 1e6, color=color, linewidth=2, 
+                           label=f'{event_type} (n={n_subjects})')
+                    
+                    # Plot std band (lighter)
+                    ax.fill_between(times_ms,
+                                   (mean_diff - std_diff) * 1e6,
+                                   (mean_diff + std_diff) * 1e6,
+                                   alpha=0.2, color=color)
+            
+            # Add reference lines
+            ax.axhline(y=0, color='black', linestyle='-', alpha=0.7, linewidth=1, label='No difference')
+            ax.axvline(x=0, color='gray', linestyle='--', alpha=0.7, label='Stimulus onset')
+            
+            # Add stimulus timing markers
+            stimulus_times = [150, 300, 450, 600]
+            for stim_time in stimulus_times:
+                ax.axvline(x=stim_time, color='gray', linestyle=':', alpha=0.5)
+            
+            ax.set_xlabel('Time (ms)')
+            ax.set_ylabel('GFP Difference (μV)\n(Original - Reconstructed)')
+            ax.set_title('Population-Level GFP Differences\n'
+                        'How Reconstruction Affects Global Brain Activity Strength')
+            ax.legend()
+            ax.grid(True, alpha=0.3)
+            
+            plt.tight_layout()
+            plt.savefig(op.join(self.plots_dir, 'gfp_differences_all_events_population.png'), 
+                       dpi=300, bbox_inches='tight')
+            plt.close()
+            
+            print(f"     ✅ Created combined differences plot")
+        
+        # 3. Summary statistics plot
+        self._create_gfp_difference_summary_plot(aggregated_differences, times_ms, event_types)
+        
+        print(f"     ✅ All GFP difference plots saved in {self.plots_dir}")
+    
+    def _create_gfp_difference_summary_plot(self, aggregated_differences, times_ms, event_types):
+        """Create summary plot with GFP difference statistics."""
+        
+        if not aggregated_differences['event_data']:
+            return
+        
+        # Create summary statistics
+        fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+        fig.suptitle('GFP Difference Summary Statistics Across All Events', fontsize=16)
+        
+        # Collect all data for summary
+        all_mean_diffs = []
+        all_std_diffs = []
+        event_labels = []
+        
+        for event_type in event_types:
+            if event_type in aggregated_differences['event_data']:
+                data = aggregated_differences['event_data'][event_type]
+                all_mean_diffs.append(data['mean_difference'])
+                all_std_diffs.append(data['std_difference'])
+                event_labels.append(event_type)
+        
+        if not all_mean_diffs:
+            return
+        
+        all_mean_diffs = np.array(all_mean_diffs)  # (n_events, n_times)
+        all_std_diffs = np.array(all_std_diffs)
+        
+        # Plot 1: Mean difference across all events
+        axes[0,0].plot(times_ms, np.mean(all_mean_diffs, axis=0) * 1e6, 'red', linewidth=3)
+        axes[0,0].fill_between(times_ms,
+                              (np.mean(all_mean_diffs, axis=0) - np.std(all_mean_diffs, axis=0)) * 1e6,
+                              (np.mean(all_mean_diffs, axis=0) + np.std(all_mean_diffs, axis=0)) * 1e6,
+                              alpha=0.3, color='red')
+        axes[0,0].axhline(y=0, color='black', linestyle='-', alpha=0.5)
+        axes[0,0].axvline(x=0, color='gray', linestyle='--', alpha=0.7)
+        axes[0,0].set_xlabel('Time (ms)')
+        axes[0,0].set_ylabel('GFP Difference (μV)')
+        axes[0,0].set_title('Grand Average Across All Events')
+        axes[0,0].grid(True, alpha=0.3)
+        
+        # Plot 2: Standard deviation patterns
+        axes[0,1].plot(times_ms, np.mean(all_std_diffs, axis=0) * 1e6, 'orange', linewidth=2)
+        axes[0,1].axvline(x=0, color='gray', linestyle='--', alpha=0.7)
+        axes[0,1].set_xlabel('Time (ms)')
+        axes[0,1].set_ylabel('STD of GFP Differences (μV)')
+        axes[0,1].set_title('Variability Across Subjects (Average STD)')
+        axes[0,1].grid(True, alpha=0.3)
+        
+        # Plot 3: Time-averaged statistics per event
+        time_avg_means = np.mean(np.abs(all_mean_diffs), axis=1) * 1e6  # Average absolute difference
+        time_avg_stds = np.mean(all_std_diffs, axis=1) * 1e6
+        
+        x_pos = np.arange(len(event_labels))
+        axes[1,0].bar(x_pos, time_avg_means, color='skyblue', alpha=0.7)
+        axes[1,0].set_xlabel('Event Types')
+        axes[1,0].set_ylabel('Time-Averaged |GFP Difference| (μV)')
+        axes[1,0].set_title('Average Reconstruction Effect per Event')
+        axes[1,0].set_xticks(x_pos)
+        axes[1,0].set_xticklabels(event_labels)
+        axes[1,0].grid(True, alpha=0.3, axis='y')
+        
+        # Plot 4: Variability per event
+        axes[1,1].bar(x_pos, time_avg_stds, color='lightcoral', alpha=0.7)
+        axes[1,1].set_xlabel('Event Types')
+        axes[1,1].set_ylabel('Time-Averaged STD (μV)')
+        axes[1,1].set_title('Subject Variability per Event')
+        axes[1,1].set_xticks(x_pos)
+        axes[1,1].set_xticklabels(event_labels)
+        axes[1,1].grid(True, alpha=0.3, axis='y')
+        
+        plt.tight_layout()
+        plt.savefig(op.join(self.plots_dir, 'gfp_difference_summary_statistics.png'), 
+                   dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        print(f"     ✅ Created summary statistics plot")
+    
+    def _create_comprehensive_gfp_plots(self, aggregated_complete, times, event_types):
+        """
+        Create comprehensive GFP plots showing:
+        1. Original vs Reconstructed (with both empirical and chi-squared CIs)
+        2. Differences (Original - Reconstructed)
+        3. Combined overviews
+        4. Statistical comparisons
+        """
+        times_ms = times * 1000  # Convert to milliseconds
+        
+        print(f"     📊 Creating comprehensive GFP plots for {len(event_types)} event types")
+        
+        # 1. ORIGINAL VS RECONSTRUCTED PLOTS (with statistical options)
+        self._create_orig_vs_recon_plots(aggregated_complete, times_ms, event_types)
+        
+        # 2. DIFFERENCE PLOTS 
+        self._create_difference_only_plots(aggregated_complete, times_ms, event_types)
+        
+        # 3. COMBINED OVERVIEW PLOTS
+        self._create_combined_overview_plots(aggregated_complete, times_ms, event_types)
+        
+        # 4. STATISTICAL COMPARISON PLOTS
+        self._create_statistical_comparison_plots(aggregated_complete, times_ms, event_types)
+        
+        print(f"     ✅ All comprehensive GFP plots saved in {self.plots_dir}")
+    
+    def _create_orig_vs_recon_plots(self, aggregated_complete, times_ms, event_types):
+        """Create Original vs Reconstructed plots with statistical confidence bands."""
+        
+        print("     📈 Creating Original vs Reconstructed plots...")
+        
+        # Individual event plots
+        for event_type in event_types:
+            if (event_type in aggregated_complete['original'] and 
+                event_type in aggregated_complete['reconstructed']):
+                
+                fig, axes = plt.subplots(1, 2, figsize=(20, 8))
+                fig.suptitle(f'Global Field Power - {event_type}\nOriginal vs Reconstructed Data', fontsize=16)
+                
+                orig_data = aggregated_complete['original'][event_type]
+                recon_data = aggregated_complete['reconstructed'][event_type]
+                
+                # Plot 1: Empirical statistics (mean ± std)
+                axes[0].plot(times_ms, orig_data['mean'] * 1e6, 'blue', linewidth=3, label='Original')
+                axes[0].fill_between(times_ms,
+                                   (orig_data['mean'] - orig_data['std']) * 1e6,
+                                   (orig_data['mean'] + orig_data['std']) * 1e6,
+                                   alpha=0.3, color='blue', label='Original ±1 STD')
+                
+                axes[0].plot(times_ms, recon_data['mean'] * 1e6, 'red', linewidth=3, label='Reconstructed')
+                axes[0].fill_between(times_ms,
+                                   (recon_data['mean'] - recon_data['std']) * 1e6,
+                                   (recon_data['mean'] + recon_data['std']) * 1e6,
+                                   alpha=0.3, color='red', label='Reconstructed ±1 STD')
+                
+                axes[0].axvline(x=0, color='gray', linestyle='--', alpha=0.7)
+                axes[0].set_xlabel('Time (ms)')
+                axes[0].set_ylabel('Global Field Power (μV)')
+                axes[0].set_title(f'Empirical Statistics (n={orig_data["n_subjects"]})')
+                axes[0].legend()
+                axes[0].grid(True, alpha=0.3)
+                
+                # Plot 2: Chi-squared confidence intervals (if available)
+                if (orig_data['chi2_ci_lower'] is not None and 
+                    recon_data['chi2_ci_lower'] is not None):
+                    
+                    axes[1].plot(times_ms, orig_data['mean'] * 1e6, 'blue', linewidth=3, label='Original')
+                    axes[1].fill_between(times_ms,
+                                       orig_data['chi2_ci_lower'] * 1e6,
+                                       orig_data['chi2_ci_upper'] * 1e6,
+                                       alpha=0.3, color='blue', label='Original 95% Chi² CI')
+                    
+                    axes[1].plot(times_ms, recon_data['mean'] * 1e6, 'red', linewidth=3, label='Reconstructed')
+                    axes[1].fill_between(times_ms,
+                                       recon_data['chi2_ci_lower'] * 1e6,
+                                       recon_data['chi2_ci_upper'] * 1e6,
+                                       alpha=0.3, color='red', label='Reconstructed 95% Chi² CI')
+                    
+                    axes[1].axvline(x=0, color='gray', linestyle='--', alpha=0.7)
+                    axes[1].set_xlabel('Time (ms)')
+                    axes[1].set_ylabel('Global Field Power (μV)')
+                    axes[1].set_title('Chi-Squared Confidence Intervals')
+                    axes[1].legend()
+                    axes[1].grid(True, alpha=0.3)
+                else:
+                    # No chi-squared CI available, show empirical SEM instead
+                    axes[1].plot(times_ms, orig_data['mean'] * 1e6, 'blue', linewidth=3, label='Original')
+                #    axes[1].fill_between(times_ms,
+                #                       (orig_data['mean'] - orig_data['sem']) * 1e6,
+                #                       (orig_data['mean'] + orig_data['sem']) * 1e6,
+                #                       alpha=0.3, color='blue', label='Original ±1 SEM')
+                    
+                    axes[1].plot(times_ms, recon_data['mean'] * 1e6, 'red', linewidth=3, label='Reconstructed')
+                 #   axes[1].fill_between(times_ms,
+                 #                      (recon_data['mean'] - recon_data['sem']) * 1e6,
+                #                       (recon_data['mean'] + recon_data['sem']) * 1e6,
+                #                       alpha=0.3, color='red', label='Reconstructed ±1 SEM')
+                    
+                    axes[1].axvline(x=0, color='gray', linestyle='--', alpha=0.7)
+                    axes[1].set_xlabel('Time (ms)')
+                    axes[1].set_ylabel('Global Field Power (μV)')
+                    axes[1].set_title('Standard Error of Mean')
+                    axes[1].legend()
+                    axes[1].grid(True, alpha=0.3)
+                
+                plt.tight_layout()
+                plt.savefig(op.join(self.plots_dir, f'gfp_orig_vs_recon_{event_type}_statistics.png'), 
+                           dpi=300, bbox_inches='tight')
+                plt.close()
+    
+    def _create_difference_only_plots(self, aggregated_complete, times_ms, event_types):
+        """Create difference-only plots."""
+        
+        print("     📈 Creating difference-only plots...")
+        
+        # Individual difference plots
+        for event_type in event_types:
+            if event_type in aggregated_complete['differences']:
+                fig, ax = plt.subplots(1, 1, figsize=(12, 6))
+                
+                data = aggregated_complete['differences'][event_type]
+                mean_diff = data['mean']
+                std_diff = data['std']
+             #   sem_diff = data['sem']
+                n_subjects = data['n_subjects']
+                
+                # Plot mean difference with std band
+                ax.plot(times_ms, mean_diff * 1e6, 'purple', linewidth=3, 
+                       label=f'Mean Difference (n={n_subjects})')
+                ax.fill_between(times_ms,
+                               (mean_diff - std_diff) * 1e6,
+                               (mean_diff + std_diff) * 1e6,
+                               alpha=0.3, color='purple', label='±1 STD')
+                
+                # Also show SEM band (tighter, more conservative)
+             #   ax.fill_between(times_ms,
+             #              (mean_diff - std_diff) * 1e6,
+             #                  (mean_diff + std_diff) * 1e6,
+             #                  alpha=0.5, color='purple', label='±1 SEM')
+                
+                # Reference lines
+                ax.axhline(y=0, color='black', linestyle='-', alpha=0.5, label='No difference')
+                ax.axvline(x=0, color='gray', linestyle='--', alpha=0.7, label='Stimulus onset')
+                
+                ax.set_xlabel('Time (ms)')
+                ax.set_ylabel('GFP Difference (μV)\n(Original - Reconstructed)')
+                ax.set_title(f'GFP Difference - {event_type}\n'
+                           f'Mean ± STD/SEM across {n_subjects} subjects')
+                ax.legend()
+                ax.grid(True, alpha=0.3)
+                
+                plt.tight_layout()
+                plt.savefig(op.join(self.plots_dir, f'gfp_difference_{event_type}_detailed.png'), 
+                           dpi=300, bbox_inches='tight')
+                plt.close()
+    
+    def _create_combined_overview_plots(self, aggregated_complete, times_ms, event_types):
+        """Create combined overview plots showing all event types together."""
+        
+        print("     📈 Creating combined overview plots...")
+        
+        # 1. All event types - Original vs Reconstructed side by side
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 8))
+        fig.suptitle('Global Field Power - All Event Types\nOriginal vs Reconstructed (Population Mean ± STD)', fontsize=16)
+        
+        colors = ['blue', 'red', 'green', 'orange']
+        
+        # Original data
+        for i, event_type in enumerate(event_types):
+            if event_type in aggregated_complete['original']:
+                data = aggregated_complete['original'][event_type]
+                color = colors[i % len(colors)]
+                ax1.plot(times_ms, data['mean'] * 1e6, color=color, linewidth=2, 
+                        label=f'{event_type} (n={data["n_subjects"]})')
+                ax1.fill_between(times_ms,
+                               (data['mean'] - data['std']) * 1e6,
+                               (data['mean'] + data['std']) * 1e6,
+                               alpha=0.2, color=color)
+        
+        ax1.axvline(x=0, color='gray', linestyle='--', alpha=0.7)
+        ax1.set_xlabel('Time (ms)')
+        ax1.set_ylabel('Global Field Power (μV)')
+        ax1.set_title('Original Data')
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
+        
+        # Reconstructed data
+        for i, event_type in enumerate(event_types):
+            if event_type in aggregated_complete['reconstructed']:
+                data = aggregated_complete['reconstructed'][event_type]
+                color = colors[i % len(colors)]
+                ax2.plot(times_ms, data['mean'] * 1e6, color=color, linewidth=2, 
+                        label=f'{event_type} (n={data["n_subjects"]})')
+                ax2.fill_between(times_ms,
+                               (data['mean'] - data['std']) * 1e6,
+                               (data['mean'] + data['std']) * 1e6,
+                               alpha=0.2, color=color)
+        
+        ax2.axvline(x=0, color='gray', linestyle='--', alpha=0.7)
+        ax2.set_xlabel('Time (ms)')
+        ax2.set_ylabel('Global Field Power (μV)')
+        ax2.set_title('Reconstructed Data')
+        ax2.legend()
+        ax2.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.savefig(op.join(self.plots_dir, 'gfp_orig_vs_recon_all_events_overview.png'), 
+                   dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        # 2. All event types - Differences only
+        fig, ax = plt.subplots(1, 1, figsize=(14, 8))
+        fig.suptitle('GFP Differences - All Event Types\n(Original - Reconstructed) Population Statistics', fontsize=16)
+        
+        for i, event_type in enumerate(event_types):
+            if event_type in aggregated_complete['differences']:
+                data = aggregated_complete['differences'][event_type]
+                color = colors[i % len(colors)]
+                
+                ax.plot(times_ms, data['mean'] * 1e6, color=color, linewidth=2, 
+                       label=f'{event_type} (n={data["n_subjects"]})')
+                ax.fill_between(times_ms,
+                               (data['mean'] - data['std']) * 1e6,
+                               (data['mean'] + data['std']) * 1e6,
+                               alpha=0.2, color=color)
+        
+        ax.axhline(y=0, color='black', linestyle='-', alpha=0.7, linewidth=1)
+        ax.axvline(x=0, color='gray', linestyle='--', alpha=0.7)
+        ax.set_xlabel('Time (ms)')
+        ax.set_ylabel('GFP Difference (μV)')
+        ax.set_title('Population-Level GFP Differences\nPositive = Original > Reconstructed')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.savefig(op.join(self.plots_dir, 'gfp_differences_all_events_overview.png'), 
+                   dpi=300, bbox_inches='tight')
+        plt.close()
+    
+    def _create_statistical_comparison_plots(self, aggregated_complete, times_ms, event_types):
+        """Create plots comparing empirical vs chi-squared statistics."""
+        
+        print("     📈 Creating statistical comparison plots...")
+        
+        # For each event type, compare empirical vs chi-squared approaches
+        for event_type in event_types:
+            if event_type in aggregated_complete['original']:
+                orig_data = aggregated_complete['original'][event_type]
+                
+                # Only create if chi-squared CI is available
+                if orig_data['chi2_ci_lower'] is not None:
+                    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 8))
+                    fig.suptitle(f'Statistical Approach Comparison - {event_type}\n'
+                               f'Empirical vs Chi-Squared Statistics', fontsize=16)
+                    
+                    # Plot 1: Empirical approach
+                    ax1.plot(times_ms, orig_data['mean'] * 1e6, 'blue', linewidth=3, label='Mean GFP')
+                    ax1.fill_between(times_ms,
+                                   (orig_data['mean'] - orig_data['std']) * 1e6,
+                                   (orig_data['mean'] + orig_data['std']) * 1e6,
+                                   alpha=0.3, color='blue', label='±1 STD (empirical)')
+                    
+                    ax1.axvline(x=0, color='gray', linestyle='--', alpha=0.7)
+                    ax1.set_xlabel('Time (ms)')
+                    ax1.set_ylabel('Global Field Power (μV)')
+                    ax1.set_title('Empirical Statistics\n(Standard mean ± std)')
+                    ax1.legend()
+                    ax1.grid(True, alpha=0.3)
+                    
+                    # Plot 2: Chi-squared approach
+                    ax2.plot(times_ms, orig_data['mean'] * 1e6, 'blue', linewidth=3, label='Mean GFP')
+                    ax2.fill_between(times_ms,
+                                   orig_data['chi2_ci_lower'] * 1e6,
+                                   orig_data['chi2_ci_upper'] * 1e6,
+                                   alpha=0.3, color='green', label='95% Chi² CI')
+                    
+                    ax2.axvline(x=0, color='gray', linestyle='--', alpha=0.7)
+                    ax2.set_xlabel('Time (ms)')
+                    ax2.set_ylabel('Global Field Power (μV)')
+                    ax2.set_title('Chi-Squared Statistics\n(Theoretical CI for std deviations)')
+                    ax2.legend()
+                    ax2.grid(True, alpha=0.3)
+                    
+                    plt.tight_layout()
+                    plt.savefig(op.join(self.plots_dir, f'gfp_statistics_comparison_{event_type}.png'), 
+                               dpi=300, bbox_inches='tight')
+                    plt.close()
+                    
+                    print(f"     ✅ Created statistical comparison for {event_type}")
+    
+    def _load_subject_epochs(self, data_dir, subject_id):
+        """Load EEG epochs data from .fif files for a single subject."""
+        # Look for original and reconstructed .fif files
+        orig_files = []
+        recon_files = []
+        
+        for root, dirs, files in os.walk(data_dir):
+            for file in files:
+                if file.endswith('.fif') and ('epo' in file or 'epochs' in file):
+                    file_path = op.join(root, file)
+                    if 'recon' in file.lower() or 'reconstructed' in file.lower():
+                        recon_files.append(file_path)
+                    else:
+                        orig_files.append(file_path)
+        
+        # Load original epochs
+        epochs_orig = None
+        if orig_files:
+            epochs_file = orig_files[0]
+            try:
+                epochs_orig = mne.read_epochs(epochs_file, preload=True, verbose=False)
+            except Exception as e:
+                print(f"     ⚠️  Error loading original epochs for {subject_id}: {e}")
+        
+        # Load reconstructed epochs
+        epochs_recon = None
+        if recon_files:
+            epochs_file = recon_files[0]
+            try:
+                epochs_recon = mne.read_epochs(epochs_file, preload=True, verbose=False)
+            except Exception as e:
+                print(f"     ⚠️  Error loading reconstructed epochs for {subject_id}: {e}")
+        
+        return epochs_orig, epochs_recon
+    
+    def _create_time_series_plots(self, event_types, epochs_orig, epochs_recon=None):
+        """Create time-series plots for Global Field Power using plot_gfp function."""
+        print("     📈 Creating time-series plots...")
+        
+        if not HAS_NICE_EXT:
+            print("     ⚠️  Using local plot_gfp implementation")
+        
+        # Create individual plots for each event type
+        for event_type in event_types:
+            if event_type not in epochs_orig.event_id:
+                print(f"     ⚠️  Event type '{event_type}' not found in original epochs")
+                continue
+                
+            # Create figure for this event type - single subplot with both curves
+            fig, ax = plt.subplots(1, 1, figsize=(12, 6))
+            fig.suptitle(f'Global Field Power - {event_type} - All Subjects', fontsize=14)
+            
+            # Plot original data
+            if HAS_NICE_EXT:
+                plot_gfp(epochs_orig, conditions=[event_type], colors=['blue'], 
+                        labels=[f'Original'], ax=ax, 
+                        fig_kwargs={}, sns_kwargs={})
+            else:
+                plot_gfp_local(epochs_orig, conditions=[event_type], colors=['blue'],
+                              labels=[f'Original'], ax=ax, fig_kwargs={})
+            
+            # Plot reconstructed data on the same axis if available
+            if epochs_recon is not None and event_type in epochs_recon.event_id:
+                if HAS_NICE_EXT:
+                    plot_gfp(epochs_recon, conditions=[event_type], colors=['red'],
+                            labels=[f'Reconstructed'], ax=ax,
+                            fig_kwargs={}, sns_kwargs={})
+                else:
+                    plot_gfp_local(epochs_recon, conditions=[event_type], colors=['red'],
+                                  labels=[f'Reconstructed'], ax=ax, fig_kwargs={})
+            
+            ax.set_title(f'{event_type} - Original vs Reconstructed')
+            
+            plt.tight_layout()
+            plt.savefig(op.join(self.plots_dir, f'global_field_power_{event_type}.png'), 
+                       dpi=300, bbox_inches='tight')
+            plt.close()
+    
+    def _create_combined_plot(self, event_types, epochs_orig, epochs_recon=None):
+        """Create a combined plot showing all event types using plot_gfp function."""
+        print("     📈 Creating combined plot...")
+        
+        if not HAS_NICE_EXT:
+            print("     ⚠️  Using local plot_gfp implementation")
+        
+        # Filter event types that exist in the data
+        available_events_orig = [et for et in event_types if et in epochs_orig.event_id]
+        
+        if not available_events_orig:
+            print("     ⚠️  No valid event types found in original epochs")
+            return
+        
+        # Create subplots for original and reconstructed data
+        if epochs_recon is not None:
+            available_events_recon = [et for et in event_types if et in epochs_recon.event_id]
+            if available_events_recon:
+                fig, (ax_orig, ax_recon) = plt.subplots(1, 2, figsize=(20, 8))
+                fig.suptitle(f'Global Field Power - All Event Types - All Subjects', fontsize=16)
+                
+                # Define colors for each event type
+                colors = ['blue', 'red', 'green', 'orange']
+                colors_orig = [colors[i % len(colors)] for i in range(len(available_events_orig))]
+                colors_recon = [colors[i % len(colors)] for i in range(len(available_events_recon))]
+                
+                # Plot original data with all event types
+                if HAS_NICE_EXT:
+                    plot_gfp(epochs_orig, conditions=available_events_orig, colors=colors_orig,
+                            labels=available_events_orig, ax=ax_orig, fig_kwargs={}, sns_kwargs={})
+                else:
+                    plot_gfp_local(epochs_orig, conditions=available_events_orig, colors=colors_orig,
+                                  labels=available_events_orig, ax=ax_orig, fig_kwargs={})
+                ax_orig.set_title('Original Data')
+                
+                # Plot reconstructed data with all event types
+                if HAS_NICE_EXT:
+                    plot_gfp(epochs_recon, conditions=available_events_recon, colors=colors_recon,
+                            labels=available_events_recon, ax=ax_recon, fig_kwargs={}, sns_kwargs={})
+                else:
+                    plot_gfp_local(epochs_recon, conditions=available_events_recon, colors=colors_recon,
+                                  labels=available_events_recon, ax=ax_recon, fig_kwargs={})
+                ax_recon.set_title('Reconstructed Data')
+                
+                # Synchronize y-axis limits for comparison
+                y_min = min(ax_orig.get_ylim()[0], ax_recon.get_ylim()[0])
+                y_max = max(ax_orig.get_ylim()[1], ax_recon.get_ylim()[1])
+                ax_orig.set_ylim(y_min, y_max)
+                ax_recon.set_ylim(y_min, y_max)
+            else:
+                # Only original data available
+                fig, ax_orig = plt.subplots(1, 1, figsize=(12, 8))
+                fig.suptitle(f'Global Field Power - All Event Types - All Subjects', fontsize=16)
+                
+                colors = ['blue', 'red', 'green', 'orange']
+                colors_orig = [colors[i % len(colors)] for i in range(len(available_events_orig))]
+                
+                if HAS_NICE_EXT:
+                    plot_gfp(epochs_orig, conditions=available_events_orig, colors=colors_orig,
+                            labels=available_events_orig, ax=ax_orig, fig_kwargs={}, sns_kwargs={})
+                else:
+                    plot_gfp_local(epochs_orig, conditions=available_events_orig, colors=colors_orig,
+                                  labels=available_events_orig, ax=ax_orig, fig_kwargs={})
+                ax_orig.set_title('Original Data')
+        else:
+            # Only original data available
+            fig, ax_orig = plt.subplots(1, 1, figsize=(12, 8))
+            fig.suptitle(f'Global Field Power - All Event Types - All Subjects', fontsize=16)
+            
+            colors = ['blue', 'red', 'green', 'orange']
+            colors_orig = [colors[i % len(colors)] for i in range(len(available_events_orig))]
+            
+            if HAS_NICE_EXT:
+                plot_gfp(epochs_orig, conditions=available_events_orig, colors=colors_orig,
+                        labels=available_events_orig, ax=ax_orig, fig_kwargs={}, sns_kwargs={})
+            else:
+                plot_gfp_local(epochs_orig, conditions=available_events_orig, colors=colors_orig,
+                              labels=available_events_orig, ax=ax_orig, fig_kwargs={})
+            ax_orig.set_title('Original Data')
+        
+        plt.tight_layout()
+        plt.savefig(op.join(self.plots_dir, 'global_field_power_combined.png'), 
+                   dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        # Also create time series plot
+        self._create_time_series_plot_all_events(event_types, epochs_orig, epochs_recon)
+    
+    def _create_time_series_plot_all_events(self, event_types, epochs_orig, epochs_recon=None):
+        """Create time-series plot showing all events."""
+        print("     📈 Creating time-series plot...")
+        
+        fig, ax = plt.subplots(1, 1, figsize=(14, 8))
+        fig.suptitle(f'Global Field Power Time Series - All Subjects', fontsize=16)
+        
+        colors = ['blue', 'red', 'green', 'orange']
+        
+        for i, event_type in enumerate(event_types):
+            if event_type not in epochs_orig.event_id:
+                continue
+            
+            color = colors[i % len(colors)]
+            
+            if HAS_NICE_EXT:
+                plot_gfp(epochs_orig, conditions=[event_type], colors=[color],
+                        labels=[event_type], ax=ax, fig_kwargs={}, sns_kwargs={})
+            else:
+                plot_gfp_local(epochs_orig, conditions=[event_type], colors=[color],
+                              labels=[event_type], ax=ax, fig_kwargs={})
+        
+        ax.set_title('All Event Types - Original Data')
+        plt.tight_layout()
+        plt.savefig(op.join(self.plots_dir, 'global_field_power_time_series.png'),
+                   dpi=300, bbox_inches='tight')
+        plt.close()
+    
+    def _create_local_effect_plot(self, epochs_orig, epochs_recon=None):
+        """Create plot showing Local Standard vs Local Deviant effect."""
+        print("     📈 Creating Local Effect plot...")
+        
+        if not HAS_NICE_EXT:
+            print("     ⚠️  Using local plot_gfp implementation")
+        
+        # Define the event groupings for local effect
+        local_standard_events = ['LSGS', 'LSGD']  # Local Standard
+        local_deviant_events = ['LDGS', 'LDGD']   # Local Deviant
+        
+        # Check which events are available in original data
+        available_local_std_orig = [et for et in local_standard_events if et in epochs_orig.event_id]
+        available_local_dev_orig = [et for et in local_deviant_events if et in epochs_orig.event_id]
+        
+        if not available_local_std_orig or not available_local_dev_orig:
+            print(f"     ⚠️  Missing events for local effect analysis. Available: {list(epochs_orig.event_id.keys())}")
+            return
+        
+        # Create subplots for original and reconstructed data
+        if epochs_recon is not None:
+            available_local_std_recon = [et for et in local_standard_events if et in epochs_recon.event_id]
+            available_local_dev_recon = [et for et in local_deviant_events if et in epochs_recon.event_id]
+            
+            if available_local_std_recon and available_local_dev_recon:
+                fig, (ax_orig, ax_recon) = plt.subplots(1, 2, figsize=(20, 8))
+                fig.suptitle(f'Local Effect Analysis - All Subjects', fontsize=16)
+                
+                # Plot original data - Local Standard vs Local Deviant
+                if HAS_NICE_EXT:
+                    plot_gfp(epochs_orig, conditions=available_local_std_orig, colors=['blue'],
+                            labels=['Local Standard'], ax=ax_orig, fig_kwargs={}, sns_kwargs={})
+                    plot_gfp(epochs_orig, conditions=available_local_dev_orig, colors=['red'],
+                            labels=['Local Deviant'], ax=ax_orig, fig_kwargs={}, sns_kwargs={})
+                else:
+                    plot_gfp_local(epochs_orig, conditions=available_local_std_orig, colors=['blue'],
+                                  labels=['Local Standard'], ax=ax_orig, fig_kwargs={})
+                    plot_gfp_local(epochs_orig, conditions=available_local_dev_orig, colors=['red'],
+                                  labels=['Local Deviant'], ax=ax_orig, fig_kwargs={})
+                ax_orig.set_title('Original Data - Local Effect')
+                
+                # Plot reconstructed data - Local Standard vs Local Deviant
+                if HAS_NICE_EXT:
+                    plot_gfp(epochs_recon, conditions=available_local_std_recon, colors=['blue'],
+                            labels=['Local Standard'], ax=ax_recon, fig_kwargs={}, sns_kwargs={})
+                    plot_gfp(epochs_recon, conditions=available_local_dev_recon, colors=['red'],
+                            labels=['Local Deviant'], ax=ax_recon, fig_kwargs={}, sns_kwargs={})
+                else:
+                    plot_gfp_local(epochs_recon, conditions=available_local_std_recon, colors=['blue'],
+                                  labels=['Local Standard'], ax=ax_recon, fig_kwargs={})
+                    plot_gfp_local(epochs_recon, conditions=available_local_dev_recon, colors=['red'],
+                                  labels=['Local Deviant'], ax=ax_recon, fig_kwargs={})
+                ax_recon.set_title('Reconstructed Data - Local Effect')
+                
+                # Synchronize y-axis limits for comparison
+                y_min = min(ax_orig.get_ylim()[0], ax_recon.get_ylim()[0])
+                y_max = max(ax_orig.get_ylim()[1], ax_recon.get_ylim()[1])
+                ax_orig.set_ylim(y_min, y_max)
+                ax_recon.set_ylim(y_min, y_max)
+            else:
+                # Only original data available
+                fig, ax_orig = plt.subplots(1, 1, figsize=(12, 8))
+                fig.suptitle(f'Local Effect Analysis - All Subjects', fontsize=16)
+                
+                if HAS_NICE_EXT:
+                    plot_gfp(epochs_orig, conditions=available_local_std_orig, colors=['blue'],
+                            labels=['Local Standard'], ax=ax_orig, fig_kwargs={}, sns_kwargs={})
+                    plot_gfp(epochs_orig, conditions=available_local_dev_orig, colors=['red'],
+                            labels=['Local Deviant'], ax=ax_orig, fig_kwargs={}, sns_kwargs={})
+                else:
+                    plot_gfp_local(epochs_orig, conditions=available_local_std_orig, colors=['blue'],
+                                  labels=['Local Standard'], ax=ax_orig, fig_kwargs={})
+                    plot_gfp_local(epochs_orig, conditions=available_local_dev_orig, colors=['red'],
+                                  labels=['Local Deviant'], ax=ax_orig, fig_kwargs={})
+                ax_orig.set_title('Original Data - Local Effect')
+        else:
+            # Only original data available
+            fig, ax_orig = plt.subplots(1, 1, figsize=(12, 8))
+            fig.suptitle(f'Local Effect Analysis - All Subjects', fontsize=16)
+            
+            if HAS_NICE_EXT:
+                plot_gfp(epochs_orig, conditions=available_local_std_orig, colors=['blue'],
+                        labels=['Local Standard'], ax=ax_orig, fig_kwargs={}, sns_kwargs={})
+                plot_gfp(epochs_orig, conditions=available_local_dev_orig, colors=['red'],
+                        labels=['Local Deviant'], ax=ax_orig, fig_kwargs={}, sns_kwargs={})
+            else:
+                plot_gfp_local(epochs_orig, conditions=available_local_std_orig, colors=['blue'],
+                              labels=['Local Standard'], ax=ax_orig, fig_kwargs={})
+                plot_gfp_local(epochs_orig, conditions=available_local_dev_orig, colors=['red'],
+                              labels=['Local Deviant'], ax=ax_orig, fig_kwargs={})
+            ax_orig.set_title('Original Data - Local Effect')
+        
+        plt.tight_layout()
+        plt.savefig(op.join(self.plots_dir, 'global_field_power_local_effect.png'), 
+                   dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        print(f"     ✅ Local Effect plot saved")
+    
+    def _create_global_effect_plot(self, epochs_orig, epochs_recon=None):
+        """Create plot showing Global Standard vs Global Deviant effect."""
+        print("     📈 Creating Global Effect plot...")
+        
+        if not HAS_NICE_EXT:
+            print("     ⚠️  Using local plot_gfp implementation")
+        
+        # Define the event groupings for global effect
+        global_standard_events = ['LDGS', 'LSGS']  # Global Standard
+        global_deviant_events = ['LSGD', 'LDGD']   # Global Deviant
+        
+        # Check which events are available in original data
+        available_global_std_orig = [et for et in global_standard_events if et in epochs_orig.event_id]
+        available_global_dev_orig = [et for et in global_deviant_events if et in epochs_orig.event_id]
+        
+        if not available_global_std_orig or not available_global_dev_orig:
+            print(f"     ⚠️  Missing events for global effect analysis. Available: {list(epochs_orig.event_id.keys())}")
+            return
+        
+        # Create subplots for original and reconstructed data
+        if epochs_recon is not None:
+            available_global_std_recon = [et for et in global_standard_events if et in epochs_recon.event_id]
+            available_global_dev_recon = [et for et in global_deviant_events if et in epochs_recon.event_id]
+            
+            if available_global_std_recon and available_global_dev_recon:
+                fig, (ax_orig, ax_recon) = plt.subplots(1, 2, figsize=(20, 8))
+                fig.suptitle(f'Global Effect Analysis - All Subjects', fontsize=16)
+                
+                # Plot original data - Global Standard vs Global Deviant
+                if HAS_NICE_EXT:
+                    plot_gfp(epochs_orig, conditions=available_global_std_orig, colors=['green'],
+                            labels=['Global Standard'], ax=ax_orig, fig_kwargs={}, sns_kwargs={})
+                    plot_gfp(epochs_orig, conditions=available_global_dev_orig, colors=['purple'],
+                            labels=['Global Deviant'], ax=ax_orig, fig_kwargs={}, sns_kwargs={})
+                else:
+                    plot_gfp_local(epochs_orig, conditions=available_global_std_orig, colors=['green'],
+                                  labels=['Global Standard'], ax=ax_orig, fig_kwargs={})
+                    plot_gfp_local(epochs_orig, conditions=available_global_dev_orig, colors=['purple'],
+                                  labels=['Global Deviant'], ax=ax_orig, fig_kwargs={})
+                ax_orig.set_title('Original Data - Global Effect')
+                
+                # Plot reconstructed data - Global Standard vs Global Deviant
+                if HAS_NICE_EXT:
+                    plot_gfp(epochs_recon, conditions=available_global_std_recon, colors=['green'],
+                            labels=['Global Standard'], ax=ax_recon, fig_kwargs={}, sns_kwargs={})
+                    plot_gfp(epochs_recon, conditions=available_global_dev_recon, colors=['purple'],
+                            labels=['Global Deviant'], ax=ax_recon, fig_kwargs={}, sns_kwargs={})
+                else:
+                    plot_gfp_local(epochs_recon, conditions=available_global_std_recon, colors=['green'],
+                                  labels=['Global Standard'], ax=ax_recon, fig_kwargs={})
+                    plot_gfp_local(epochs_recon, conditions=available_global_dev_recon, colors=['purple'],
+                                  labels=['Global Deviant'], ax=ax_recon, fig_kwargs={})
+                ax_recon.set_title('Reconstructed Data - Global Effect')
+                
+                # Synchronize y-axis limits for comparison
+                y_min = min(ax_orig.get_ylim()[0], ax_recon.get_ylim()[0])
+                y_max = max(ax_orig.get_ylim()[1], ax_recon.get_ylim()[1])
+                ax_orig.set_ylim(y_min, y_max)
+                ax_recon.set_ylim(y_min, y_max)
+            else:
+                # Only original data available
+                fig, ax_orig = plt.subplots(1, 1, figsize=(12, 8))
+                fig.suptitle(f'Global Effect Analysis - All Subjects', fontsize=16)
+                
+                if HAS_NICE_EXT:
+                    plot_gfp(epochs_orig, conditions=available_global_std_orig, colors=['green'],
+                            labels=['Global Standard'], ax=ax_orig, fig_kwargs={}, sns_kwargs={})
+                    plot_gfp(epochs_orig, conditions=available_global_dev_orig, colors=['purple'],
+                            labels=['Global Deviant'], ax=ax_orig, fig_kwargs={}, sns_kwargs={})
+                else:
+                    plot_gfp_local(epochs_orig, conditions=available_global_std_orig, colors=['green'],
+                                  labels=['Global Standard'], ax=ax_orig, fig_kwargs={})
+                    plot_gfp_local(epochs_orig, conditions=available_global_dev_orig, colors=['purple'],
+                                  labels=['Global Deviant'], ax=ax_orig, fig_kwargs={})
+                ax_orig.set_title('Original Data - Global Effect')
+        else:
+            # Only original data available
+            fig, ax_orig = plt.subplots(1, 1, figsize=(12, 8))
+            fig.suptitle(f'Global Effect Analysis - All Subjects', fontsize=16)
+            
+            if HAS_NICE_EXT:
+                plot_gfp(epochs_orig, conditions=available_global_std_orig, colors=['green'],
+                        labels=['Global Standard'], ax=ax_orig, fig_kwargs={}, sns_kwargs={})
+                plot_gfp(epochs_orig, conditions=available_global_dev_orig, colors=['purple'],
+                        labels=['Global Deviant'], ax=ax_orig, fig_kwargs={}, sns_kwargs={})
+            else:
+                plot_gfp_local(epochs_orig, conditions=available_global_std_orig, colors=['green'],
+                              labels=['Global Standard'], ax=ax_orig, fig_kwargs={})
+                plot_gfp_local(epochs_orig, conditions=available_global_dev_orig, colors=['purple'],
+                              labels=['Global Deviant'], ax=ax_orig, fig_kwargs={})
+            ax_orig.set_title('Original Data - Global Effect')
+        
+        plt.tight_layout()
+        plt.savefig(op.join(self.plots_dir, 'global_field_power_global_effect.png'), 
+                   dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        print(f"     ✅ Global Effect plot saved")
+
+    def _create_difference_plot(self, epochs_orig, epochs_recon=None):
+        """Create plot showing the absolute difference between original and reconstructed data across time."""
+        print("     📈 Creating Difference plot...")
+        
+        if epochs_recon is None:
+            print("     ⚠️  No reconstructed data available for difference analysis")
+            return
+        
+        # Individual event types
+        individual_events = ['LDGD', 'LDGS', 'LSGD', 'LSGS']
+        
+        # Event groupings for effects
+        local_standard_events = ['LSGS', 'LSGD']  # Local Standard
+        local_deviant_events = ['LDGD', 'LDGS']   # Local Deviant
+        global_standard_events = ['LDGS', 'LSGS']  # Global Standard
+        global_deviant_events = ['LSGD', 'LDGD']   # Global Deviant
+        
+        # Check which events are available
+        available_individual = [et for et in individual_events if et in epochs_orig.event_id and et in epochs_recon.event_id]
+        
+        if not available_individual:
+            print(f"     ⚠️  No matching events between original and reconstructed data")
+            return
+        
+        # Create subplots
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 8))
+        fig.suptitle(f'Absolute Difference: Original vs Reconstructed - All Subjects', fontsize=16)
+        
+        # Exclude the last time point to match the GFP computation
+        times = epochs_orig.times[:-5] * 1000  # Convert to milliseconds
+        colors = ['red', 'blue', 'orange', 'green']
+        
+        # Subplot 1: Individual events
+        ax1.set_title('Individual Events')
+        
+        for i, event_type in enumerate(available_individual):
+            # Compute GFP for original and reconstructed
+            orig_gfp = self._compute_gfp(epochs_orig[event_type])
+            recon_gfp = self._compute_gfp(epochs_recon[event_type])
+            
+            # Compute absolute difference
+            diff_gfp = np.abs(orig_gfp - recon_gfp)
+            
+            ax1.plot(times, diff_gfp, label=event_type, color=colors[i % len(colors)], linewidth=2)
+        
+        ax1.set_xlabel('Time (ms)')
+        ax1.set_ylabel('|GFP Original - GFP Reconstructed|')
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
+        ax1.axvline(x=0, color='black', linestyle='--', alpha=0.7)
+        ax1.axvline(x=150, color='black', linestyle='--', alpha=0.7)
+        ax1.axvline(x=300, color='black', linestyle='--', alpha=0.7)
+        ax1.axvline(x=450, color='black', linestyle='--', alpha=0.7)
+        ax1.axvline(x=600, color='black', linestyle='--', alpha=0.7)
+        
+        # Subplot 2: Effect comparisons
+        ax2.set_title('Effect Comparisons')
+        
+        effect_data = []
+        effect_labels = []
+        effect_colors = ['purple', 'cyan', 'orange', 'pink']
+        
+        # Local Standard effect
+        local_std_available = [et for et in local_standard_events if et in available_individual]
+        if len(local_std_available) >= 1:
+            # Average across available local standard events
+            local_std_orig_gfp = np.mean([self._compute_gfp(epochs_orig[et]) for et in local_std_available], axis=0)
+            local_std_recon_gfp = np.mean([self._compute_gfp(epochs_recon[et]) for et in local_std_available], axis=0)
+            local_std_diff = np.abs(local_std_orig_gfp - local_std_recon_gfp)
+            effect_data.append(local_std_diff)
+            effect_labels.append('Local Standard')
+        
+        # Local Deviant effect
+        local_dev_available = [et for et in local_deviant_events if et in available_individual]
+        if len(local_dev_available) >= 1:
+            local_dev_orig_gfp = np.mean([self._compute_gfp(epochs_orig[et]) for et in local_dev_available], axis=0)
+            local_dev_recon_gfp = np.mean([self._compute_gfp(epochs_recon[et]) for et in local_dev_available], axis=0)
+            local_dev_diff = np.abs(local_dev_orig_gfp - local_dev_recon_gfp)
+            effect_data.append(local_dev_diff)
+            effect_labels.append('Local Deviant')
+        
+        # Global Standard effect
+        global_std_available = [et for et in global_standard_events if et in available_individual]
+        if len(global_std_available) >= 1:
+            global_std_orig_gfp = np.mean([self._compute_gfp(epochs_orig[et]) for et in global_std_available], axis=0)
+            global_std_recon_gfp = np.mean([self._compute_gfp(epochs_recon[et]) for et in global_std_available], axis=0)
+            global_std_diff = np.abs(global_std_orig_gfp - global_std_recon_gfp)
+            effect_data.append(global_std_diff)
+            effect_labels.append('Global Standard')
+        
+        # Global Deviant effect
+        global_dev_available = [et for et in global_deviant_events if et in available_individual]
+        if len(global_dev_available) >= 1:
+            global_dev_orig_gfp = np.mean([self._compute_gfp(epochs_orig[et]) for et in global_dev_available], axis=0)
+            global_dev_recon_gfp = np.mean([self._compute_gfp(epochs_recon[et]) for et in global_dev_available], axis=0)
+            global_dev_diff = np.abs(global_dev_orig_gfp - global_dev_recon_gfp)
+            effect_data.append(global_dev_diff)
+            effect_labels.append('Global Deviant')
+        
+        # Plot effect comparisons
+        for i, (diff_data, label) in enumerate(zip(effect_data, effect_labels)):
+            ax2.plot(times, diff_data, label=label, color=effect_colors[i % len(effect_colors)], linewidth=2)
+        
+        ax2.set_xlabel('Time (ms)')
+        ax2.set_ylabel('|GFP Original - GFP Reconstructed|')
+        ax2.legend()
+        ax2.grid(True, alpha=0.3)
+        ax2.axvline(x=0, color='black', linestyle='--', alpha=0.7)
+        ax2.axvline(x=150, color='black', linestyle='--', alpha=0.7)
+        ax2.axvline(x=300, color='black', linestyle='--', alpha=0.7)
+        ax2.axvline(x=450, color='black', linestyle='--', alpha=0.7)
+        ax2.axvline(x=600, color='black', linestyle='--', alpha=0.7)
+        
+        # Synchronize y-axis limits for comparison
+        y_min = min(ax1.get_ylim()[0], ax2.get_ylim()[0])
+        y_max = max(ax1.get_ylim()[1], ax2.get_ylim()[1])
+        ax1.set_ylim(y_min, y_max)
+        ax2.set_ylim(y_min, y_max)
+        
+        plt.tight_layout()
+        plt.savefig(op.join(self.plots_dir, 'global_field_power_difference.png'), 
+                   dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        print(f"     ✅ Difference plot saved")
+
+    def _compute_gfp(self, epochs):
+        """Compute Global Field Power for given epochs."""
+        # Get the data (n_epochs, n_channels, n_times)
+        data = epochs.get_data()
+        # Exclude the last time point
+        data = data[:, :, :-5]
+        # Compute GFP: standard deviation across channels for each time point, averaged across epochs
+        gfp = np.std(data, axis=1)  # std across channels for each epoch and time point
+        gfp_avg = np.mean(gfp, axis=0)  # average across epochs
+        return gfp_avg
+    
+    def _load_cached_gfp_metrics(self):
+        """
+        Load cached GFP metrics from individual subject analyses.
+        
+        Returns
+        -------
+        dict
+            Dictionary with subject_id -> gfp_metrics, or None if no cache found
+        """
+        print("     🔍 Searching for cached GFP metrics...")
+        
+        cached_data = {}
+        found_count = 0
+        
+        for subject_id, subject_info in self.subjects_data.items():
+            # Reconstruct path to individual analysis results
+            if '_ses-' in subject_id:
+                subj_part, sess_part = subject_id.split('_ses-')
+                if not subj_part.startswith('sub-'):
+                    subj_part = f'sub-{subj_part}'
+                session_name = f'ses-{sess_part}'
+            else:
+                subj_part = f'sub-{subject_id}' if not subject_id.startswith('sub-') else subject_id
+                session_name = None
+            
+            # Build path to cached GFP metrics
+            if session_name:
+                metrics_file = op.join(self.results_dir, subj_part, session_name, 
+                                     'individual_analysis', 'global_field_power', 
+                                     'metrics', 'gfp_metrics.json')
+            else:
+                metrics_file = op.join(self.results_dir, subj_part, 
+                                     'individual_analysis', 'global_field_power', 
+                                     'metrics', 'gfp_metrics.json')
+            
+            # Try to load cached metrics
+            if op.exists(metrics_file):
+                try:
+                    with open(metrics_file, 'r') as f:
+                        metrics = json.load(f)
+                    cached_data[subject_id] = metrics
+                    found_count += 1
+                    
+                    if found_count <= 3:  # Show first few for debugging
+                        print(f"     ✅ Loaded cache for {subject_id}: {len(metrics.get('event_types', {}))} events")
+                        
+                except Exception as e:
+                    print(f"     ⚠️  Error loading cache for {subject_id}: {e}")
+            else:
+                if found_count <= 3:  # Only show first few missing files  
+                    print(f"     ❌ No cache found for {subject_id}: {op.basename(metrics_file)}")
+        
+        if found_count > 3:
+            print(f"     📊 Total: {found_count}/{len(self.subjects_data)} subjects have cached GFP metrics")
+        
+        # Return cached data if we have enough subjects
+        if found_count >= len(self.subjects_data) * 0.5:  # At least 50% cached
+            return cached_data
+        else:
+            print(f"     ⚠️  Only {found_count}/{len(self.subjects_data)} subjects have cached data")
+            print("     🔄 Falling back to .fif file computation...")
+            return None
+    
+    def _analyze_gfp_from_cache(self, cached_gfp_data, event_types):
+        """
+        Perform GFP analysis using cached metrics (much faster!).
+        
+        This method loads pre-computed GFP data and creates the same analysis
+        plots without needing to reload and recompute .fif files.
+        """
+        print("     🚀 Analyzing GFP from cached metrics...")
+        print(f"     📊 Processing {len(cached_gfp_data)} subjects with cached data")
+        
+        # Convert cached data to the format expected by our plotting methods
+        subject_gfp_complete = {
+            'original': {},
+            'reconstructed': {},
+            'differences': {}
+        }
+        
+        # Get times from first subject (should be consistent)
+        first_subject_data = next(iter(cached_gfp_data.values()))
+        times = np.array(first_subject_data['times'])
+        
+        # Process each subject's cached data
+        for subject_id, metrics in cached_gfp_data.items():
+            subject_gfp_complete['original'][subject_id] = {}
+            subject_gfp_complete['reconstructed'][subject_id] = {}
+            subject_gfp_complete['differences'][subject_id] = {}
+            
+            for event_type in event_types:
+                if event_type in metrics['event_types']:
+                    event_data = metrics['event_types'][event_type]
+                    
+                    # Original GFP
+                    if 'original' in event_data:
+                        orig_gfp = np.array(event_data['original']['gfp_mean'])
+                        subject_gfp_complete['original'][subject_id][event_type] = orig_gfp
+                    
+                    # Reconstructed GFP
+                    if 'reconstructed' in event_data:
+                        recon_gfp = np.array(event_data['reconstructed']['gfp_mean'])
+                        subject_gfp_complete['reconstructed'][subject_id][event_type] = recon_gfp
+                    
+                    # Difference (if both exist)
+                    if 'difference' in event_data:
+                        diff_gfp = np.array(event_data['difference']['gfp_diff'])
+                        subject_gfp_complete['differences'][subject_id][event_type] = diff_gfp
+                    elif ('original' in event_data and 'reconstructed' in event_data):
+                        # Compute difference from original and reconstructed
+                        orig_gfp = np.array(event_data['original']['gfp_mean'])
+                        recon_gfp = np.array(event_data['reconstructed']['gfp_mean'])
+                        diff_gfp = orig_gfp - recon_gfp
+                        subject_gfp_complete['differences'][subject_id][event_type] = diff_gfp
+        
+        # Get counts for reporting
+        orig_count = len(subject_gfp_complete['original'])
+        recon_count = len(subject_gfp_complete['reconstructed']) 
+        diff_count = len(subject_gfp_complete['differences'])
+        
+        print(f"     📈 Extracted GFP data: {orig_count} orig, {recon_count} recon, {diff_count} diff")
+        
+        # Aggregate all data (original, reconstructed, and differences)
+        print("     📊 Aggregating cached GFP data...")
+        aggregated_complete = self._aggregate_complete_gfp_data(subject_gfp_complete, event_types, times)
+        
+        # Create comprehensive plots
+        print("     📈 Creating Global Field Power plots from cached data...")
+        self._create_comprehensive_gfp_plots(aggregated_complete, times, event_types)
+        
+        print("     ✅ Cached GFP analysis completed successfully!")
+
+
 class GlobalAnalyzer:
     """Global analysis across multiple subjects."""
     
-    def __init__(self, results_dir, output_dir, patient_labels_file=None, target_state=None):
+    def __init__(self, results_dir, output_dir, patient_labels_file=None, target_state=None, fif_data_dir=None, skip_gfp=False):
         self.results_dir = results_dir
         self.output_dir = output_dir
         self.patient_labels_file = patient_labels_file
         self.target_state = target_state
+        self.fif_data_dir = fif_data_dir  # Directory containing raw .fif files
+        self.skip_gfp = skip_gfp  # Option to skip Global Field Power analysis
         self.mapper = MarkerNameMapper()
         
         # Create output directories
@@ -347,9 +2260,11 @@ class GlobalAnalyzer:
         self.subjects_data = {}
         self.global_scalar_data = {}
         self.global_topo_data = {}
+        self.inconsistent_subjects = []  # Track subjects with inconsistent data shapes
         
         # Load patient labels if provided
         self.patient_labels = {}
+        self.patient_labels_original = {}  # Store original diagnosis before grouping
         self.available_states = set()
         if self.patient_labels_file:
             self._load_patient_labels()
@@ -370,6 +2285,12 @@ class GlobalAnalyzer:
                 if pd.isna(state) or state == 'n/a':
                     continue
                 
+                # Create key compatible with our subject_session format
+                subject_session_key = f"{subject}_{session}"
+                
+                # Store original diagnosis before grouping
+                self.patient_labels_original[subject_session_key] = state
+                
                 # Group diagnoses as requested:
                 # - Merge MCS+ and MCS- into MCS
                 # - Merge UWS and VS into VS/UWS (they are the same condition)
@@ -378,8 +2299,6 @@ class GlobalAnalyzer:
                 elif state == 'VS':
                     state = 'UWS'  # VS and UWS are the same, use UWS as standard
                 
-                # Create key compatible with our subject_session format
-                subject_session_key = f"{subject}_{session}"
                 self.patient_labels[subject_session_key] = state
                 self.available_states.add(state)
             
@@ -470,20 +2389,22 @@ class GlobalAnalyzer:
             print("\n🔍 CROSS-SUBJECT CONSISTENCY CHECK:")
             print(f"   Reference (from {first_subj}): scalars={ref_scalar_shape}, topos={ref_topo_shape}")
             
-            inconsistent_subjects = []
+            self.inconsistent_subjects = []
             for subj_id in subjects_included[1:]:
                 subj_scalar_shape = self.subjects_data[subj_id]['scalars_original'].shape
                 subj_topo_shape = self.subjects_data[subj_id]['topos_original'].shape
                 
                 if subj_scalar_shape != ref_scalar_shape or subj_topo_shape != ref_topo_shape:
-                    inconsistent_subjects.append(subj_id)
+                    self.inconsistent_subjects.append(subj_id)
                     print(f"   ❌ {subj_id}: scalars={subj_scalar_shape}, topos={subj_topo_shape}")
                 else:
                     print(f"   ✅ {subj_id}: consistent")
             
-            if len(inconsistent_subjects) > 0:
-                print(f"\n⚠️  Warning: {len(inconsistent_subjects)} subjects have inconsistent data shapes!")
-                print("   This may cause issues in global analysis. Consider reprocessing these subjects.")
+            if len(self.inconsistent_subjects) > 0:
+                print(f"\n⚠️  Warning: {len(self.inconsistent_subjects)} subjects have inconsistent data shapes!")
+                print(f"   Inconsistent subjects: {self.inconsistent_subjects}")
+                print("   These subjects will be EXCLUDED from topographic plots to prevent errors.")
+                print("   They will still be included in scalar analysis.")
         
         print("\n✅ Data collection completed successfully!")
         print(f"   Ready for global analysis with {len(subjects_included)} subject/sessions")
@@ -595,9 +2516,18 @@ class GlobalAnalyzer:
             'marker_data': {}  # marker_name -> {subjects: [], orig_vals: [], recon_vals: [], diffs: [], norm_sq_errors: [], norm_abs_errors: []}
         }
         
-        # Topographic data preparation
+        # Filter out inconsistent subjects for topographic analysis
+        # Scalar analysis can include all subjects since each marker is independent
+        # But topo analysis needs consistent shapes for array operations
+        topo_subjects = [s for s in subjects if s not in self.inconsistent_subjects]
+        
+        if len(self.inconsistent_subjects) > 0:
+            print(f"  📊 Scalar analysis: {len(subjects)} subjects (all included)")
+            print(f"  🗺️  Topo analysis: {len(topo_subjects)} subjects ({len(self.inconsistent_subjects)} excluded due to shape mismatch)")
+        
+        # Topographic data preparation - ONLY use consistent subjects
         self.global_topo_data = {
-            'subjects': subjects,
+            'subjects': topo_subjects,  # Use filtered list
             'correlations': [],
             'mses': [],
             'maes': [],
@@ -610,7 +2540,7 @@ class GlobalAnalyzer:
             'n_channels': 0
         }
         
-        # Collect scalar data
+        # Collect scalar data (all subjects)
         for subject_id in subjects:
             data = self.subjects_data[subject_id]
             scalar_metrics = data['summary']['scalar_metrics']['overall']
@@ -636,8 +2566,8 @@ class GlobalAnalyzer:
                 self.global_scalar_data['marker_data'][marker_name]['norm_sq_errors'].append(marker_metrics['norm_sq_error'])
                 self.global_scalar_data['marker_data'][marker_name]['norm_abs_errors'].append(marker_metrics['norm_abs_error'])
         
-        # Collect topographic data
-        for subject_id in subjects:
+        # Collect topographic data - ONLY from consistent subjects
+        for subject_id in topo_subjects:
             data = self.subjects_data[subject_id]
             topo_metrics = data['summary']['topographic_metrics']['overall']
             
@@ -672,6 +2602,10 @@ class GlobalAnalyzer:
                 self.global_timeseries_error_data['maes'].append(np.nan)
                 self.global_timeseries_error_data['mse_stds'].append(np.nan)
                 self.global_timeseries_error_data['mae_stds'].append(np.nan)
+        
+        # Collect topographic arrays - ONLY from topo_subjects (filtered to exclude inconsistent shapes)
+        for subject_id in topo_subjects:
+            data = self.subjects_data[subject_id]
             
             # Reconstruct topographic arrays from per-marker data
             # IMPORTANT: Use MarkerNameMapper order, NOT sorted order to maintain consistency
@@ -708,14 +2642,18 @@ class GlobalAnalyzer:
             self.global_topo_data['topos_recon_all'].append(np.array(topo_recon_list))
         
         # Set dimensions from first subject
-        if subjects:
+        if topo_subjects:
             first_topo = self.global_topo_data['topos_orig_all'][0]
             self.global_topo_data['n_markers'] = first_topo.shape[0]
             self.global_topo_data['n_channels'] = first_topo.shape[1]
         
         print(f"  Prepared data for {len(subjects)} subjects")
         print(f"  Scalar markers: {len(self.global_scalar_data['marker_data'])}")
-        print(f"  Topo dimensions: {self.global_topo_data['n_markers']} markers × {self.global_topo_data['n_channels']} channels")
+        if topo_subjects:
+            print(f"  Topo dimensions: {self.global_topo_data['n_markers']} markers × {self.global_topo_data['n_channels']} channels")
+            print(f"  Topo subjects: {len(topo_subjects)}")
+        else:
+            print(f"  ⚠️  No subjects available for topographic analysis (all have inconsistent shapes)")
     
     def create_scalar_global_plots(self):
         """Create global scalar analysis plots."""
@@ -917,12 +2855,26 @@ class GlobalAnalyzer:
         
         subjects = self.global_topo_data['subjects']
         n_subjects = len(subjects)
+        
+        # Check if we have any subjects for topo analysis
+        if n_subjects == 0:
+            print("  ⚠️  No subjects available for topographic plots (all have inconsistent shapes)")
+            print("  Skipping topographic plots...")
+            return
+        
         n_markers = self.global_topo_data['n_markers']
         n_channels = self.global_topo_data['n_channels']
         
-        # Convert to numpy arrays
-        topos_orig_all = np.array(self.global_topo_data['topos_orig_all'])  # (n_subjects, n_markers, n_channels)
-        topos_recon_all = np.array(self.global_topo_data['topos_recon_all'])
+        # Convert to numpy arrays - should work now since we filtered out inconsistent subjects
+        try:
+            topos_orig_all = np.array(self.global_topo_data['topos_orig_all'])  # (n_subjects, n_markers, n_channels)
+            topos_recon_all = np.array(self.global_topo_data['topos_recon_all'])
+        except ValueError as e:
+            print(f"  ❌ Error converting topo data to arrays: {e}")
+            print(f"  This should not happen after filtering. Debugging info:")
+            print(f"     Subjects: {subjects}")
+            print(f"     Shapes: {[np.array(t).shape for t in self.global_topo_data['topos_orig_all']]}")
+            return
         
         # 1. Global correlation and MSE per subject (same as scalars but for topo)
         fig, axes = plt.subplots(1, 2, figsize=(15, 6))
@@ -1445,14 +3397,21 @@ class GlobalAnalyzer:
     
     def create_mne_topomap_plots(self):
         """Create MNE topographic plots for original, reconstructed, and NMSE data."""
-        if not HAS_MNE:
-            print("  ⚠️  Skipping MNE topomap plots - MNE-Python not available")
-            return
+       # if not HAS_MNE:
+       #     print("  ⚠️  Skipping MNE topomap plots - MNE-Python not available")
+       #     return
             
         print("Creating MNE topographic plots...")
         
         subjects = self.global_topo_data['subjects']
         n_subjects = len(subjects)
+        
+        # Check if we have any subjects for topo analysis
+        if n_subjects == 0:
+            print("  ⚠️  No subjects available for MNE topomap plots (all have inconsistent shapes)")
+            print("  Skipping MNE topomap plots...")
+            return
+        
         n_markers = self.global_topo_data['n_markers']
         n_channels = self.global_topo_data['n_channels']
         
@@ -1498,87 +3457,9 @@ class GlobalAnalyzer:
                 var_orig = np.var(orig_vals, ddof=1) if len(orig_vals) > 1 else np.var(orig_vals)
                 topos_nmse[m, ch] = np.mean(mses) / (var_orig + 1e-8)
         
-        # Create montage based on the number of channels
-        try:
-            print(f"  !!!!!!!!Creating montage for {n_channels} channels")
-            if n_channels == 64:
-                # Use biosemi64 montage which is specifically designed for 64 electrodes
-                montage = mne.channels.make_standard_montage('biosemi64')
-                # Create info with the exact channel names from the montage
-                info = mne.create_info(montage.ch_names, 100, 'eeg')
-                info.set_montage(montage)
-                print(f"  ✅ Created biosemi64 montage for {n_channels} channels")
-                
-            elif n_channels == 32:
-                montage = mne.channels.make_standard_montage('biosemi32')
-                info = mne.create_info(montage.ch_names, 100, 'eeg')
-                info.set_montage(montage)
-                print(f"  ✅ Created biosemi32 montage for {n_channels} channels")
-                
-            elif n_channels == 128:
-                montage = mne.channels.make_standard_montage('biosemi128')
-                info = mne.create_info(montage.ch_names, 100, 'eeg')
-                info.set_montage(montage)
-                print(f"  ✅ Created biosemi128 montage for {n_channels} channels")
-                
-            elif n_channels == 256:
-                # Try EGI_256 first (most appropriate for your data), then fallback to biosemi256
-                try:
-                    print(f"  Creating GSN-HydroCel-256 montage for {n_channels} channels")
-                    montage = mne.channels.make_standard_montage('GSN-HydroCel-256')
-                    info = mne.create_info(ch_names =montage.ch_names, sfreq =250, ch_types ='eeg')
-                    info.set_montage(montage)
-                except:
-                    montage = mne.channels.make_standard_montage('biosemi256')
-                    info = mne.create_info(montage.ch_names, 250, 'eeg')
-                    info.set_montage(montage)
-                    print(f"  ✅ Created biosemi256 montage for {n_channels} channels")
-                
-            elif n_channels <= 256:
-                # For other channel counts, try to use standard_1020 which has good coverage
-                montage = mne.channels.make_standard_montage('standard_1020')
-                
-                # Check if we have enough channels in the montage
-                if len(montage.ch_names) >= n_channels:
-                    # Take only the first n_channels
-                    available_channels = montage.ch_names[:n_channels]
-                    montage.ch_names = available_channels
-                    
-                    # Filter the dig points to match the selected channels
-                    # Keep fiducials (first 3 points) and selected EEG channels
-                    fiducials = montage.dig[:3]  # nasion, lpa, rpa
-                    eeg_dig = montage.dig[3:3+n_channels]  # EEG channels
-                    montage.dig = fiducials + eeg_dig
-                    
-                    info = mne.create_info(available_channels, 100, 'eeg')
-                    info.set_montage(montage)
-                    print(f"  ✅ Created standard_1020 montage for {n_channels} channels")
-                else:
-                    # Not enough channels in montage, fall back to spherical layout
-                    print(f"  ⚠️  standard_1020 montage has only {len(montage.ch_names)} channels, need {n_channels}")
-                    raise ValueError("Not enough channels in standard montage")
-                
-            else:
-                raise ValueError(f"Unsupported channel count: {n_channels}")
-            
-        except Exception as e:
-            print(f"  ⚠️  Could not create standard montage for {n_channels} channels: {e}")
-            print("  Creating spherical layout montage...")
-            
-            # Create channel names matching typical EEG conventions
-            ch_names = [f'EEG{i+1:03d}' for i in range(n_channels)]
-            info = mne.create_info(ch_names, 100, 'eeg')
-            
-            # Create a spherical layout for the electrodes
-            # Use MNE's built-in sphere layout which ensures electrodes stay within head boundary
-            from mne.channels.layout import _auto_topomap_coords
-            pos = _auto_topomap_coords(info, picks=None, sphere=None, ignore_overlap=True)
-            
-            # Create montage with proper electrode positions
-            montage_dict = dict(zip(ch_names, pos))
-            montage = mne.channels.make_dig_montage(montage_dict, coord_frame='head')
-            info.set_montage(montage)
-            print(f"   Created spherical layout montage for {n_channels} channels")
+        # Set up montage with proper sphere and outlines using helper function
+        print(f"  📡 Setting up EGI montage for {n_channels} channels")
+        info, sphere, outlines = _setup_montage_and_sphere(n_channels, topos_orig_mean)
         
         marker_names = [self.mapper.get_topo_name(i) for i in range(n_markers)]
         
@@ -1671,10 +3552,12 @@ class GlobalAnalyzer:
                 
                 # Plot original
                 im1, _ = mne.viz.plot_topomap(orig_data, info, axes=axes[row, 0],
-                                                 vlim=(data_min, data_max), 
-                                                 show=False, cmap='viridis')
-                    
-                # Set title for original plot
+                                                 vlim=(data_min, data_max), cmap='viridis',
+                                                 sphere=sphere, outlines=outlines,
+                                                 extrapolate='local',
+                                                 res=256, sensors=True, contours=6)
+                
+  # Set title for original plot
                 if len(marker_name) > 15:
                     title_orig = f'{marker_name[:15]}\n{marker_name[15:]} Original'
                 else:
@@ -1683,8 +3566,10 @@ class GlobalAnalyzer:
                     
                     # Plot reconstructed
                 im2, _ = mne.viz.plot_topomap(recon_data, info, axes=axes[row, 1],
-                                                 vlim=(data_min, data_max),
-                                                 show=False, cmap='viridis')
+                                                 vlim=(data_min, data_max), cmap='viridis',
+                                                 sphere=sphere, outlines=outlines,
+                                                 extrapolate='local',
+                                         res=256, sensors=True, contours=6)
                 # Set title for reconstructed plot
                 if len(marker_name) > 15:
                     title_recon = f'{marker_name[:15]}\n{marker_name[15:]} Reconstructed'
@@ -1695,7 +3580,10 @@ class GlobalAnalyzer:
                     # Plot difference (Original - Reconstructed) with symmetric scale
                 im3, _ = mne.viz.plot_topomap(diff_data, info, axes=axes[row, 2],
                                                  vlim=(diff_symmetric_min, diff_symmetric_max),
-                                                 show=False, cmap='viridis')
+                                                 show=False, cmap='viridis',
+                                                 sphere=sphere, outlines=outlines,
+                                                 extrapolate='local',
+                                         res=256, sensors=True, contours=6)
                 # Handle long marker names
                 if len(marker_name) > 15:
                     axes[row, 2].set_title(f'{marker_name[:15]}\n{marker_name[15:]} Difference')
@@ -1705,7 +3593,10 @@ class GlobalAnalyzer:
                     # Plot difference again but with same scale as original/reconstructed
                 im4, _ = mne.viz.plot_topomap(diff_data, info, axes=axes[row, 3],
                                                  vlim=(data_min, data_max),
-                                                 show=False, cmap='viridis')
+                                                 show=False, cmap='viridis',
+                                                 sphere=sphere, outlines=outlines,
+                                                 extrapolate='local',
+                                         res=256, sensors=True, contours=6)
                 if len(marker_name) > 15:
                     axes[row, 3].set_title(f'{marker_name[:15]}\n{marker_name[15:]} Difference')
                 else:
@@ -1726,6 +3617,1637 @@ class GlobalAnalyzer:
             print(f"    ✅ Created {plot_title} plot with {len(marker_indices)} markers")
             
         print(f"  ✅ Created {plot_count} MNE topomap plots covering {n_markers} markers total")
+        
+        # Add custom 3-column plot for specific biomarkers
+        self._create_custom_biomarker_topomap(topos_orig_mean, topos_recon_mean, info, marker_names, sphere, outlines)
+        self._create_custom_biomarker_topomap_new(topos_orig_mean, topos_recon_mean, info, marker_names, topos_orig_all, topos_recon_all, sphere, outlines)
+        
+        # Add custom biomarker plot with relative difference scaling
+        self._create_custom_biomarker_topomap_wilcoxon(topos_orig_mean, topos_recon_mean, info, marker_names, topos_orig_all, topos_recon_all, sphere, outlines)
+        
+        # Add custom FULL biomarker plot with symmetric difference and no FDR
+        self._create_custom_full_biomarker_topomap_wilcoxon(topos_orig_mean, topos_recon_mean, info, marker_names, topos_orig_all, topos_recon_all, sphere, outlines)
+        
+        # Add custom FULL biomarker plot with Spearman correlation test
+        self._create_custom_full_biomarker_topomap_spearman(topos_orig_mean, topos_recon_mean, info, marker_names, topos_orig_all, topos_recon_all, sphere, outlines)
+        
+        # Add custom FULL biomarker plot with symmetric difference and FDR correction
+        self._create_custom_full_biomarker_topomap_wilcoxon_corrected(topos_orig_mean, topos_recon_mean, info, marker_names, topos_orig_all, topos_recon_all, sphere, outlines)
+        
+        # Add diagnosis-specific biomarker plots (3 columns: Original, Reconstructed, Difference)
+        self._create_diagnosis_filtered_biomarker_topomap(topos_orig_all, topos_recon_all, info, marker_names, 
+                                                           diagnosis_group=['UWS', 'VS'], sphere=sphere, outlines=outlines)
+        self._create_diagnosis_filtered_biomarker_topomap(topos_orig_all, topos_recon_all, info, marker_names, 
+                                                           diagnosis_group=['MCS+', 'MCS-'], sphere=sphere, outlines=outlines)
+        
+        # Add Wilcoxon distribution plots
+        self._plot_wilcoxon_distributions(marker_names, topos_orig_all, topos_recon_all)
+
+        print(f"  ✅ Created custom biomarker topographic plots")
+
+
+
+    def _create_custom_biomarker_topomap(self, topos_orig_mean, topos_recon_mean, info, marker_names, sphere=None, outlines='head'):
+        """
+        Create custom 4-column topographic plot for specific biomarkers.
+        
+        Layout: Original | Reconstructed | Difference (Relative Scale) | Difference (Original Scale)
+        Rows: Alpha-norm, Beta-norm, MMN, PermEntropy, Kolmogorov, P3b, SMI, CNV
+        """
+        print("  🎯 Creating custom biomarker topographic plots...")
+        
+        # Define specific biomarkers to plot
+        biomarker_specs = [
+            ('PowerSpectralDensity_alphan', 'Alpha Normalized'),
+            ('PowerSpectralDensity_betan', 'Beta Normalized'), 
+            ('TimeLockedContrast_mmn', 'MMN'),
+            ('PermutationEntropy_default', 'Permutation\nEntropy'),
+            ('KolmogorovComplexity_default', 'Kolmogorov\nComplexity'),
+            ('TimeLockedTopography_p3b', 'P3b'),
+            ('SymbolicMutualInformation_weighted', 'Symbolic Mutual\nInformation'),
+            ('ContingentNegativeVariation_default', 'CNV')
+        ]
+        
+        # Find indices for these markers
+        biomarker_indices = []
+        biomarker_labels = []
+        available_biomarkers = []
+        
+        for marker_name, display_name in biomarker_specs:
+            if marker_name in marker_names:
+                idx = marker_names.index(marker_name)
+                biomarker_indices.append(idx)
+                biomarker_labels.append(display_name)
+                available_biomarkers.append(marker_name)
+                print(f"    ✅ Found {display_name}: marker index {idx}")
+            else:
+                print(f"    ⚠️  {display_name} ({marker_name}) not found in data")
+        
+        if not biomarker_indices:
+            print("  ❌ No requested biomarkers found in data")
+            return
+        
+        n_biomarkers = len(biomarker_indices)
+        print(f"  📊 Creating plot for {n_biomarkers} biomarkers")
+        
+        # Create figure: 4 columns x n_biomarkers rows
+        fig, axes = plt.subplots(n_biomarkers, 4, figsize=(20, max(12, n_biomarkers * 2.5)))
+        
+        # Remove the main title (as requested)
+        # fig.suptitle() - NOT ADDED
+        
+        # Handle single row case
+        if n_biomarkers == 1:
+            axes = axes.reshape(1, -1)
+        
+        # Add column titles at the top
+        column_titles = ['Original', 'Reconstructed', 'Difference\n(Original Scale)', 'Difference\n(Relative Scale)']
+        for col, title in enumerate(column_titles):
+            axes[0, col].text(0.5, 1.15, title, transform=axes[0, col].transAxes,
+                             ha='center', va='bottom', fontsize=25)
+        
+        # Plot each biomarker
+        for row, (marker_idx, label) in enumerate(zip(biomarker_indices, biomarker_labels)):
+            # Data for this marker
+            orig_data = topos_orig_mean[marker_idx, :]
+            recon_data = topos_recon_mean[marker_idx, :]
+            diff_data = orig_data - recon_data
+            
+            # Find common scale for original and reconstructed
+            orig_min, orig_max = np.min(orig_data), np.max(orig_data)
+            recon_min, recon_max = np.min(recon_data), np.max(recon_data)
+            
+            # Use same scale for original and reconstructed
+            common_min = min(orig_min, recon_min)
+            common_max = max(orig_max, recon_max)
+            
+            # Symmetric scale for difference (relative)
+            diff_abs_max = max(abs(np.min(diff_data)), abs(np.max(diff_data)))
+            diff_relative_min, diff_relative_max = -diff_abs_max, diff_abs_max
+            
+            # Column 1: Original
+            im1, _ = mne.viz.plot_topomap(orig_data, info, axes=axes[row, 0],
+                                         vlim=(common_min, common_max),
+                                         show=False, cmap='viridis',
+                                         sphere=sphere, outlines=outlines,
+                                         extrapolate='local',
+                                         res=256, sensors=True, contours=6)
+            axes[row, 0].set_title('')  # Remove individual titles
+            
+            # Column 2: Reconstructed  
+            im2, _ = mne.viz.plot_topomap(recon_data, info, axes=axes[row, 1],
+                                         vlim=(common_min, common_max),
+                                         show=False, cmap='viridis',
+                                         sphere=sphere, outlines=outlines,
+                                         extrapolate='local',
+                                         res=256, sensors=True, contours=6)
+            axes[row, 1].set_title('')  # Remove individual titles
+            # Column 3: Difference (Original Scale - same as orig/recon)
+            im3, _ = mne.viz.plot_topomap(diff_data, info, axes=axes[row, 2],
+                                         vlim=(common_min, common_max),
+                                         show=False, cmap='viridis',
+                                         sphere=sphere, outlines=outlines,
+                                         extrapolate='local',
+                                         res=256, sensors=True, contours=6)
+            axes[row, 2].set_title('')  # Remove individual titles
+
+            # Column 4: Difference (Relative Scale - symmetric around 0)
+            im4, _ = mne.viz.plot_topomap(diff_data, info, axes=axes[row, 3],
+                                         vlim=(diff_relative_min, diff_relative_max),
+                                         show=False, cmap='viridis',
+                                         sphere=sphere, outlines=outlines,
+                                         extrapolate='local',
+                                         res=256, sensors=True, contours=6)
+            axes[row, 3].set_title('')  # Remove individual titles
+            
+            
+            # Add row label (biomarker name) on the left side only
+            axes[row, 0].text(-0.3, 0.5, label, transform=axes[row, 0].transAxes,
+                             ha='right', va='center', fontsize=25,
+                             rotation=0)  # Horizontal text
+            
+            # Add colorbars for each column
+            plt.colorbar(im1, ax=axes[row, 0], shrink=0.8)
+            plt.colorbar(im2, ax=axes[row, 1], shrink=0.8)  
+            plt.colorbar(im3, ax=axes[row, 2], shrink=0.8)
+            plt.colorbar(im4, ax=axes[row, 3], shrink=0.8)
+        
+        plt.tight_layout()
+        plt.savefig(op.join(self.plots_dir, 'custom_biomarkers_orig_recon_diff.png'), 
+                   dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        print(f"  ✅ Custom biomarker plot saved with {n_biomarkers} markers")
+        print(f"    📍 Biomarkers included: {biomarker_labels}")
+
+    def _create_custom_biomarker_topomap_new(self, topos_orig_mean, topos_recon_mean, info, marker_names, topos_orig_all=None, topos_recon_all=None, sphere=None, outlines='head'):
+        """
+        Create custom 4-column topographic plot for specific biomarkers.
+        
+        Layout: Original | Reconstructed | Difference (Original Scale) | Wilcoxon Test
+        Rows: Alpha-norm, Beta-norm, MMN, PermEntropy, Kolmogorov, P3b, SMI, CNV
+        """
+        print("  🎯 Creating custom biomarker topographic plots...")
+        
+        # Define specific biomarkers to plot
+        biomarker_specs = [
+            ('PowerSpectralDensity_alphan', 'Alpha Normalized'),
+            ('PowerSpectralDensity_betan', 'Beta Normalized'), 
+            ('TimeLockedContrast_mmn', 'MMN'),
+            ('PermutationEntropy_default', 'Permutation\nEntropy'),
+            ('KolmogorovComplexity_default', 'Kolmogorov\nComplexity'),
+            ('TimeLockedTopography_p3b', 'P3b'),
+            ('SymbolicMutualInformation_weighted', 'Symbolic Mutual\nInformation'),
+            ('ContingentNegativeVariation_default', 'CNV')
+        ]
+        
+        
+        # Find indices for these markers
+        biomarker_indices = []
+        biomarker_labels = []
+        available_biomarkers = []
+        
+        for marker_name, display_name in biomarker_specs:
+            if marker_name in marker_names:
+                idx = marker_names.index(marker_name)
+                biomarker_indices.append(idx)
+                biomarker_labels.append(display_name)
+                available_biomarkers.append(marker_name)
+                print(f"    ✅ Found {display_name}: marker index {idx}")
+            else:
+                print(f"    ⚠️  {display_name} ({marker_name}) not found in data")
+        
+        if not biomarker_indices:
+            print("  ❌ No requested biomarkers found in data")
+            return
+        
+        n_biomarkers = len(biomarker_indices)
+        print(f"  📊 Creating plot for {n_biomarkers} biomarkers")
+        
+        # Compute Wilcoxon tests for the selected biomarkers if data is available
+        wilcoxon_p_values = {}
+        wilcoxon_p_values_corrected = {}
+        if topos_orig_all is not None and topos_recon_all is not None:
+            print(f"  🔬 Computing Wilcoxon signed-rank tests for selected biomarkers...")
+            from scipy.stats import wilcoxon as wilcoxon_test
+            
+            n_subjects = topos_orig_all.shape[0]
+            n_channels = topos_orig_all.shape[2]
+            
+            for marker_idx in biomarker_indices:
+                p_values = np.zeros(n_channels)
+                
+                # Test each channel independently
+                for channel_idx in range(n_channels):
+                    # Get data for this marker and channel across all subjects
+                    orig_channel = topos_orig_all[:, marker_idx, channel_idx]
+                    recon_channel = topos_recon_all[:, marker_idx, channel_idx]
+                    
+                    # Remove NaN/Inf values
+                    valid_mask = np.isfinite(orig_channel) & np.isfinite(recon_channel)
+                    orig_valid = orig_channel[valid_mask]
+                    recon_valid = recon_channel[valid_mask]
+                    
+                    if len(orig_valid) >= 5:  # Need minimum samples for reliable test
+                        try:
+                            _, p_value = wilcoxon_test(orig_valid, recon_valid, alternative='two-sided')
+                            p_values[channel_idx] = p_value
+                        except:
+                            p_values[channel_idx] = np.nan
+                    else:
+                        p_values[channel_idx] = np.nan
+                
+                wilcoxon_p_values[marker_idx] = p_values
+            
+            print(f"  ✅ Wilcoxon tests computed for {len(wilcoxon_p_values)} biomarkers")
+            
+            '''
+            # Apply FDR correction (Benjamini-Hochberg) to p-values for each biomarker
+            print(f"  🔬 Applying FDR correction (Benjamini-Hochberg method)...")
+            
+            # Try to import FDR correction function
+            try:
+                # Try scipy.stats.false_discovery_control (scipy >= 1.10)
+                from scipy.stats import false_discovery_control
+                use_scipy_fdr = True
+            except ImportError:
+                # Fallback to statsmodels
+                try:
+                    from statsmodels.stats.multitest import multipletests
+                    use_scipy_fdr = False
+                    print("     ℹ️  Using statsmodels for FDR correction")
+                except ImportError:
+                    print("     ⚠️  Warning: Could not import FDR correction. Using uncorrected p-values.")
+                    wilcoxon_p_values_corrected = wilcoxon_p_values.copy()
+                    use_scipy_fdr = None
+            
+            if use_scipy_fdr is not None:
+                for marker_idx in biomarker_indices:
+                    p_values = wilcoxon_p_values[marker_idx]
+                    
+                    # Identify valid (non-NaN) p-values
+                    valid_mask = np.isfinite(p_values)
+                    valid_p_values = p_values[valid_mask]
+                    
+                    if len(valid_p_values) > 0:
+                        # Apply FDR correction
+                        if use_scipy_fdr:
+                            # scipy.stats.false_discovery_control
+                            corrected_valid = false_discovery_control(valid_p_values, method='bh')
+                        else:
+                            # statsmodels.stats.multitest.multipletests
+                            reject, corrected_valid, _, _ = multipletests(valid_p_values, method='fdr_bh')
+                        
+                        # Create corrected p-values array with NaNs preserved
+                        p_values_corrected = np.full_like(p_values, np.nan)
+                        p_values_corrected[valid_mask] = corrected_valid
+                        
+                        wilcoxon_p_values_corrected[marker_idx] = p_values_corrected
+                    else:
+                        # All NaN, keep as is
+                        wilcoxon_p_values_corrected[marker_idx] = p_values.copy()
+                
+                print(f"  ✅ FDR correction applied to {len(wilcoxon_p_values_corrected)} biomarkers")
+            '''
+        # Create figure: 4 columns x n_biomarkers rows
+        n_cols = 4 if wilcoxon_p_values else 3
+        fig, axes = plt.subplots(n_biomarkers, n_cols, figsize=(20, max(12, n_biomarkers * 2.5)))
+        
+        # Remove the main title (as requested)
+        # fig.suptitle() - NOT ADDED
+        
+        # Handle single row case
+        if n_biomarkers == 1:
+            axes = axes.reshape(1, -1)
+        
+        # Add column titles at the top
+        column_titles = ['Original', 'Reconstructed', 'Difference', 'Wilcoxon'] if wilcoxon_p_values else ['Original', 'Reconstructed', 'Difference']
+        for col, title in enumerate(column_titles):
+            axes[0, col].text(0.5, 1.15, title, transform=axes[0, col].transAxes,
+                             ha='center', va='bottom', fontsize=38)
+        
+        # Plot each biomarker
+        for row, (marker_idx, label) in enumerate(zip(biomarker_indices, biomarker_labels)):
+            # Data for this marker
+            orig_data = topos_orig_mean[marker_idx, :]
+            recon_data = topos_recon_mean[marker_idx, :]
+            diff_data = orig_data - recon_data
+            
+            # Find common scale for original and reconstructed
+            orig_min, orig_max = np.min(orig_data), np.max(orig_data)
+            recon_min, recon_max = np.min(recon_data), np.max(recon_data)
+            
+            # Use same scale for original and reconstructed
+            common_min = min(orig_min, recon_min)
+            common_max = max(orig_max, recon_max)
+            
+            # Symmetric scale for difference (relative)
+            diff_abs_max = max(abs(np.min(diff_data)), abs(np.max(diff_data)))
+            diff_relative_min, diff_relative_max = -diff_abs_max, diff_abs_max
+            
+            # Column 1: Original
+            im1, _ = mne.viz.plot_topomap(orig_data, info, axes=axes[row, 0],
+                                         vlim=(common_min, common_max),
+                                         show=False, cmap='viridis',
+                                         sphere=sphere, outlines=outlines,
+                                         extrapolate='local',
+                                         res=256, sensors=True, contours=6)
+            axes[row, 0].set_title('')  # Remove individual titles
+            
+            # Column 2: Reconstructed  
+            im2, _ = mne.viz.plot_topomap(recon_data, info, axes=axes[row, 1],
+                                         vlim=(common_min, common_max),
+                                         show=False, cmap='viridis',
+                                         sphere=sphere, outlines=outlines,
+                                         extrapolate='local',
+                                         res=256, sensors=True, contours=6)
+            axes[row, 1].set_title('')  # Remove individual titles
+            
+            # Column 3: Difference (Original Scale - same as orig/recon)
+            im3, _ = mne.viz.plot_topomap(diff_data, info, axes=axes[row, 2],
+                                         vlim=(common_min, common_max),
+                                         show=False, cmap='viridis',
+                                         sphere=sphere, outlines=outlines,
+                                         extrapolate='local',
+                                         res=256, sensors=True, contours=6)
+            axes[row, 2].set_title('')  # Remove individual titles
+            
+            # Column 4: Wilcoxon Test p-values (FDR-corrected if available)
+            im4 = None
+            if wilcoxon_p_values_corrected and marker_idx in wilcoxon_p_values_corrected:
+                # Use FDR-corrected p-values
+                p_values = wilcoxon_p_values_corrected[marker_idx]
+                # Convert p-values to discrete categories
+                p_values_clean = np.where(np.isfinite(p_values), p_values, 1.0)
+                
+                # Create discrete values based on p-value thresholds:
+                # p < 0.01 -> 0 (black)
+                # p < 0.05 -> 1 (gray)
+                # p >= 0.05 -> 2 (white)
+                discrete_values = np.zeros_like(p_values_clean)
+                discrete_values[p_values_clean < 0.01] = 0  # Black
+                discrete_values[(p_values_clean >= 0.01) & (p_values_clean < 0.05)] = 1  # Gray
+                discrete_values[p_values_clean >= 0.05] = 2  # White
+                
+                # Create custom discrete colormap
+                from matplotlib.colors import ListedColormap
+                colors_map = ['black', 'gray', 'white']
+                discrete_cmap = ListedColormap(colors_map)
+                
+                im4, _ = mne.viz.plot_topomap(discrete_values, info, axes=axes[row, 3],
+                                             vlim=(0, 2),  # 0=black, 1=gray, 2=white
+                                             show=False, cmap=discrete_cmap,
+                                             sphere=sphere, outlines=outlines,
+                                         extrapolate='local',
+                                         res=256, sensors=True, contours=6)
+                axes[row, 3].set_title('')  # Remove individual titles
+            
+            # Add row label (biomarker name) on the left side only
+            axes[row, 0].text(-0.3, 0.5, label, transform=axes[row, 0].transAxes,
+                             ha='right', va='center', fontsize=32,
+                             rotation=0)  # Horizontal text
+            
+            # Add colorbars for each column
+         #   plt.colorbar(im1, ax=axes[row, 0], shrink=0.8)
+         #   plt.colorbar(im2, ax=axes[row, 1], shrink=0.8)  
+            cbar3 = plt.colorbar(im3, ax=axes[row, 2], shrink=0.8)
+            cbar3.ax.tick_params(labelsize=18)
+            
+            # No colorbar for Wilcoxon column (discrete values with legend instead)
+        
+        plt.tight_layout()
+        
+        # Add legend for the Wilcoxon column
+        if wilcoxon_p_values_corrected:
+            from matplotlib.patches import Patch
+            legend_elements = [
+                Patch(facecolor='black', edgecolor='black', label='p < 0.01'),
+                Patch(facecolor='gray', edgecolor='black', label='0.01 ≤ p < 0.05'),
+                Patch(facecolor='white', edgecolor='black', label='p ≥ 0.05')
+            ]
+            # Add legend to the right of the plot
+            fig.legend(handles=legend_elements, loc='center left', 
+                      bbox_to_anchor=(1.02, 0.5), fontsize=25, 
+                      title='Wilcoxon p-value', title_fontsize=25)
+        
+        plt.savefig(op.join(self.plots_dir, 'custom_biomarkers_orig_recon_diff_new.png'), 
+                   dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        print(f"  ✅ Custom biomarker plot saved with {n_biomarkers} markers")
+        print(f"    📍 Biomarkers included: {biomarker_labels}")
+    
+    def _create_custom_biomarker_topomap_wilcoxon(self, topos_orig_mean, topos_recon_mean, info, marker_names, topos_orig_all=None, topos_recon_all=None, sphere=None, outlines='head'):
+        """
+        Create custom 4-column topographic plot for specific biomarkers with relative difference scaling.
+        
+        Layout: Original | Reconstructed (with cbar) | Difference (Relative Scale with cbar) | Wilcoxon Test
+        Rows: Alpha-norm, Beta-norm, MMN, PermEntropy, Kolmogorov, P3b, SMI, CNV
+        """
+        print("  🎯 Creating custom biomarker topographic plots with relative difference...")
+        
+        # Define specific biomarkers to plot
+        biomarker_specs = [
+            ('PowerSpectralDensity_alphan', 'Alpha Normalized'),
+            ('PowerSpectralDensity_betan', 'Beta Normalized'), 
+            ('TimeLockedContrast_mmn', 'MMN'),
+            ('PermutationEntropy_default', 'Permutation\nEntropy'),
+            ('KolmogorovComplexity_default', 'Kolmogorov\nComplexity'),
+            ('TimeLockedTopography_p3b', 'P3b'),
+            ('SymbolicMutualInformation_weighted', 'Symbolic Mutual\nInformation'),
+            ('ContingentNegativeVariation_default', 'CNV')
+        ]
+        
+        # Find indices for these markers
+        biomarker_indices = []
+        biomarker_labels = []
+        available_biomarkers = []
+        
+        for marker_name, display_name in biomarker_specs:
+            if marker_name in marker_names:
+                idx = marker_names.index(marker_name)
+                biomarker_indices.append(idx)
+                biomarker_labels.append(display_name)
+                available_biomarkers.append(marker_name)
+                print(f"    ✅ Found {display_name}: marker index {idx}")
+            else:
+                print(f"    ⚠️  {display_name} ({marker_name}) not found in data")
+        
+        if not biomarker_indices:
+            print("  ❌ No requested biomarkers found in data")
+            return
+        
+        n_biomarkers = len(biomarker_indices)
+        print(f"  📊 Creating plot for {n_biomarkers} biomarkers")
+        
+        # Compute Wilcoxon tests for the selected biomarkers if data is available
+        wilcoxon_p_values = {}
+        wilcoxon_p_values_corrected = {}
+        if topos_orig_all is not None and topos_recon_all is not None:
+            print(f"  🔬 Computing Wilcoxon signed-rank tests for selected biomarkers...")
+            from scipy.stats import wilcoxon as wilcoxon_test
+            
+            n_subjects = topos_orig_all.shape[0]
+            n_channels = topos_orig_all.shape[2]
+            
+            for marker_idx in biomarker_indices:
+                p_values = np.zeros(n_channels)
+                
+                # Test each channel independently
+                for channel_idx in range(n_channels):
+                    # Get data for this marker and channel across all subjects
+                    orig_channel = topos_orig_all[:, marker_idx, channel_idx]
+                    recon_channel = topos_recon_all[:, marker_idx, channel_idx]
+                    
+                    # Remove NaN/Inf values
+                    valid_mask = np.isfinite(orig_channel) & np.isfinite(recon_channel)
+                    orig_valid = orig_channel[valid_mask]
+                    recon_valid = recon_channel[valid_mask]
+                    
+                    if len(orig_valid) >= 5:  # Need minimum samples for reliable test
+                        try:
+                            _, p_value = wilcoxon_test(orig_valid, recon_valid, alternative='two-sided')
+                            p_values[channel_idx] = p_value
+                        except:
+                            p_values[channel_idx] = np.nan
+                    else:
+                        p_values[channel_idx] = np.nan
+                
+                wilcoxon_p_values[marker_idx] = p_values
+            
+            print(f"  ✅ Wilcoxon tests computed for {len(wilcoxon_p_values)} biomarkers")
+            
+            # Apply FDR correction (Benjamini-Hochberg) to p-values for each biomarker
+            print(f"  🔬 Applying FDR correction (Benjamini-Hochberg method)...")
+            
+            # Try to import FDR correction function
+            try:
+                # Try scipy.stats.false_discovery_control (scipy >= 1.10)
+                from scipy.stats import false_discovery_control
+                use_scipy_fdr = True
+            except ImportError:
+                # Fallback to statsmodels
+                try:
+                    from statsmodels.stats.multitest import multipletests
+                    use_scipy_fdr = False
+                    print("     ℹ️  Using statsmodels for FDR correction")
+                except ImportError:
+                    print("     ⚠️  Warning: Could not import FDR correction. Using uncorrected p-values.")
+                    wilcoxon_p_values_corrected = wilcoxon_p_values.copy()
+                    use_scipy_fdr = None
+            
+            if use_scipy_fdr is not None:
+                for marker_idx in biomarker_indices:
+                    p_values = wilcoxon_p_values[marker_idx]
+                    
+                    # Identify valid (non-NaN) p-values
+                    valid_mask = np.isfinite(p_values)
+                    valid_p_values = p_values[valid_mask]
+                    
+                    if len(valid_p_values) > 0:
+                        # Apply FDR correction
+                        if use_scipy_fdr:
+                            # scipy.stats.false_discovery_control
+                            corrected_valid = false_discovery_control(valid_p_values, method='bh')
+                        else:
+                            # statsmodels.stats.multitest.multipletests
+                            reject, corrected_valid, _, _ = multipletests(valid_p_values, method='fdr_bh')
+                        
+                        # Create corrected p-values array with NaNs preserved
+                        p_values_corrected = np.full_like(p_values, np.nan)
+                        p_values_corrected[valid_mask] = corrected_valid
+                        
+                        wilcoxon_p_values_corrected[marker_idx] = p_values_corrected
+                    else:
+                        # All NaN, keep as is
+                        wilcoxon_p_values_corrected[marker_idx] = p_values.copy()
+                
+                print(f"  ✅ FDR correction applied to {len(wilcoxon_p_values_corrected)} biomarkers")
+        
+        # Create figure: 4 columns x n_biomarkers rows
+        n_cols = 4 if wilcoxon_p_values else 3
+        fig, axes = plt.subplots(n_biomarkers, n_cols, figsize=(20, max(12, n_biomarkers * 2.5)))
+        
+        # Handle single row case
+        if n_biomarkers == 1:
+            axes = axes.reshape(1, -1)
+        
+        # Add column titles at the top
+        column_titles = ['Original', 'Reconstructed', 'Difference', 'Wilcoxon'] if wilcoxon_p_values else ['Original', 'Reconstructed', 'Difference']
+        for col, title in enumerate(column_titles):
+            axes[0, col].text(0.5, 1.15, title, transform=axes[0, col].transAxes,
+                             ha='center', va='bottom', fontsize=32)
+        
+        # Plot each biomarker
+        for row, (marker_idx, label) in enumerate(zip(biomarker_indices, biomarker_labels)):
+            # Data for this marker
+            orig_data = topos_orig_mean[marker_idx, :]
+            recon_data = topos_recon_mean[marker_idx, :]
+            diff_data = orig_data - recon_data
+            
+            # Find common scale for original and reconstructed
+            orig_min, orig_max = np.min(orig_data), np.max(orig_data)
+            recon_min, recon_max = np.min(recon_data), np.max(recon_data)
+            
+            # Use same scale for original and reconstructed
+            common_min = min(orig_min, recon_min)
+            common_max = max(orig_max, recon_max)
+            
+            # Relative scale for difference: use actual min/max of difference
+            diff_min = np.min(diff_data)
+            diff_max = np.max(diff_data)
+            
+            # Column 1: Original (no colorbar)
+            im1, _ = mne.viz.plot_topomap(orig_data, info, axes=axes[row, 0],
+                                         vlim=(common_min, common_max),
+                                         show=False, cmap='viridis',
+                                         sphere=sphere, outlines=outlines,
+                                         extrapolate='local',
+                                         res=256, sensors=True, contours=6)
+            axes[row, 0].set_title('')  # Remove individual titles
+            
+            # Column 2: Reconstructed (WITH colorbar)
+            im2, _ = mne.viz.plot_topomap(recon_data, info, axes=axes[row, 1],
+                                         vlim=(common_min, common_max),
+                                         show=False, cmap='viridis',
+                                         sphere=sphere, outlines=outlines,
+                                         extrapolate='local',
+                                         res=256, sensors=True, contours=6)
+            axes[row, 1].set_title('')  # Remove individual titles
+            
+            # Column 3: Difference (Relative Scale with viridis, WITH colorbar)
+            im3, _ = mne.viz.plot_topomap(diff_data, info, axes=axes[row, 2],
+                                         vlim=(diff_min, diff_max),
+                                         show=False, cmap='viridis',
+                                         sphere=sphere, outlines=outlines,
+                                         extrapolate='local',
+                                         res=256, sensors=True, contours=6)
+            axes[row, 2].set_title('')  # Remove individual titles
+            
+            # Column 4: Wilcoxon Test p-values (FDR-corrected if available)
+            im4 = None
+            if wilcoxon_p_values_corrected and marker_idx in wilcoxon_p_values_corrected:
+                # Use FDR-corrected p-values
+                p_values = wilcoxon_p_values_corrected[marker_idx]
+                # Convert p-values to discrete categories
+                p_values_clean = np.where(np.isfinite(p_values), p_values, 1.0)
+                
+                # Create discrete values based on p-value thresholds:
+                # p < 0.01 -> 0 (black)
+                # p < 0.05 -> 1 (gray)
+                # p >= 0.05 -> 2 (white)
+                discrete_values = np.zeros_like(p_values_clean)
+                discrete_values[p_values_clean < 0.01] = 0  # Black
+                discrete_values[(p_values_clean >= 0.01) & (p_values_clean < 0.05)] = 1  # Gray
+                discrete_values[p_values_clean >= 0.05] = 2  # White
+                
+                # Create custom discrete colormap
+                from matplotlib.colors import ListedColormap
+                colors_map = ['black', 'gray', 'white']
+                discrete_cmap = ListedColormap(colors_map)
+                
+                im4, _ = mne.viz.plot_topomap(discrete_values, info, axes=axes[row, 3],
+                                             vlim=(0, 2),  # 0=black, 1=gray, 2=white
+                                             show=False, cmap=discrete_cmap,
+                                             sphere=sphere, outlines=outlines,
+                                         extrapolate='local',
+                                         res=256, sensors=True, contours=6)
+                axes[row, 3].set_title('')  # Remove individual titles
+            
+            # Add row label (biomarker name) on the left side only
+            axes[row, 0].text(-0.3, 0.5, label, transform=axes[row, 0].transAxes,
+                             ha='right', va='center', fontsize=32,
+                             rotation=0)  # Horizontal text
+            
+            # Add colorbars for columns 2 and 3
+            cbar2 = plt.colorbar(im2, ax=axes[row, 1], shrink=0.8)
+            cbar2.ax.tick_params(labelsize=18)
+            
+            cbar3 = plt.colorbar(im3, ax=axes[row, 2], shrink=0.8)
+            cbar3.ax.tick_params(labelsize=18)
+            
+            # No colorbar for Original or Wilcoxon columns
+        
+        plt.tight_layout()
+        
+        # Add legend for the Wilcoxon column
+        if wilcoxon_p_values_corrected:
+            from matplotlib.patches import Patch
+            legend_elements = [
+                Patch(facecolor='black', edgecolor='black', label='p < 0.01'),
+                Patch(facecolor='gray', edgecolor='black', label='0.01 ≤ p < 0.05'),
+                Patch(facecolor='white', edgecolor='black', label='p ≥ 0.05')
+            ]
+            # Add legend to the right of the plot
+            fig.legend(handles=legend_elements, loc='center left', 
+                      bbox_to_anchor=(1.02, 0.5), fontsize=20, 
+                      title='Wilcoxon p-value\n(FDR corrected)', title_fontsize=22)
+        
+        plt.savefig(op.join(self.plots_dir, 'custom_biomarkers_orig_recon_wilcoxon.png'), 
+                   dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        print(f"  ✅ Custom biomarker plot (wilcoxon version) saved with {n_biomarkers} markers")
+        print(f"    📍 Biomarkers included: {biomarker_labels}")
+    
+    def _create_custom_full_biomarker_topomap_wilcoxon(self, topos_orig_mean, topos_recon_mean, info, marker_names, topos_orig_all=None, topos_recon_all=None, sphere=None, outlines='head'):
+        """
+        Create custom 4-column topographic plot for extended biomarker set with symmetric difference scaling.
+        
+        Layout: Original | Reconstructed (with cbar) | Difference (Symmetric RdBu_r with cbar) | Wilcoxon Test (NO FDR)
+        Rows: Alpha-norm, Beta-norm, Delta-norm, Gamma-norm, Theta-norm, PermEntropy, Kolmogorov, SpectralEntropy, SMI
+        """
+        print("  🎯 Creating custom FULL biomarker topographic plots...")
+        
+        # Define specific biomarkers to plot (9 markers)
+        biomarker_specs = [
+            ('PowerSpectralDensity_alphan', 'Alpha Normalized'),
+            ('PowerSpectralDensity_betan', 'Beta Normalized'),
+            ('PowerSpectralDensity_deltan', 'Delta Normalized'),
+            ('PowerSpectralDensity_gamman', 'Gamma Normalized'),
+            ('PowerSpectralDensity_thetan', 'Theta Normalized'),
+            ('PermutationEntropy_default', 'Permutation\nEntropy'),
+            ('KolmogorovComplexity_default', 'Kolmogorov\nComplexity'),
+            ('PowerSpectralDensitySummary_summary_se', 'Spectral\nEntropy'),
+            ('SymbolicMutualInformation_weighted', 'Symbolic Mutual\nInformation')
+        ]
+        
+        # Find indices for these markers
+        biomarker_indices = []
+        biomarker_labels = []
+        available_biomarkers = []
+        
+        for marker_name, display_name in biomarker_specs:
+            if marker_name in marker_names:
+                idx = marker_names.index(marker_name)
+                biomarker_indices.append(idx)
+                biomarker_labels.append(display_name)
+                available_biomarkers.append(marker_name)
+                print(f"    ✅ Found {display_name}: marker index {idx}")
+            else:
+                print(f"    ⚠️  {display_name} ({marker_name}) not found in data")
+        
+        if not biomarker_indices:
+            print("  ❌ No requested biomarkers found in data")
+            return
+        
+        n_biomarkers = len(biomarker_indices)
+        print(f"  📊 Creating plot for {n_biomarkers} biomarkers")
+        
+        # Compute Wilcoxon tests for the selected biomarkers if data is available
+        # NO FDR CORRECTION - use uncorrected p-values
+        wilcoxon_p_values = {}
+        if topos_orig_all is not None and topos_recon_all is not None:
+            print(f"  🔬 Computing Wilcoxon signed-rank tests for selected biomarkers (NO FDR correction)...")
+            from scipy.stats import wilcoxon as wilcoxon_test
+            
+            n_subjects = topos_orig_all.shape[0]
+            n_channels = topos_orig_all.shape[2]
+            
+            for marker_idx in biomarker_indices:
+                p_values = np.zeros(n_channels)
+                
+                # Test each channel independently
+                for channel_idx in range(n_channels):
+                    # Get data for this marker and channel across all subjects
+                    orig_channel = topos_orig_all[:, marker_idx, channel_idx]
+                    recon_channel = topos_recon_all[:, marker_idx, channel_idx]
+                    
+                    # Remove NaN/Inf values
+                    valid_mask = np.isfinite(orig_channel) & np.isfinite(recon_channel)
+                    orig_valid = orig_channel[valid_mask]
+                    recon_valid = recon_channel[valid_mask]
+                    
+                    if len(orig_valid) >= 5:  # Need minimum samples for reliable test
+                        try:
+                            _, p_value = wilcoxon_test(orig_valid, recon_valid, alternative='two-sided')
+                            p_values[channel_idx] = p_value
+                        except:
+                            p_values[channel_idx] = np.nan
+                    else:
+                        p_values[channel_idx] = np.nan
+                
+                wilcoxon_p_values[marker_idx] = p_values
+            
+            print(f"  ✅ Wilcoxon tests computed for {len(wilcoxon_p_values)} biomarkers")
+        
+        # Create figure: 4 columns x n_biomarkers rows
+        n_cols = 4 if wilcoxon_p_values else 3
+        fig, axes = plt.subplots(n_biomarkers, n_cols, figsize=(20, max(12, n_biomarkers * 2.5)))
+        
+        # Handle single row case
+        if n_biomarkers == 1:
+            axes = axes.reshape(1, -1)
+        
+        # Add column titles at the top
+        column_titles = ['Original', 'Reconstructed', 'Difference', 'Wilcoxon'] if wilcoxon_p_values else ['Original', 'Reconstructed', 'Difference']
+        for col, title in enumerate(column_titles):
+            axes[0, col].text(0.5, 1.15, title, transform=axes[0, col].transAxes,
+                             ha='center', va='bottom', fontsize=40)
+        
+        # Plot each biomarker
+        for row, (marker_idx, label) in enumerate(zip(biomarker_indices, biomarker_labels)):
+            # Data for this marker
+            orig_data = topos_orig_mean[marker_idx, :]
+            recon_data = topos_recon_mean[marker_idx, :]
+            diff_data = orig_data - recon_data
+            
+            # Find common scale for original and reconstructed
+            orig_min, orig_max = np.min(orig_data), np.max(orig_data)
+            recon_min, recon_max = np.min(recon_data), np.max(recon_data)
+            
+            # Use same scale for original and reconstructed
+            common_min = min(orig_min, recon_min)
+            common_max = max(orig_max, recon_max)
+            
+            # Symmetric scale for difference: use largest absolute value
+            diff_max_abs = max(abs(np.min(diff_data)), abs(np.max(diff_data)))
+            diff_vmin, diff_vmax = -diff_max_abs, diff_max_abs
+            
+            # Column 1: Original (no colorbar)
+            im1, _ = mne.viz.plot_topomap(orig_data, info, axes=axes[row, 0],
+                                         vlim=(common_min, common_max),
+                                         show=False, cmap='viridis',
+                                         sphere=sphere, outlines=outlines,
+                                         extrapolate='local',
+                                         res=256, sensors=True, contours=6)
+            axes[row, 0].set_title('')  # Remove individual titles
+            
+            # Column 2: Reconstructed (WITH colorbar)
+            im2, _ = mne.viz.plot_topomap(recon_data, info, axes=axes[row, 1],
+                                         vlim=(common_min, common_max),
+                                         show=False, cmap='viridis',
+                                         sphere=sphere, outlines=outlines,
+                                         extrapolate='local',
+                                         res=256, sensors=True, contours=6)
+            axes[row, 1].set_title('')  # Remove individual titles
+            
+            # Column 3: Difference (Symmetric RdBu_r with white at 0, WITH colorbar)
+            im3, _ = mne.viz.plot_topomap(diff_data, info, axes=axes[row, 2],
+                                         vlim=(diff_vmin, diff_vmax),
+                                         show=False, cmap='RdBu_r',
+                                         sphere=sphere, outlines=outlines,
+                                         extrapolate='local',
+                                         res=256, sensors=True, contours=6)
+            axes[row, 2].set_title('')  # Remove individual titles
+            
+            # Column 4: Wilcoxon Test p-values (NO FDR correction)
+            im4 = None
+            if wilcoxon_p_values and marker_idx in wilcoxon_p_values:
+                p_values = wilcoxon_p_values[marker_idx]
+                # Convert p-values to discrete categories
+                p_values_clean = np.where(np.isfinite(p_values), p_values, 1.0)
+                
+                # Create discrete values based on p-value thresholds:
+                # p < 0.01 -> 0 (black)
+                # p < 0.05 -> 1 (gray)
+                # p >= 0.05 -> 2 (white)
+                discrete_values = np.zeros_like(p_values_clean)
+                discrete_values[p_values_clean < 0.01] = 0  # Black
+                discrete_values[(p_values_clean >= 0.01) & (p_values_clean < 0.05)] = 1  # Gray
+                discrete_values[p_values_clean >= 0.05] = 2  # White
+                
+                # Create custom discrete colormap
+                from matplotlib.colors import ListedColormap
+                colors_map = ['black', 'gray', 'white']
+                discrete_cmap = ListedColormap(colors_map)
+                
+                im4, _ = mne.viz.plot_topomap(discrete_values, info, axes=axes[row, 3],
+                                             vlim=(0, 2),  # 0=black, 1=gray, 2=white
+                                             show=False, cmap=discrete_cmap,
+                                             sphere=sphere, outlines=outlines,
+                                         extrapolate='local',
+                                         res=256, sensors=True, contours=6)
+                axes[row, 3].set_title('')  # Remove individual titles
+            
+            # Add row label (biomarker name) on the left side only
+            axes[row, 0].text(-0.3, 0.5, label, transform=axes[row, 0].transAxes,
+                             ha='right', va='center', fontsize=40,
+                             rotation=0)  # Horizontal text
+            
+            # Add colorbars for columns 2 and 3
+            cbar2 = plt.colorbar(im2, ax=axes[row, 1], shrink=0.8)
+            cbar2.ax.tick_params(labelsize=24)
+            
+            cbar3 = plt.colorbar(im3, ax=axes[row, 2], shrink=0.8)
+            cbar3.ax.tick_params(labelsize=24)
+            
+            # No colorbar for Original or Wilcoxon columns
+        
+        plt.tight_layout()
+        
+        # Add legend for the Wilcoxon column
+        if wilcoxon_p_values:
+            from matplotlib.patches import Patch
+            legend_elements = [
+                Patch(facecolor='black', edgecolor='black', label='p < 0.01'),
+                Patch(facecolor='gray', edgecolor='black', label='0.01 ≤ p < 0.05'),
+                Patch(facecolor='white', edgecolor='black', label='p ≥ 0.05')
+            ]
+            # Add legend to the right of the plot
+            fig.legend(handles=legend_elements, loc='center left', 
+                      bbox_to_anchor=(1.02, 0.5), fontsize=26, 
+                      title='Wilcoxon p-value', title_fontsize=28)
+        
+        plt.savefig(op.join(self.plots_dir, 'custom_full_biomarkers_orig_recon_wilcoxon.png'), 
+                   dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        print(f"  ✅ Custom FULL biomarker plot saved with {n_biomarkers} markers")
+        print(f"    📍 Biomarkers included: {biomarker_labels}")
+    
+    def _create_custom_full_biomarker_topomap_spearman(self, topos_orig_mean, topos_recon_mean, info, marker_names, topos_orig_all=None, topos_recon_all=None, sphere=None, outlines='head'):
+        """
+        Create custom 4-column topographic plot for extended biomarker set with symmetric difference scaling.
+        
+        Layout: Original | Reconstructed (with cbar) | Difference (Symmetric RdBu_r with cbar) | Spearman Test
+        Rows: Alpha-norm, Beta-norm, Delta-norm, Gamma-norm, Theta-norm, PermEntropy, Kolmogorov, SpectralEntropy, SMI
+        """
+        print("  🎯 Creating custom FULL biomarker topographic plots (Spearman)...")
+        
+        # Define specific biomarkers to plot (9 markers)
+        biomarker_specs = [
+            ('PowerSpectralDensity_alphan', 'Alpha Normalized'),
+            ('PowerSpectralDensity_betan', 'Beta Normalized'),
+            ('PowerSpectralDensity_deltan', 'Delta Normalized'),
+            ('PowerSpectralDensity_gamman', 'Gamma Normalized'),
+            ('PowerSpectralDensity_thetan', 'Theta Normalized'),
+            ('PermutationEntropy_default', 'Permutation\nEntropy'),
+            ('KolmogorovComplexity_default', 'Kolmogorov\nComplexity'),
+            ('PowerSpectralDensitySummary_summary_se', 'Spectral\nEntropy'),
+            ('SymbolicMutualInformation_weighted', 'Symbolic Mutual\nInformation')
+        ]
+        
+        # Find indices for these markers
+        biomarker_indices = []
+        biomarker_labels = []
+        available_biomarkers = []
+        
+        for marker_name, display_name in biomarker_specs:
+            if marker_name in marker_names:
+                idx = marker_names.index(marker_name)
+                biomarker_indices.append(idx)
+                biomarker_labels.append(display_name)
+                available_biomarkers.append(marker_name)
+                print(f"    ✅ Found {display_name}: marker index {idx}")
+            else:
+                print(f"    ⚠️  {display_name} ({marker_name}) not found in data")
+        
+        if not biomarker_indices:
+            print("  ❌ No requested biomarkers found in data")
+            return
+        
+        n_biomarkers = len(biomarker_indices)
+        print(f"  📊 Creating plot for {n_biomarkers} biomarkers")
+        
+        # Compute Spearman correlation tests for the selected biomarkers if data is available
+        spearman_p_values = {}
+        if topos_orig_all is not None and topos_recon_all is not None:
+            print(f"  🔬 Computing Spearman correlation tests for selected biomarkers...")
+            from scipy.stats import spearmanr
+            
+            n_subjects = topos_orig_all.shape[0]
+            n_channels = topos_orig_all.shape[2]
+            
+            for marker_idx in biomarker_indices:
+                p_values = np.zeros(n_channels)
+                
+                # Test each channel independently
+                for channel_idx in range(n_channels):
+                    # Get data for this marker and channel across all subjects
+                    orig_channel = topos_orig_all[:, marker_idx, channel_idx]
+                    recon_channel = topos_recon_all[:, marker_idx, channel_idx]
+                    
+                    # Remove NaN/Inf values
+                    valid_mask = np.isfinite(orig_channel) & np.isfinite(recon_channel)
+                    orig_valid = orig_channel[valid_mask]
+                    recon_valid = recon_channel[valid_mask]
+                    
+                    if len(orig_valid) >= 5:  # Need minimum samples for reliable test
+                        try:
+                            _, p_value = spearmanr(orig_valid, recon_valid)
+                            p_values[channel_idx] = p_value
+                        except:
+                            p_values[channel_idx] = np.nan
+                    else:
+                        p_values[channel_idx] = np.nan
+                
+                spearman_p_values[marker_idx] = p_values
+            
+            print(f"  ✅ Spearman tests computed for {len(spearman_p_values)} biomarkers")
+        
+        # Create figure: 4 columns x n_biomarkers rows
+        n_cols = 4 if spearman_p_values else 3
+        fig, axes = plt.subplots(n_biomarkers, n_cols, figsize=(20, max(12, n_biomarkers * 2.5)))
+        
+        # Handle single row case
+        if n_biomarkers == 1:
+            axes = axes.reshape(1, -1)
+        
+        # Add column titles at the top
+        column_titles = ['Original', 'Reconstructed', 'Difference', 'Spearman'] if spearman_p_values else ['Original', 'Reconstructed', 'Difference']
+        for col, title in enumerate(column_titles):
+            axes[0, col].text(0.5, 1.15, title, transform=axes[0, col].transAxes,
+                             ha='center', va='bottom', fontsize=40)
+        
+        # Plot each biomarker
+        for row, (marker_idx, label) in enumerate(zip(biomarker_indices, biomarker_labels)):
+            # Data for this marker
+            orig_data = topos_orig_mean[marker_idx, :]
+            recon_data = topos_recon_mean[marker_idx, :]
+            diff_data = orig_data - recon_data
+            
+            # Find common scale for original and reconstructed
+            orig_min, orig_max = np.min(orig_data), np.max(orig_data)
+            recon_min, recon_max = np.min(recon_data), np.max(recon_data)
+            
+            # Use same scale for original and reconstructed
+            common_min = min(orig_min, recon_min)
+            common_max = max(orig_max, recon_max)
+            
+            # Symmetric scale for difference: use largest absolute value
+            diff_max_abs = max(abs(np.min(diff_data)), abs(np.max(diff_data)))
+            diff_vmin, diff_vmax = -diff_max_abs, diff_max_abs
+            
+            # Column 1: Original (no colorbar)
+            im1, _ = mne.viz.plot_topomap(orig_data, info, axes=axes[row, 0],
+                                         vlim=(common_min, common_max),
+                                         show=False, cmap='viridis',
+                                         sphere=sphere, outlines=outlines,
+                                         extrapolate='local',
+                                         res=256, sensors=True, contours=6)
+            axes[row, 0].set_title('')  # Remove individual titles
+            
+            # Column 2: Reconstructed (WITH colorbar)
+            im2, _ = mne.viz.plot_topomap(recon_data, info, axes=axes[row, 1],
+                                         vlim=(common_min, common_max),
+                                         show=False, cmap='viridis',
+                                         sphere=sphere, outlines=outlines,
+                                         extrapolate='local',
+                                         res=256, sensors=True, contours=6)
+            axes[row, 1].set_title('')  # Remove individual titles
+            
+            # Column 3: Difference (Symmetric RdBu_r with white at 0, WITH colorbar)
+            im3, _ = mne.viz.plot_topomap(diff_data, info, axes=axes[row, 2],
+                                         vlim=(diff_vmin, diff_vmax),
+                                         show=False, cmap='RdBu_r',
+                                         sphere=sphere, outlines=outlines,
+                                         extrapolate='local',
+                                         res=256, sensors=True, contours=6)
+            axes[row, 2].set_title('')  # Remove individual titles
+            
+            # Column 4: Spearman Test p-values
+            im4 = None
+            if spearman_p_values and marker_idx in spearman_p_values:
+                p_values = spearman_p_values[marker_idx]
+                # Convert p-values to discrete categories
+                p_values_clean = np.where(np.isfinite(p_values), p_values, 1.0)
+                
+                # Create discrete values based on p-value thresholds:
+                # p < 0.01 -> 0 (black)
+                # p < 0.05 -> 1 (gray)
+                # p >= 0.05 -> 2 (white)
+                discrete_values = np.zeros_like(p_values_clean)
+                discrete_values[p_values_clean < 0.01] = 0  # Black
+                discrete_values[(p_values_clean >= 0.01) & (p_values_clean < 0.05)] = 1  # Gray
+                discrete_values[p_values_clean >= 0.05] = 2  # White
+                
+                # Create custom discrete colormap
+                from matplotlib.colors import ListedColormap
+                colors_map = ['black', 'gray', 'white']
+                discrete_cmap = ListedColormap(colors_map)
+                
+                im4, _ = mne.viz.plot_topomap(discrete_values, info, axes=axes[row, 3],
+                                             vlim=(0, 2),  # 0=black, 1=gray, 2=white
+                                             show=False, cmap=discrete_cmap,
+                                             sphere=sphere, outlines=outlines,
+                                         extrapolate='local',
+                                         res=256, sensors=True, contours=6)
+                axes[row, 3].set_title('')  # Remove individual titles
+            
+            # Add row label (biomarker name) on the left side only
+            axes[row, 0].text(-0.3, 0.5, label, transform=axes[row, 0].transAxes,
+                             ha='right', va='center', fontsize=40,
+                             rotation=0)  # Horizontal text
+            
+            # Add colorbars for columns 2 and 3
+            cbar2 = plt.colorbar(im2, ax=axes[row, 1], shrink=0.8)
+            cbar2.ax.tick_params(labelsize=24)
+            
+            cbar3 = plt.colorbar(im3, ax=axes[row, 2], shrink=0.8)
+            cbar3.ax.tick_params(labelsize=24)
+            
+            # No colorbar for Original or Spearman columns
+        
+        plt.tight_layout()
+        
+        # Add legend for the Spearman column
+        if spearman_p_values:
+            from matplotlib.patches import Patch
+            legend_elements = [
+                Patch(facecolor='black', edgecolor='black', label='p < 0.01'),
+                Patch(facecolor='gray', edgecolor='black', label='0.01 ≤ p < 0.05'),
+                Patch(facecolor='white', edgecolor='black', label='p ≥ 0.05')
+            ]
+            # Add legend to the right of the plot
+            fig.legend(handles=legend_elements, loc='center left', 
+                      bbox_to_anchor=(1.02, 0.5), fontsize=26, 
+                      title='Spearman p-value', title_fontsize=28)
+        
+        plt.savefig(op.join(self.plots_dir, 'custom_full_biomarkers_orig_recon_spearman.png'), 
+                   dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        print(f"  ✅ Custom FULL biomarker plot (Spearman) saved with {n_biomarkers} markers")
+        print(f"    📍 Biomarkers included: {biomarker_labels}")
+    
+    def _create_custom_full_biomarker_topomap_wilcoxon_corrected(self, topos_orig_mean, topos_recon_mean, info, marker_names, topos_orig_all=None, topos_recon_all=None, sphere=None, outlines='head'):
+        """
+        Create custom 4-column topographic plot for extended biomarker set with symmetric difference scaling and FDR correction.
+        
+        Layout: Original | Reconstructed (with cbar) | Difference (Symmetric RdBu_r with cbar) | Wilcoxon Test (WITH FDR)
+        Rows: Alpha-norm, Beta-norm, Delta-norm, Gamma-norm, Theta-norm, PermEntropy, Kolmogorov, SpectralEntropy, SMI
+        """
+        print("  🎯 Creating custom FULL biomarker topographic plots (FDR corrected)...")
+        
+        # Define specific biomarkers to plot (9 markers)
+        biomarker_specs = [
+            ('PowerSpectralDensity_alphan', 'Alpha Normalized'),
+            ('PowerSpectralDensity_betan', 'Beta Normalized'),
+            ('PowerSpectralDensity_deltan', 'Delta Normalized'),
+            ('PowerSpectralDensity_gamman', 'Gamma Normalized'),
+            ('PowerSpectralDensity_thetan', 'Theta Normalized'),
+            ('PermutationEntropy_default', 'Permutation\nEntropy'),
+            ('KolmogorovComplexity_default', 'Kolmogorov\nComplexity'),
+            ('PowerSpectralDensitySummary_summary_se', 'Spectral\nEntropy'),
+            ('SymbolicMutualInformation_weighted', 'Symbolic Mutual\nInformation')
+        ]
+        
+        # Find indices for these markers
+        biomarker_indices = []
+        biomarker_labels = []
+        available_biomarkers = []
+        
+        for marker_name, display_name in biomarker_specs:
+            if marker_name in marker_names:
+                idx = marker_names.index(marker_name)
+                biomarker_indices.append(idx)
+                biomarker_labels.append(display_name)
+                available_biomarkers.append(marker_name)
+                print(f"    ✅ Found {display_name}: marker index {idx}")
+            else:
+                print(f"    ⚠️  {display_name} ({marker_name}) not found in data")
+        
+        if not biomarker_indices:
+            print("  ❌ No requested biomarkers found in data")
+            return
+        
+        n_biomarkers = len(biomarker_indices)
+        print(f"  📊 Creating plot for {n_biomarkers} biomarkers")
+        
+        # Compute Wilcoxon tests for the selected biomarkers if data is available
+        wilcoxon_p_values = {}
+        wilcoxon_p_values_corrected = {}
+        if topos_orig_all is not None and topos_recon_all is not None:
+            print(f"  🔬 Computing Wilcoxon signed-rank tests for selected biomarkers...")
+            from scipy.stats import wilcoxon as wilcoxon_test
+            
+            n_subjects = topos_orig_all.shape[0]
+            n_channels = topos_orig_all.shape[2]
+            
+            for marker_idx in biomarker_indices:
+                p_values = np.zeros(n_channels)
+                
+                # Test each channel independently
+                for channel_idx in range(n_channels):
+                    # Get data for this marker and channel across all subjects
+                    orig_channel = topos_orig_all[:, marker_idx, channel_idx]
+                    recon_channel = topos_recon_all[:, marker_idx, channel_idx]
+                    
+                    # Remove NaN/Inf values
+                    valid_mask = np.isfinite(orig_channel) & np.isfinite(recon_channel)
+                    orig_valid = orig_channel[valid_mask]
+                    recon_valid = recon_channel[valid_mask]
+                    
+                    if len(orig_valid) >= 5:  # Need minimum samples for reliable test
+                        try:
+                            _, p_value = wilcoxon_test(orig_valid, recon_valid, alternative='two-sided')
+                            p_values[channel_idx] = p_value
+                        except:
+                            p_values[channel_idx] = np.nan
+                    else:
+                        p_values[channel_idx] = np.nan
+                
+                wilcoxon_p_values[marker_idx] = p_values
+            
+            print(f"  ✅ Wilcoxon tests computed for {len(wilcoxon_p_values)} biomarkers")
+            
+            # Apply FDR correction (Benjamini-Hochberg) to p-values for each biomarker
+            print(f"  🔬 Applying FDR correction (Benjamini-Hochberg method)...")
+            
+            # Try to import FDR correction function
+            try:
+                # Try scipy.stats.false_discovery_control (scipy >= 1.10)
+                from scipy.stats import false_discovery_control
+                use_scipy_fdr = True
+            except ImportError:
+                # Fallback to statsmodels
+                try:
+                    from statsmodels.stats.multitest import multipletests
+                    use_scipy_fdr = False
+                    print("     ℹ️  Using statsmodels for FDR correction")
+                except ImportError:
+                    print("     ⚠️  Warning: Could not import FDR correction. Using uncorrected p-values.")
+                    wilcoxon_p_values_corrected = wilcoxon_p_values.copy()
+                    use_scipy_fdr = None
+            
+            if use_scipy_fdr is not None:
+                for marker_idx in biomarker_indices:
+                    p_values = wilcoxon_p_values[marker_idx]
+                    
+                    # Identify valid (non-NaN) p-values
+                    valid_mask = np.isfinite(p_values)
+                    valid_p_values = p_values[valid_mask]
+                    
+                    if len(valid_p_values) > 0:
+                        # Apply FDR correction
+                        if use_scipy_fdr:
+                            # scipy.stats.false_discovery_control
+                            corrected_valid = false_discovery_control(valid_p_values, method='bh')
+                        else:
+                            # statsmodels.stats.multitest.multipletests
+                            reject, corrected_valid, _, _ = multipletests(valid_p_values, method='fdr_bh')
+                        
+                        # Create corrected p-values array with NaNs preserved
+                        p_values_corrected = np.full_like(p_values, np.nan)
+                        p_values_corrected[valid_mask] = corrected_valid
+                        
+                        wilcoxon_p_values_corrected[marker_idx] = p_values_corrected
+                    else:
+                        # All NaN, keep as is
+                        wilcoxon_p_values_corrected[marker_idx] = p_values.copy()
+                
+                print(f"  ✅ FDR correction applied to {len(wilcoxon_p_values_corrected)} biomarkers")
+        
+        # Create figure: 4 columns x n_biomarkers rows
+        n_cols = 4 if wilcoxon_p_values else 3
+        fig, axes = plt.subplots(n_biomarkers, n_cols, figsize=(20, max(12, n_biomarkers * 2.5)))
+        
+        # Handle single row case
+        if n_biomarkers == 1:
+            axes = axes.reshape(1, -1)
+        
+        # Add column titles at the top
+        column_titles = ['Original', 'Reconstructed', 'Difference', 'Wilcoxon'] if wilcoxon_p_values else ['Original', 'Reconstructed', 'Difference']
+        for col, title in enumerate(column_titles):
+            axes[0, col].text(0.5, 1.15, title, transform=axes[0, col].transAxes,
+                             ha='center', va='bottom', fontsize=32)
+        
+        # Plot each biomarker
+        for row, (marker_idx, label) in enumerate(zip(biomarker_indices, biomarker_labels)):
+            # Data for this marker
+            orig_data = topos_orig_mean[marker_idx, :]
+            recon_data = topos_recon_mean[marker_idx, :]
+            diff_data = orig_data - recon_data
+            
+            # Find common scale for original and reconstructed
+            orig_min, orig_max = np.min(orig_data), np.max(orig_data)
+            recon_min, recon_max = np.min(recon_data), np.max(recon_data)
+            
+            # Use same scale for original and reconstructed
+            common_min = min(orig_min, recon_min)
+            common_max = max(orig_max, recon_max)
+            
+            # Symmetric scale for difference: use largest absolute value
+            diff_max_abs = max(abs(np.min(diff_data)), abs(np.max(diff_data)))
+            diff_vmin, diff_vmax = -diff_max_abs, diff_max_abs
+            
+            # Column 1: Original (no colorbar)
+            im1, _ = mne.viz.plot_topomap(orig_data, info, axes=axes[row, 0],
+                                         vlim=(common_min, common_max),
+                                         show=False, cmap='viridis',
+                                         sphere=sphere, outlines=outlines,
+                                         extrapolate='local',
+                                         res=256, sensors=True, contours=6)
+            axes[row, 0].set_title('')  # Remove individual titles
+            
+            # Column 2: Reconstructed (WITH colorbar)
+            im2, _ = mne.viz.plot_topomap(recon_data, info, axes=axes[row, 1],
+                                         vlim=(common_min, common_max),
+                                         show=False, cmap='viridis',
+                                         sphere=sphere, outlines=outlines,
+                                         extrapolate='local',
+                                         res=256, sensors=True, contours=6)
+            axes[row, 1].set_title('')  # Remove individual titles
+            
+            # Column 3: Difference (Symmetric RdBu_r with white at 0, WITH colorbar)
+            im3, _ = mne.viz.plot_topomap(diff_data, info, axes=axes[row, 2],
+                                         vlim=(diff_vmin, diff_vmax),
+                                         show=False, cmap='RdBu_r',
+                                         sphere=sphere, outlines=outlines,
+                                         extrapolate='local',
+                                         res=256, sensors=True, contours=6)
+            axes[row, 2].set_title('')  # Remove individual titles
+            
+            # Column 4: Wilcoxon Test p-values (FDR-corrected)
+            im4 = None
+            if wilcoxon_p_values_corrected and marker_idx in wilcoxon_p_values_corrected:
+                # Use FDR-corrected p-values
+                p_values = wilcoxon_p_values_corrected[marker_idx]
+                # Convert p-values to discrete categories
+                p_values_clean = np.where(np.isfinite(p_values), p_values, 1.0)
+                
+                # Create discrete values based on p-value thresholds:
+                # p < 0.01 -> 0 (black)
+                # p < 0.05 -> 1 (gray)
+                # p >= 0.05 -> 2 (white)
+                discrete_values = np.zeros_like(p_values_clean)
+                discrete_values[p_values_clean < 0.01] = 0  # Black
+                discrete_values[(p_values_clean >= 0.01) & (p_values_clean < 0.05)] = 1  # Gray
+                discrete_values[p_values_clean >= 0.05] = 2  # White
+                
+                # Create custom discrete colormap
+                from matplotlib.colors import ListedColormap
+                colors_map = ['black', 'gray', 'white']
+                discrete_cmap = ListedColormap(colors_map)
+                
+                im4, _ = mne.viz.plot_topomap(discrete_values, info, axes=axes[row, 3],
+                                             vlim=(0, 2),  # 0=black, 1=gray, 2=white
+                                             show=False, cmap=discrete_cmap,
+                                             sphere=sphere, outlines=outlines,
+                                         extrapolate='local',
+                                         res=256, sensors=True, contours=6)
+                axes[row, 3].set_title('')  # Remove individual titles
+            
+            # Add row label (biomarker name) on the left side only
+            axes[row, 0].text(-0.3, 0.5, label, transform=axes[row, 0].transAxes,
+                             ha='right', va='center', fontsize=32,
+                             rotation=0)  # Horizontal text
+            
+            # Add colorbars for columns 2 and 3
+            cbar2 = plt.colorbar(im2, ax=axes[row, 1], shrink=0.8)
+            cbar2.ax.tick_params(labelsize=18)
+            
+            cbar3 = plt.colorbar(im3, ax=axes[row, 2], shrink=0.8)
+            cbar3.ax.tick_params(labelsize=18)
+            
+            # No colorbar for Original or Wilcoxon columns
+        
+        plt.tight_layout()
+        
+        # Add legend for the Wilcoxon column
+        if wilcoxon_p_values_corrected:
+            from matplotlib.patches import Patch
+            legend_elements = [
+                Patch(facecolor='black', edgecolor='black', label='p < 0.01'),
+                Patch(facecolor='gray', edgecolor='black', label='0.01 ≤ p < 0.05'),
+                Patch(facecolor='white', edgecolor='black', label='p ≥ 0.05')
+            ]
+            # Add legend to the right of the plot
+            fig.legend(handles=legend_elements, loc='center left', 
+                      bbox_to_anchor=(1.02, 0.5), fontsize=20, 
+                      title='Wilcoxon p-value\n(FDR corrected)', title_fontsize=22)
+        
+        plt.savefig(op.join(self.plots_dir, 'custom_full_biomarkers_orig_recon_wilcoxon_corrected.png'), 
+                   dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        print(f"  ✅ Custom FULL biomarker plot (FDR corrected) saved with {n_biomarkers} markers")
+        print(f"    📍 Biomarkers included: {biomarker_labels}")
+    
+    def _create_diagnosis_filtered_biomarker_topomap(self, topos_orig_all, topos_recon_all, info, marker_names, 
+                                                       diagnosis_group=None, sphere=None, outlines='head'):
+        """
+        Create 3-column topographic plot (Original, Reconstructed, Difference) filtered by diagnosis group.
+        
+        Similar to custom_biomarkers_orig_recon_wilcoxon_corrected but without the Wilcoxon test column,
+        and filtered to include only subjects with specific diagnoses.
+        
+        Parameters
+        ----------
+        topos_orig_all : array, shape (n_subjects, n_markers, n_channels)
+            Original topographic data for all subjects
+        topos_recon_all : array, shape (n_subjects, n_markers, n_channels)
+            Reconstructed topographic data for all subjects
+        info : mne.Info
+            MNE info object with montage
+        marker_names : list
+            List of marker names
+        diagnosis_group : list
+            List of diagnoses to include (e.g., ['UWS', 'VS'] or ['MCS+', 'MCS-'])
+        sphere : tuple or str
+            Sphere definition for plotting
+        outlines : dict or str
+            Outlines definition for plotting
+        """
+        if diagnosis_group is None or not self.patient_labels_original:
+            print("  ⚠️  No diagnosis filtering available, skipping diagnosis-filtered plots")
+            return
+        
+        group_name = '_'.join(diagnosis_group).replace('+', 'plus').replace('-', 'minus')
+        print(f"  🎯 Creating diagnosis-filtered biomarker plots for {diagnosis_group}...")
+        
+        # Filter subjects by diagnosis
+        subject_ids = self.global_topo_data['subjects']
+        filtered_indices = []
+        filtered_subject_ids = []
+        
+        for idx, subject_id in enumerate(subject_ids):
+            original_diagnosis = self.patient_labels_original.get(subject_id)
+            if original_diagnosis in diagnosis_group:
+                filtered_indices.append(idx)
+                filtered_subject_ids.append(subject_id)
+        
+        if len(filtered_indices) == 0:
+            print(f"     ⚠️  No subjects found with diagnoses {diagnosis_group}")
+            return
+        
+        print(f"     ✓ Found {len(filtered_indices)} subjects with diagnoses {diagnosis_group}")
+        print(f"     ✓ Subjects: {filtered_subject_ids}")
+        
+        # Filter the topographic data
+        topos_orig_filtered = topos_orig_all[filtered_indices]
+        topos_recon_filtered = topos_recon_all[filtered_indices]
+        
+        # Compute mean across filtered subjects
+        topos_orig_mean = np.mean(topos_orig_filtered, axis=0)  # (n_markers, n_channels)
+        topos_recon_mean = np.mean(topos_recon_filtered, axis=0)
+        
+        # Define the 9 biomarkers to plot (same as wilcoxon_corrected)
+        biomarker_specs = [
+            ('PowerSpectralDensity_alphan', 'Alpha Normalized'),
+            ('PowerSpectralDensity_betan', 'Beta Normalized'),
+            ('PowerSpectralDensity_deltan', 'Delta Normalized'),
+            ('PowerSpectralDensity_gamman', 'Gamma Normalized'),
+            ('PowerSpectralDensity_thetan', 'Theta Normalized'),
+            ('PermutationEntropy_default', 'Permutation\nEntropy'),
+            ('KolmogorovComplexity_default', 'Kolmogorov\nComplexity'),
+            ('PowerSpectralDensitySummary_summary_se', 'Spectral\nEntropy'),
+            ('SymbolicMutualInformation_weighted', 'Symbolic Mutual\nInformation')
+        ]
+        
+        # Find indices for these markers
+        biomarker_indices = []
+        biomarker_labels = []
+        
+        for marker_name, display_name in biomarker_specs:
+            if marker_name in marker_names:
+                idx = marker_names.index(marker_name)
+                biomarker_indices.append(idx)
+                biomarker_labels.append(display_name)
+                print(f"       ✅ Found {display_name}: marker index {idx}")
+            else:
+                print(f"       ⚠️  {display_name} ({marker_name}) not found in data")
+        
+        if not biomarker_indices:
+            print(f"     ❌ No requested biomarkers found in data")
+            return
+        
+        n_biomarkers = len(biomarker_indices)
+        print(f"     📊 Creating plot for {n_biomarkers} biomarkers, {len(filtered_indices)} subjects")
+        
+        # Create figure: 3 columns x n_biomarkers rows (wider figure for larger topoplots)
+        fig, axes = plt.subplots(n_biomarkers, 3, figsize=(20, max(12, n_biomarkers * 2.5)))
+        
+        # Handle single row case
+        if n_biomarkers == 1:
+            axes = axes.reshape(1, -1)
+        
+        # Add column titles at the top
+        column_titles = ['Original', 'Reconstructed', 'Difference']
+        for col, title in enumerate(column_titles):
+            axes[0, col].text(0.5, 1.15, title, transform=axes[0, col].transAxes,
+                             ha='center', va='bottom', fontsize=32)
+        
+        # Plot each biomarker
+        for row, (marker_idx, label) in enumerate(zip(biomarker_indices, biomarker_labels)):
+            # Data for this marker
+            orig_data = topos_orig_mean[marker_idx, :]
+            recon_data = topos_recon_mean[marker_idx, :]
+            diff_data = orig_data - recon_data
+            
+            # Find common scale for original and reconstructed
+            orig_min, orig_max = np.min(orig_data), np.max(orig_data)
+            recon_min, recon_max = np.min(recon_data), np.max(recon_data)
+            
+            # Use same scale for original and reconstructed
+            common_min = min(orig_min, recon_min)
+            common_max = max(orig_max, recon_max)
+            
+            # Symmetric scale for difference: use largest absolute value
+            diff_max_abs = max(abs(np.min(diff_data)), abs(np.max(diff_data)))
+            diff_vmin, diff_vmax = -diff_max_abs, diff_max_abs
+            
+            # Column 1: Original (no colorbar)
+            im1, _ = mne.viz.plot_topomap(orig_data, info, axes=axes[row, 0],
+                                         vlim=(common_min, common_max),
+                                         show=False, cmap='viridis',
+                                         sphere=sphere, outlines=outlines,
+                                         extrapolate='local',
+                                         res=256, sensors=True, contours=6)
+            axes[row, 0].set_title('')  # Remove individual titles
+            
+            # Column 2: Reconstructed (WITH colorbar)
+            im2, _ = mne.viz.plot_topomap(recon_data, info, axes=axes[row, 1],
+                                         vlim=(common_min, common_max),
+                                         show=False, cmap='viridis',
+                                         sphere=sphere, outlines=outlines,
+                                         extrapolate='local',
+                                         res=256, sensors=True, contours=6)
+            axes[row, 1].set_title('')  # Remove individual titles
+            
+            # Column 3: Difference (Symmetric RdBu_r, WITH colorbar)
+            im3, _ = mne.viz.plot_topomap(diff_data, info, axes=axes[row, 2],
+                                         vlim=(diff_vmin, diff_vmax),
+                                         show=False, cmap='RdBu_r',
+                                         sphere=sphere, outlines=outlines,
+                                         extrapolate='local',
+                                         res=256, sensors=True, contours=6)
+            axes[row, 2].set_title('')  # Remove individual titles
+            
+            # Add row label (biomarker name) on the left side
+            axes[row, 0].text(-0.3, 0.5, label, transform=axes[row, 0].transAxes,
+                             ha='right', va='center', fontsize=32,
+                             rotation=0)
+            
+            # Add colorbars for columns 2 and 3 (smaller shrink to take less space)
+            cbar2 = plt.colorbar(im2, ax=axes[row, 1], shrink=0.7, aspect=20)
+            cbar2.ax.tick_params(labelsize=16)
+            
+            cbar3 = plt.colorbar(im3, ax=axes[row, 2], shrink=0.7, aspect=20)
+            cbar3.ax.tick_params(labelsize=16)
+        
+        # Use more generous spacing to prevent compression
+        plt.subplots_adjust(wspace=0.4, hspace=0.3)
+        plt.tight_layout(pad=1.5)
+        
+        # Save plot with diagnosis group in filename
+        filename = f'custom_biomarkers_orig_recon_diff_{group_name}.png'
+        plt.savefig(op.join(self.plots_dir, filename), dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        print(f"     ✅ Diagnosis-filtered plot saved: {filename}")
+        print(f"        Diagnoses: {diagnosis_group}")
+        print(f"        N subjects: {len(filtered_indices)}")
+        print(f"        Biomarkers: {biomarker_labels}")
+    
+    def _plot_wilcoxon_distributions(self, marker_names, topos_orig_all=None, topos_recon_all=None):
+        """
+        Plot distributions of differences passed to Wilcoxon test.
+        
+        Creates 8 unique images (one for each biomarker) with 4 subplots each.
+        Each subplot shows 64 curves (electrodes), with:
+        - X-axis: subject id
+        - Y-axis: difference (recon - orig) for that subject and electrode
+        
+        Parameters
+        ----------
+        marker_names : list
+            List of marker names
+        topos_orig_all : array, shape (n_subjects, n_markers, n_channels)
+            Original topographic data
+        topos_recon_all : array, shape (n_subjects, n_markers, n_channels)
+            Reconstructed topographic data
+        """
+        print("  📊 Creating Wilcoxon distribution plots...")
+        
+        if topos_orig_all is None or topos_recon_all is None:
+            print("     ⚠️  No topographic data available. Skipping Wilcoxon distribution plots.")
+            return
+        
+        # Define the 8 biomarkers to plot (same as custom_biomarkers_orig_recon_diff_new.png)
+        biomarker_specs = [
+            ('PowerSpectralDensity_alphan', 'Alpha Normalized'),
+            ('PowerSpectralDensity_betan', 'Beta Normalized'), 
+            ('TimeLockedContrast_mmn', 'MMN'),
+            ('PermutationEntropy_default', 'Permutation Entropy'),
+            ('KolmogorovComplexity_default', 'Kolmogorov Complexity'),
+            ('TimeLockedTopography_p3b', 'P3b'),
+            ('SymbolicMutualInformation_weighted', 'Symbolic Mutual Information'),
+            ('ContingentNegativeVariation_default', 'CNV')
+        ]
+        
+        # Find indices for these markers
+        biomarker_indices = []
+        biomarker_labels = []
+        biomarker_names_full = []
+        
+        for marker_name, display_name in biomarker_specs:
+            if marker_name in marker_names:
+                idx = marker_names.index(marker_name)
+                biomarker_indices.append(idx)
+                biomarker_labels.append(display_name)
+                biomarker_names_full.append(marker_name)
+                print(f"    ✅ Found {display_name}: marker index {idx}")
+            else:
+                print(f"    ⚠️  {display_name} ({marker_name}) not found in data")
+        
+        if not biomarker_indices:
+            print("  ❌ No requested biomarkers found in data")
+            return
+        
+        n_subjects = topos_orig_all.shape[0]
+        n_channels = topos_orig_all.shape[2]
+        subject_ids = np.arange(n_subjects)
+        
+        # Assume 256 channels (EGI256), split into 4 groups of 64
+        channels_per_subplot = 64
+        n_subplots = 4
+        
+        if n_channels != 256:
+            print(f"     ⚠️  Expected 256 channels, got {n_channels}. Adjusting layout...")
+            channels_per_subplot = n_channels // n_subplots
+        
+        # Create one figure per biomarker
+        for marker_idx, display_name, marker_name_full in zip(biomarker_indices, biomarker_labels, biomarker_names_full):
+            
+            fig, axes = plt.subplots(2, 2, figsize=(18, 12))
+            axes = axes.flatten()
+            
+            fig.suptitle(f'Wilcoxon Test Distributions: {display_name}', fontsize=20, y=0.995)
+            
+            # For each subplot, plot 64 electrodes
+            for subplot_idx in range(n_subplots):
+                ax = axes[subplot_idx]
+                
+                # Determine channel range for this subplot
+                start_ch = subplot_idx * channels_per_subplot
+                end_ch = min(start_ch + channels_per_subplot, n_channels)
+                
+                # Plot each electrode as a separate curve
+                for ch_idx in range(start_ch, end_ch):
+                    # Get data for this marker and channel across all subjects
+                    orig_channel = topos_orig_all[:, marker_idx, ch_idx]
+                    recon_channel = topos_recon_all[:, marker_idx, ch_idx]
+                    
+                    # Compute difference: recon - orig (NOT orig - recon)
+                    diff_channel = recon_channel - orig_channel
+                    
+                    # Plot the difference for each subject
+                    ax.plot(subject_ids, diff_channel, alpha=0.3, linewidth=0.8)
+                
+                # Formatting
+                ax.set_xlabel('Subject ID', fontsize=12)
+                ax.set_ylabel('Difference (Recon - Orig)', fontsize=12)
+                ax.set_title(f'Electrodes {start_ch}-{end_ch-1}', fontsize=14)
+                ax.grid(True, alpha=0.3)
+                ax.axhline(y=0, color='red', linestyle='--', linewidth=1.5, alpha=0.7, label='Zero difference')
+                
+                # Only add legend to first subplot
+                if subplot_idx == 0:
+                    ax.legend(loc='best', fontsize=10)
+            
+            plt.tight_layout()
+            
+            # Save figure
+            filename = f'wilcoxon_distributions_{marker_name_full.replace("/", "_")}.png'
+            save_path = op.join(self.plots_dir, filename)
+            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            plt.close(fig)
+            
+            print(f"    ✅ Saved: {filename}")
+        
+        print(f"  ✅ Created {len(biomarker_indices)} Wilcoxon distribution plots")
     
     def global_statistical_tests(self):
         """Perform global statistical tests."""
@@ -2151,6 +5673,71 @@ class GlobalAnalyzer:
         print(f"        Max topo p-value: {max_pval_topo_marker:.3f}")
         print(f"        Number of markers tested: {n_markers}")
     
+    def run_statistical_analysis(self):
+        """
+        Run statistical analysis using StatisticalAnalyzer.
+        
+        Creates statistics folder with results and plots subfolders.
+        """
+        print("🔍 Checking statistical analysis availability...")
+        print(f"   HAS_STATISTICAL_ANALYSIS = {HAS_STATISTICAL_ANALYSIS}")
+        print(f"   StatisticalAnalyzer = {StatisticalAnalyzer}")
+        
+        if not HAS_STATISTICAL_ANALYSIS:
+            print("⚠️  StatisticalAnalyzer not available - skipping statistical analysis")
+            print("   This means the Wilcoxon test and SSIM analysis will not run.")
+            return None
+        
+        # Create statistics folder structure
+        statistics_dir = op.join(self.output_dir, 'statistics')
+        print(f"📁 Creating statistics directory: {statistics_dir}")
+        os.makedirs(statistics_dir, exist_ok=True)
+        
+        try:
+            # Initialize statistical analyzer with the statistics directory
+            patient_labels_file = self.patient_labels_file
+            print(f"📄 Using patient labels: {patient_labels_file}")
+            
+            # Create StatisticalAnalyzer
+            print("🏗️  Initializing StatisticalAnalyzer...")
+            stat_analyzer = StatisticalAnalyzer(
+                results_dir=self.results_dir,
+                output_dir=statistics_dir,
+                patient_labels_file=patient_labels_file,
+                data_dir=self.fif_data_dir
+            )
+            
+            # Run the statistical analysis
+            print("🔬 Running comprehensive statistical analysis...")
+            print("   This includes:")
+            print("   - Wilcoxon signed-rank tests for each marker")
+            print("   - Structural Similarity Index (SSIM) computation")
+            print("   - Analysis by patient groups (MCS, UWS, etc.)")
+            
+            stats_results = stat_analyzer.run_analysis(analyze_by_groups=True)
+            
+            if stats_results:
+                print(f"✅ Statistical analysis completed successfully!")
+                print(f"📊 Statistics plots saved in: {op.join(statistics_dir, 'plots')}")
+                print(f"📈 Statistics results saved in: {op.join(statistics_dir, 'results')}")
+                print(f"🔍 Found {len(stats_results)} analysis groups")
+                
+                # Show what was analyzed
+                for group_name in stats_results.keys():
+                    print(f"   ✓ Group '{group_name}' analyzed")
+                    
+            else:
+                print("⚠️  Statistical analysis returned no results")
+            
+            return stats_results
+            
+        except Exception as e:
+            print(f"❌ Statistical analysis failed: {e}")
+            import traceback
+            print("📋 Full error traceback:")
+            traceback.print_exc()
+            return None
+    
     def run_analysis(self):
         """Run complete global analysis."""
         print("=" * 60)
@@ -2177,23 +5764,34 @@ class GlobalAnalyzer:
         self.prepare_global_data()
         
         # Create plots
-        self.create_scalar_global_plots()
+      #  self.create_scalar_global_plots()
         # self.create_topographic_global_plots()  # Commented out for now
         
         # Create time series error plots
-        self.create_timeseries_error_plots()
+      #  self.create_timeseries_error_plots()
         
         # Create MNE topographic plots
         self.create_mne_topomap_plots()
         
-        # Create statistical tests plots - DISABLED (moved to statistical_analysis.py)
-        # self.create_statistical_tests_plots()
+        # Create Global Field Power plots (optional)
+        if not self.skip_gfp:
+            print("\n--- Global Field Power Analysis ---")
+            gfp_analyzer = GlobalFieldPowerGlobal(self.output_dir, self.subjects_data, self.results_dir, self.fif_data_dir)
+            gfp_analyzer.analyze_all_subjects()
+        else:
+            print("\n--- Global Field Power Analysis (SKIPPED) ---")
+            print("🚫 Global Field Power analysis skipped as requested")
         
-        # Statistical tests - DISABLED (moved to statistical_analysis.py)
-        # stats_results = self.global_statistical_tests()
-        stats_results = None  # Statistical tests moved to statistical_analysis.py
+        # Statistical Analysis - NEW integrated approach
+        print("\n--- Statistical Analysis ---")
+        print("🔍 Debug: About to call run_statistical_analysis()")
+        print(f"   HAS_STATISTICAL_ANALYSIS = {HAS_STATISTICAL_ANALYSIS}")
+        print(f"   StatisticalAnalyzer = {StatisticalAnalyzer}")
+        stats_results = self.run_statistical_analysis()
+        print(f"   Returned stats_results = {type(stats_results)} with keys: {list(stats_results.keys()) if stats_results else None}")
         
         # Summary
+    
         print("\n" + "=" * 60)
         print("GLOBAL ANALYSIS SUMMARY")
         print("=" * 60)
@@ -2217,9 +5815,9 @@ class GlobalAnalyzer:
             'target_state': self.target_state,
             'available_states': sorted(self.available_states) if self.available_states else None
         }
+    
 
-
-def run_state_based_analysis(results_dir, base_output_dir, patient_labels_file):
+def run_state_based_analysis(results_dir, base_output_dir, patient_labels_file, fif_data_dir=None, skip_gfp=False):
     """Run analysis for all states and the complete dataset."""
     print("=" * 80)
     print("RUNNING STATE-BASED GLOBAL ANALYSIS")
@@ -2228,16 +5826,27 @@ def run_state_based_analysis(results_dir, base_output_dir, patient_labels_file):
     # Create timestamp for this analysis run
     timestamp = datetime.now().strftime('%Y-%m-%d_%H%M%S')
     
-    # First, load patient labels to get available states
+    # First, load patient labels to get available states with proper grouping
     try:
         df = pd.read_csv(patient_labels_file)
         available_states = set()
         for _, row in df.iterrows():
             state = row['state']
             if pd.notna(state) and state != 'n/a':
+                # Apply same grouping logic as in GlobalAnalyzer._load_patient_labels
+                # Group diagnoses as requested:
+                # - Merge MCS+ and MCS- into MCS
+                # - Merge UWS and VS into VS/UWS (they are the same condition)
+                if state in ['MCS+', 'MCS-']:
+                    state = 'MCS'
+                elif state == 'VS':
+                    state = 'UWS'  # VS and UWS are the same, use UWS as standard
+                
                 available_states.add(state)
+        
         available_states = sorted(available_states)
-        print(f"📋 Found states: {available_states}")
+        print(f"📋 Found states (after grouping): {available_states}")
+        print(f"ℹ️  Applied diagnosis grouping: MCS+/MCS- → MCS, VS → UWS")
     except Exception as e:
         print(f"❌ Error loading patient labels: {e}")
         return
@@ -2251,7 +5860,7 @@ def run_state_based_analysis(results_dir, base_output_dir, patient_labels_file):
     print(f"{'='*60}")
     
     all_output_dir = op.join(base_output_dir, 'all_subs')
-    analyzer_all = GlobalAnalyzer(results_dir, all_output_dir, patient_labels_file, target_state=None)
+    analyzer_all = GlobalAnalyzer(results_dir, all_output_dir, patient_labels_file, target_state=None, fif_data_dir=fif_data_dir)
     results_all = analyzer_all.run_analysis()
     all_results['all_subs'] = results_all
     
@@ -2262,7 +5871,7 @@ def run_state_based_analysis(results_dir, base_output_dir, patient_labels_file):
         print(f"{'='*60}")
         
         state_output_dir = op.join(base_output_dir, state)
-        analyzer_state = GlobalAnalyzer(results_dir, state_output_dir, patient_labels_file, target_state=state)
+        analyzer_state = GlobalAnalyzer(results_dir, state_output_dir, patient_labels_file, target_state=state, fif_data_dir=fif_data_dir, skip_gfp=skip_gfp)
         results_state = analyzer_state.run_analysis()
         
         if results_state and len(results_state['subjects']) > 0:
@@ -2323,6 +5932,9 @@ def main():
     parser.add_argument('--patient-labels', 
                        default='/Users/trinidad.borrell/Documents/Work/PhD/Proyects/nice/benchmark/py/metadata/patient_labels_with_controls.csv',
                        help='CSV file with patient labels and states')
+    parser.add_argument('--data-dir', help='Data directory containing raw .fif files (for Global Field Power analysis)')
+    parser.add_argument('--skip-gfp', action='store_true',
+                       help='Skip Global Field Power analysis for faster execution')
     parser.add_argument('--single-state', help='Run analysis for a single state only')
     parser.add_argument('--no-state-analysis', action='store_true', 
                        help='Run traditional analysis without state filtering')
@@ -2345,7 +5957,7 @@ def main():
         print(f"Starting global analysis at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print(f"Results will be saved with timestamp: {timestamp}")
         
-        analyzer = GlobalAnalyzer(args.results_dir, output_dir)
+        analyzer = GlobalAnalyzer(args.results_dir, output_dir, fif_data_dir=args.data_dir, skip_gfp=args.skip_gfp)
         results = analyzer.run_analysis()
         
         if results:
@@ -2363,7 +5975,7 @@ def main():
         else:
             output_dir = op.join(args.results_dir, 'global', args.single_state, f'global_results_{timestamp}')
         
-        analyzer = GlobalAnalyzer(args.results_dir, output_dir, patient_labels_file, args.single_state)
+        analyzer = GlobalAnalyzer(args.results_dir, output_dir, patient_labels_file, args.single_state, fif_data_dir=args.data_dir, skip_gfp=args.skip_gfp)
         results = analyzer.run_analysis()
         
         if results:
@@ -2380,7 +5992,7 @@ def main():
         else:
             base_output_dir = op.join(args.results_dir, 'global')
         
-        run_state_based_analysis(args.results_dir, base_output_dir, patient_labels_file)
+        run_state_based_analysis(args.results_dir, base_output_dir, patient_labels_file, fif_data_dir=args.data_dir, skip_gfp=args.skip_gfp)
 
 
 if __name__ == '__main__':
