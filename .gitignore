@@ -7,6 +7,7 @@ cookbooks/cleanup_hdf5_markers.py
 src/extra_tools/
 src/decoder/doc_benchmark
 src/decoder/results
+src/decoder/doc_benchmark
 src/train_extratrees.py
 src/analysis/__init__.py
 src/analysis/ntbk.ipynb

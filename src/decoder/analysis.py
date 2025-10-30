@@ -7,6 +7,8 @@ import os
 import mne
 import argparse
 import pandas as pd
+from scipy.stats import trim_mean
+
 
 
 # Set consistent plotting parameters
@@ -76,7 +78,7 @@ class PeakDetector:
         return found_paths
 
     
-    def plot_mean_epochs_sensors_mne(self, paths: list, peak_data: dict, plot_std: bool = False) -> dict:
+    def plot_mean_epochs_sensors_mne(self, paths: list, peak_data: dict, plot_std: bool = False, metric: str = 'mean') -> dict:
         res = {}
         
         for path in paths:
@@ -114,11 +116,24 @@ class PeakDetector:
                 print(f"Shape: {epochs_data.shape}")
                 
                 # Calculate mean across epochs and sensors
-                mean_timeseries = np.mean(epochs_data, axis=(0, 1))  # Mean across epochs and sensors
-                
+                if metric == 'mean':
+                    # Calculate mean and std across epochs and sensors
+                    mean_timeseries = np.mean(epochs_data, axis=(0, 1))  # Mean across epochs and sensors
+
+                elif metric == 'trim_mean':
+                    #trim_mean 80
+                    mean_timeseries = trim_mean(epochs_data, 0.1, axis = 0)
+                    print('shape', mean_timeseries.shape)
+                    mean_timeseries = trim_mean(mean_timeseries, 0.1, axis = 0)
+                elif metric == 'median':
+                    mean_timeseries = np.median(epochs_data, axis = (0,1))
+                else:
+                    print('Did not define a correct metric')    
+
                 # Calculate std across epochs and sensors (point by point through time)
                 std_timeseries = np.std(epochs_data, axis=(0, 1))  # Std across epochs and sensors
-                print(f"Mean shape: {mean_timeseries.shape}, Std shape: {std_timeseries.shape}")
+
+                print(f"Mean/Median/Trim_Mean shape: {mean_timeseries.shape}, Std shape: {std_timeseries.shape}")
                 
                 # Create time axis
                 time_axis = np.linspace(-200, 1340, mean_timeseries.shape[0])
@@ -153,7 +168,7 @@ class PeakDetector:
                                         mean_timeseries + std_timeseries,
                                         alpha=0.2, color=color, label=f'{label} ±std')
             
-            ax1.set_title(f'Mean Epochs: {sub_info} {sess_info}', fontsize=12, fontweight='bold')
+            ax1.set_title(f'{metric} Epochs: {sub_info} {sess_info}', fontsize=12, fontweight='bold')
             ax1.set_xlabel('Time (ms)')
             ax1.set_ylabel('Amplitude')
             ax1.legend(loc='best', fontsize='small')
@@ -184,7 +199,7 @@ class PeakDetector:
 
         return res
 
-    def plot_dual_yaxis_combined(self, paths: list, peak_data: dict, plot_std: bool = False) -> dict:
+    def plot_dual_yaxis_combined(self, paths: list, peak_data: dict, plot_std: bool = False, metric: str = 'mean') -> dict:
         """Create a dual y-axis plot combining mean epochs and peak detection in a single subplot.
         
         This plot combines the two subplots from combined_analysis into one:
@@ -234,12 +249,23 @@ class PeakDetector:
                 # Get raw data
                 epochs_data = epochs.get_data()
                 
-                # Calculate mean across epochs and sensors
-                mean_timeseries = np.mean(epochs_data, axis=(0, 1))  # Mean across epochs and sensors
-                
-                # Calculate std across epochs and sensors
+                if metric == 'mean':
+                    # Calculate mean and std across epochs and sensors
+                    mean_timeseries = np.mean(epochs_data, axis=(0, 1))  # Mean across epochs and sensors
+
+                elif metric == 'trim_mean':
+                    #trim_mean 80
+                    mean_timeseries = trim_mean(epochs_data, 0.1, axis = 0)
+                    print('shape', mean_timeseries.shape)
+                    mean_timeseries = trim_mean(mean_timeseries, 0.1, axis = 0)
+
+                elif metric == 'median':
+                    mean_timeseries = np.median(epochs_data, axis = (0,1))
+                else:
+                    print('Did not define a correct metric')
+
                 std_timeseries = np.std(epochs_data, axis=(0, 1))
-                
+
                 # Create time axis in seconds (matching peak detection scale)
                 time_axis = np.linspace(-0.2, 1.34, mean_timeseries.shape[0])
                 
@@ -275,7 +301,12 @@ class PeakDetector:
             
             # Configure left y-axis
             ax1.set_xlabel('Time (s)', fontsize=12)
-            ax1.set_ylabel('Mean across Epochs and Sensors', fontsize=12, color='black')
+            if metric == 'trim_mean':
+                ax1.set_ylabel('Trim mean across Epochs and Sensors', fontsize=12, color='black')
+            elif metric == 'median':
+                ax1.set_ylabel('Median across Epochs and Sensors', fontsize=12, color='black')
+            elif metric == 'mean':
+                ax1.set_ylabel('Mean across Epochs and Sensors', fontsize=12, color='black')
             ax1.tick_params(axis='y', labelcolor='black')
             ax1.grid(True, alpha=0.3)
             
