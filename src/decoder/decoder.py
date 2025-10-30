@@ -49,8 +49,8 @@ def parse_arguments():
     parser.add_argument(
         "--main_path", 
         type=str, 
-        help="Main path containing subject directories (e.g., /data/eeg_study)",
-        default="/Users/trinidad.borrell/Documents/Work/PhD/data/TOTEM/zero_shot_data/fifdata/fifdata"
+        required=True,
+        help="Main path containing subject directories (e.g., /data/eeg_study)"
     )
     parser.add_argument(
         "--subjects", 
@@ -718,11 +718,15 @@ def aggregate_all_results(output_dir, patient_labels_path=None):
         
         # Point-by-point statistics across subjects/sessions
         all_timeseries = np.array(aggregated['overall']['all_mean_scores_time'])  # (n_subjects, n_timepoints)
-        print('--------------- All timeseries shape: ', all_timeseries.shape)
-        #save aggregated['overall']['all_mean_scores_time'] to a numpy file
-        np.save(f'/data/project/eeg_foundation/src/doc_benchmark/results/DECODER/all_auc_timeseries/all_mean_scores_time.npy', all_timeseries)
-        np.save(f'/data/project/eeg_foundation/src/doc_benchmark/results/DECODER/all_auc_timeseries/keys_VS.npy', np.array(keys_VS))
-        np.save(f'/data/project/eeg_foundation/src/doc_benchmark/results/DECODER/all_auc_timeseries/keys_MCS.npy', np.array(keys_MCS))
+        print(f'All timeseries shape: {all_timeseries.shape}')
+        
+        # Save timeseries data to output directory
+        timeseries_dir = output_path / "all_auc_timeseries"
+        timeseries_dir.mkdir(exist_ok=True)
+        np.save(timeseries_dir / 'all_mean_scores_time.npy', all_timeseries)
+        np.save(timeseries_dir / 'keys_VS.npy', np.array(keys_VS))
+        np.save(timeseries_dir / 'keys_MCS.npy', np.array(keys_MCS))
+        
         aggregated['overall']['mean_scores_time'] = np.mean(all_timeseries, axis=0)  # (n_timepoints,)
         # Calculate std per timepoint (axis=0 gives std across subjects at each time)
         aggregated['overall']['std_scores_time'] = np.std(aggregated['overall']['all_mean_scores_time'], axis=0)
@@ -731,14 +735,14 @@ def aggregate_all_results(output_dir, patient_labels_path=None):
         # Calculate statistics for VS and MCS subgroups
         if aggregated['overall']['all_mean_scores_time_VS']:
             all_timeseries_VS = np.array(aggregated['overall']['all_mean_scores_time_VS'])
-            print(f'--------------- VS timeseries shape: {all_timeseries_VS.shape}')
+            print(f'VS timeseries shape: {all_timeseries_VS.shape}')
             aggregated['overall']['mean_scores_time_VS'] = np.mean(all_timeseries_VS, axis=0)
             aggregated['overall']['std_scores_time_VS'] = np.std(aggregated['overall']['all_mean_scores_time_VS'], axis=0)
             aggregated['overall']['n_subjects_VS'] = len(all_timeseries_VS)
         
         if aggregated['overall']['all_mean_scores_time_MCS']:
             all_timeseries_MCS = np.array(aggregated['overall']['all_mean_scores_time_MCS'])
-            print(f'--------------- MCS timeseries shape: {all_timeseries_MCS.shape}')
+            print(f'MCS timeseries shape: {all_timeseries_MCS.shape}')
             aggregated['overall']['mean_scores_time_MCS'] = np.mean(all_timeseries_MCS, axis=0)
             aggregated['overall']['std_scores_time_MCS'] = np.std(aggregated['overall']['all_mean_scores_time_MCS'], axis=0)
             aggregated['overall']['n_subjects_MCS'] = len(all_timeseries_MCS)
@@ -775,9 +779,13 @@ def aggregate_all_results(output_dir, patient_labels_path=None):
                         aggregated['trial_types'][trial_type]['all_mean_scores_time_MCS'].append(
                             results['trial_types'][trial_type]['mean_scores_time']
                         )
-                
-                #save aggregated['trial_types'][trial_type]['all_mean_scores_time'] to a numpy file
-                np.save(f'/data/project/eeg_foundation/src/doc_benchmark/results/DECODER/all_auc_timeseries/all_mean_scores_time_{trial_type}.npy', aggregated['trial_types'][trial_type]['all_mean_scores_time'])
+        
+        # Save trial type timeseries data
+        if aggregated['trial_types'][trial_type]['all_mean_scores_time']:
+            timeseries_dir = output_path / "all_auc_timeseries"
+            timeseries_dir.mkdir(exist_ok=True)
+            np.save(timeseries_dir / f'all_mean_scores_time_{trial_type}.npy', 
+                   aggregated['trial_types'][trial_type]['all_mean_scores_time'])
         
         # Calculate statistics for this trial type
         if aggregated['trial_types'][trial_type]['all_mean_aucs']:
@@ -886,7 +894,6 @@ def aggregate_all_results(output_dir, patient_labels_path=None):
             for i, (subject_id, session_id) in enumerate(subjects_sessions):
                 key = f"{subject_id}_{session_id}"
                 state = subject_state_map.get(key, 'UNKNOWN')
-                print()
                 
                 if state not in type_results:
                     type_results[state] = []
@@ -1131,28 +1138,26 @@ def create_aggregated_plots(aggregated_results, times, plots_dir):
                        alpha=0.3, color='blue', label='$\sigma$')
         
         # Reference lines
-       # ax.axhline(0.5, color="k", linestyle="--", label="Chance", alpha=0.7)
         add_stimulus_lines(ax, times)
     
-    # Formatting
-    ax.set_xlabel("Time (s)", fontsize=20)
-    ax.set_ylabel("AUC", fontsize=20)
-    #ax.set_title("Aggregated Overall Classification: Original vs Reconstructed EEG", fontsize=22)
-    ax.legend(fontsize=20)
-    ax.grid(True, alpha=0.3)
-    ax.set_ylim([0.4, 1.0])
+        # Formatting
+        ax.set_xlabel("Time (s)", fontsize=20)
+        ax.set_ylabel("AUC", fontsize=20)
+        ax.legend(fontsize=20)
+        ax.grid(True, alpha=0.3)
+        ax.set_ylim([0.4, 1.0])
     
-    # Add peak info
-    peak_idx = np.argmax(mean_scores)
-    peak_auc = mean_scores[peak_idx]
-    peak_time = times[peak_idx]
-    ax.text(0.02, 0.98, f'Peak: AUC={peak_auc:.3f} at t={peak_time:.3f}s', 
-            transform=ax.transAxes, fontsize=20, verticalalignment='top',
-            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
-    
-    plt.tight_layout()
-    plt.savefig(plots_dir / "aggregated_overall_classification.png", dpi=300, bbox_inches='tight')
-    plt.close()
+        # Add peak info
+        peak_idx = np.argmax(mean_scores)
+        peak_auc = mean_scores[peak_idx]
+        peak_time = times[peak_idx]
+        ax.text(0.02, 0.98, f'Peak: AUC={peak_auc:.3f} at t={peak_time:.3f}s', 
+                transform=ax.transAxes, fontsize=20, verticalalignment='top',
+                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+        
+        plt.tight_layout()
+        plt.savefig(plots_dir / "aggregated_overall_classification.png", dpi=300, bbox_inches='tight')
+        plt.close()
     
     # Overall classification plot - Small version (no legend, larger labels)
     fig, ax = plt.subplots(1, 1, figsize=(8, 4))
