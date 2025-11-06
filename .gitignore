@@ -14,6 +14,7 @@ src/analysis/ntbk.ipynb
 src/decoder/res
 src/model/multiple_seeds_analysis.py
 src/model/seed_differences_analysis.py
+src/analysis/results
 
 .ruff_cache/
 .vscode/
