@@ -10,14 +10,14 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
-import json
+import random
 import argparse
-from datetime import datetime
 from typing import List, Tuple, Dict
 from pathlib import Path
 import mne
 import warnings
-from scipy.stats import chi2
+from scipy.stats import chi2, pearsonr
+from sklearn.feature_selection import mutual_info_regression
 warnings.filterwarnings('ignore')
 
 COLOR = "black"
@@ -153,7 +153,9 @@ class QualitativeAnalysis:
             raise ValueError("No subjects/sessions found in the specified directory")
         
         # Select subjects to analyze (limit to num_subjects)
-        selected = subjects_sessions[:num_subjects]
+        # selected = subjects_sessions[:num_subjects]
+        selected = random.sample(subjects_sessions, num_subjects)
+
         print(f"\nAnalyzing {len(selected)} subject-session(s):")
         
         # Load and analyze data for each subject-session
@@ -253,22 +255,22 @@ class QualitativeAnalysis:
         
         sns.heatmap(orig_time_epoch_mean, ax=axes[0, 0], cmap='RdBu_r', center=0)
         axes[0, 0].set_title(f'Original Mean (Time × Epochs) - sub-{subject_id}_ses-{session}')
-        axes[0, 0].set_xlabel('Time (samples)')
+        axes[0, 0].set_xlabel('Time')
         axes[0, 0].set_ylabel('Epochs')
         
         sns.heatmap(orig_time_epoch_std, ax=axes[0, 1], cmap='viridis')
         axes[0, 1].set_title(f'Original Std (Time × Epochs) - sub-{subject_id}_ses-{session}')
-        axes[0, 1].set_xlabel('Time (samples)')
+        axes[0, 1].set_xlabel('Time')
         axes[0, 1].set_ylabel('Epochs')
         
         sns.heatmap(recon_time_epoch_mean, ax=axes[1, 0], cmap='RdBu_r', center=0)
         axes[1, 0].set_title(f'Reconstructed Mean (Time × Epochs) - sub-{subject_id}_ses-{session}')
-        axes[1, 0].set_xlabel('Time (samples)')
+        axes[1, 0].set_xlabel('Time')
         axes[1, 0].set_ylabel('Epochs')
         
         sns.heatmap(recon_time_epoch_std, ax=axes[1, 1], cmap='viridis')
         axes[1, 1].set_title(f'Reconstructed Std (Time × Epochs) - sub-{subject_id}_ses-{session}')
-        axes[1, 1].set_xlabel('Time (samples)')
+        axes[1, 1].set_xlabel('Time')
         axes[1, 1].set_ylabel('Epochs')
         
         plt.tight_layout()
@@ -288,22 +290,22 @@ class QualitativeAnalysis:
         
         sns.heatmap(orig_time_channel_mean, ax=axes[0, 0], cmap='RdBu_r', center=0)
         axes[0, 0].set_title(f'Original Mean (Time × Channels) - sub-{subject_id}_ses-{session}')
-        axes[0, 0].set_xlabel('Time (samples)')
+        axes[0, 0].set_xlabel('Time')
         axes[0, 0].set_ylabel('Channels')
         
         sns.heatmap(orig_time_channel_std, ax=axes[0, 1], cmap='viridis')
         axes[0, 1].set_title(f'Original Std (Time × Channels) - sub-{subject_id}_ses-{session}')
-        axes[0, 1].set_xlabel('Time (samples)')
+        axes[0, 1].set_xlabel('Time')
         axes[0, 1].set_ylabel('Channels')
         
         sns.heatmap(recon_time_channel_mean, ax=axes[1, 0], cmap='RdBu_r', center=0)
         axes[1, 0].set_title(f'Reconstructed Mean (Time × Channels) - sub-{subject_id}_ses-{session}')
-        axes[1, 0].set_xlabel('Time (samples)')
+        axes[1, 0].set_xlabel('Time')
         axes[1, 0].set_ylabel('Channels')
         
         sns.heatmap(recon_time_channel_std, ax=axes[1, 1], cmap='viridis')
         axes[1, 1].set_title(f'Reconstructed Std (Time × Channels) - sub-{subject_id}_ses-{session}')
-        axes[1, 1].set_xlabel('Time (samples)')
+        axes[1, 1].set_xlabel('Time')
         axes[1, 1].set_ylabel('Channels')
         
         plt.tight_layout()
@@ -311,11 +313,104 @@ class QualitativeAnalysis:
         plt.savefig(output_file, dpi=150, bbox_inches='tight')
         plt.close()
         print(f"  Saved time×channels heatmaps to: {output_file}")
+        
+        # Plot 3: Time vs Channels with shared colormaps per column
+        fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+        
+        # Compute shared colormap limits for mean column
+        mean_vmin = min(orig_time_channel_mean.min(), recon_time_channel_mean.min())
+        mean_vmax = max(orig_time_channel_mean.max(), recon_time_channel_mean.max())
+        
+        # Compute shared colormap limits for std column
+        std_vmin = min(orig_time_channel_std.min(), recon_time_channel_std.min())
+        std_vmax = max(orig_time_channel_std.max(), recon_time_channel_std.max())
+        
+        sns.heatmap(orig_time_channel_mean, ax=axes[0, 0], cmap='RdBu_r', 
+                    center=0, vmin=mean_vmin, vmax=mean_vmax)
+        axes[0, 0].set_title(f'Original Mean (Time × Channels) - sub-{subject_id}_ses-{session}')
+        axes[0, 0].set_xlabel('Time')
+        axes[0, 0].set_ylabel('Channels')
+        
+        sns.heatmap(orig_time_channel_std, ax=axes[0, 1], cmap='viridis',
+                    vmin=std_vmin, vmax=std_vmax)
+        axes[0, 1].set_title(f'Original Std (Time × Channels) - sub-{subject_id}_ses-{session}')
+        axes[0, 1].set_xlabel('Time')
+        axes[0, 1].set_ylabel('Channels')
+        
+        sns.heatmap(recon_time_channel_mean, ax=axes[1, 0], cmap='RdBu_r', 
+                    center=0, vmin=mean_vmin, vmax=mean_vmax)
+        axes[1, 0].set_title(f'Reconstructed Mean (Time × Channels) - sub-{subject_id}_ses-{session}')
+        axes[1, 0].set_xlabel('Time')
+        axes[1, 0].set_ylabel('Channels')
+        
+        sns.heatmap(recon_time_channel_std, ax=axes[1, 1], cmap='viridis',
+                    vmin=std_vmin, vmax=std_vmax)
+        axes[1, 1].set_title(f'Reconstructed Std (Time × Channels) - sub-{subject_id}_ses-{session}')
+        axes[1, 1].set_xlabel('Time')
+        axes[1, 1].set_ylabel('Channels')
+        
+        plt.tight_layout()
+        output_file = op.join(self.output_dir, f'sub-{subject_id}', f'time_channels_shared_cmap_sub-{subject_id}_ses-{session}.png')
+        plt.savefig(output_file, dpi=150, bbox_inches='tight')
+        plt.close()
+        print(f"  Saved time×channels heatmaps (shared colormap) to: {output_file}")
+        
+        # Plot 4: Correlation and Mutual Information over time
+        # Compute mean across channels for each time point
+        # orig_time_channel_mean and recon_time_channel_mean are already (channels, times)
+        # We need mean across channels: (times,)
+        orig_mean_across_channels = np.mean(orig_time_channel_mean, axis=0)  # Shape: (times,)
+        recon_mean_across_channels = np.mean(recon_time_channel_mean, axis=0)  # Shape: (times,)
+        
+        # Compute Pearson correlation for each time point
+        correlations = []
+        for t in range(len(times)):
+            # Get all channel values at time t across epochs
+            orig_vals = orig_data[:, :, t].flatten()  # All channel values at time t
+            recon_vals = recon_data[:, :, t].flatten()
+            corr, _ = pearsonr(orig_vals, recon_vals)
+            correlations.append(corr)
+        
+        correlations = np.array(correlations)
+        
+        # Compute Mutual Information for each time point
+        mutual_info = []
+        for t in range(len(times)):
+            orig_vals = orig_data[:, :, t].flatten().reshape(-1, 1)
+            recon_vals = recon_data[:, :, t].flatten()
+            mi = mutual_info_regression(orig_vals, recon_vals, random_state=42)[0]
+            mutual_info.append(mi)
+        
+        mutual_info = np.array(mutual_info)
+        
+        # Create plot with two subplots
+        fig, axes = plt.subplots(2, 1, figsize=(14, 10))
+        
+        # Subplot 1: Pearson Correlation over time
+        axes[0].plot(times, correlations, linewidth=2, color='steelblue')
+        axes[0].set_xlabel('Time (s)')
+        axes[0].set_ylabel('Pearson Correlation')
+        axes[0].set_title(f'Pearson Correlation between Original and Reconstructed - sub-{subject_id}_ses-{session}')
+        axes[0].grid(True, alpha=0.3)
+        axes[0].set_ylim([0, 1])
+        
+        # Subplot 2: Mutual Information over time
+        axes[1].plot(times, mutual_info, linewidth=2, color='darkorange')
+        axes[1].set_xlabel('Time (s)')
+        axes[1].set_ylabel('Mutual Information')
+        axes[1].set_title(f'Mutual Information between Original and Reconstructed - sub-{subject_id}_ses-{session}')
+        axes[1].grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        output_file = op.join(self.output_dir, f'sub-{subject_id}', f'correlation_mi_sub-{subject_id}_ses-{session}.png')
+        plt.savefig(output_file, dpi=150, bbox_inches='tight')
+        plt.close()
+        print(f"  Saved correlation and MI plots to: {output_file}")
 
     def time_frequency_decomposition(self, original_epochs: mne.Epochs, recon_epochs: mne.Epochs,
                                      subject_id: str, session: str):
         """
-        Perform time-frequency decomposition on the data.
+        Perform time-frequency decomposition on the data using Welch Method.
         
         Args:
             original_epochs: Original epochs data
@@ -326,36 +421,41 @@ class QualitativeAnalysis:
         print("  Computing time-frequency decomposition...")
         
         # Define frequencies of interest (e.g., 1-40 Hz)
-        freqs = np.arange(1, 41, 1)
+        freqs = np.arange(0.5, 45, 1)
         n_cycles = freqs / 2.0  # Different number of cycles per frequency
         
         # Compute power for a subset of channels (to save time)
         # Pick first channel for demonstration
-        picks = [0]
-        
+                
         # Compute power for original epochs using new API
-        orig_power = original_epochs.compute_tfr(
-            method='morlet', freqs=freqs, n_cycles=n_cycles, 
-            picks=picks, return_itc=False, average=True, verbose=False
-        )
+        orig_power = original_epochs.compute_psd(method='welch', fmin = 0.4, fmax = 45)
         
         # Compute power for reconstructed epochs using new API
-        recon_power = recon_epochs.compute_tfr(
-            method='morlet', freqs=freqs, n_cycles=n_cycles,
-            picks=picks, return_itc=False, average=True, verbose=False
-        )
+        recon_power = recon_epochs.compute_psd(method='welch', fmin = 0.4, fmax = 45)
         
         # Plot time-frequency representations
         fig, axes = plt.subplots(1, 2, figsize=(14, 5))
         
-        orig_power.plot(picks=0, axes=axes[0], show=False, colorbar=True)
-        axes[0].set_title(f'Original TFR - sub-{subject_id}_ses-{session}')
+        orig_power.plot(axes=axes[0], show=False)
+        axes[0].set_title(f'Original PSD (Welch) - sub-{subject_id}_ses-{session}')
         
-        recon_power.plot(picks=0, axes=axes[1], show=False, colorbar=True)
-        axes[1].set_title(f'Reconstructed TFR - sub-{subject_id}_ses-{session}')
+        recon_power.plot(axes=axes[1], show=False)
+        axes[1].set_title(f'Reconstructed PSD (Welch) - sub-{subject_id}_ses-{session}')
         
+        # Get y-axis limits from both subplots and set them to be the same
+        ylim0 = axes[0].get_ylim()
+        ylim1 = axes[1].get_ylim()
+        
+        # Compute shared y-axis limits (min of both mins, max of both maxes)
+        shared_ymin = min(ylim0[0], ylim1[0])
+        shared_ymax = max(ylim0[1], ylim1[1])
+        
+        # Apply shared limits to both subplots
+        axes[0].set_ylim([shared_ymin, shared_ymax])
+        axes[1].set_ylim([shared_ymin, shared_ymax])
+
         plt.tight_layout()
-        output_file = op.join(self.output_dir,f'sub-{subject_id}', f'tfr_sub-{subject_id}_ses-{session}.png')
+        output_file = op.join(self.output_dir,f'sub-{subject_id}', f'psd_sub-{subject_id}_ses-{session}.png')
         plt.savefig(output_file, dpi=150, bbox_inches='tight')
         plt.close()
         print(f"  Saved TFR plots to: {output_file}")
