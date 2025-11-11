@@ -133,13 +133,14 @@ class QualitativeAnalysis:
         self.output_dir = output_dir
         os.makedirs(output_dir, exist_ok=True)
         
-    def run_analysis(self, fif_dir: str, num_subjects: int = 6):
+    def run_analysis(self, fif_dir: str, num_subjects: int = 6, only_correlation_grid: bool = False):
         """
         Run the complete qualitative analysis.
         
         Args:
             fif_dir: Directory containing FIF data
             num_subjects: Number of subjects to analyze
+            only_correlation_grid: If True, only generate the 3x3 correlation heatmaps grid
         """
         print(f"Starting qualitative analysis on {num_subjects} subjects...")
         print(f"Data directory: {fif_dir}")
@@ -151,6 +152,16 @@ class QualitativeAnalysis:
         
         if len(subjects_sessions) == 0:
             raise ValueError("No subjects/sessions found in the specified directory")
+        
+        # If only generating correlation grid, skip individual analyses
+        if only_correlation_grid:
+            print("\n--- Generating correlation heatmaps grid only ---")
+            try:
+                self.correlation_heatmaps_grid(fif_dir)
+            except Exception as e:
+                print(f"  Error generating correlation heatmaps grid: {e}")
+            print("\nQualitative analysis complete!")
+            return
         
         # Select subjects to analyze (limit to num_subjects)
         # selected = subjects_sessions[:num_subjects]
@@ -178,6 +189,7 @@ class QualitativeAnalysis:
                 # Run analyses
                 self.first_second_momentum(original_epochs, recon_epochs, subject_id, session)
                 self.time_frequency_decomposition(original_epochs, recon_epochs, subject_id, session)
+                self.pixel_corr(original_epochs, recon_epochs, subject_id, session)
                 
             except FileNotFoundError as e:
                 print(f"  Warning: {e}")
@@ -185,6 +197,13 @@ class QualitativeAnalysis:
             except Exception as e:
                 print(f"  Error processing subject {subject_id}, session {session}: {e}")
                 continue
+        
+        # Generate 3x3 correlation heatmaps grid for 9 random subjects
+        print("\n--- Generating correlation heatmaps grid ---")
+        try:
+            self.correlation_heatmaps_grid(fif_dir)
+        except Exception as e:
+            print(f"  Error generating correlation heatmaps grid: {e}")
         
         print("\nQualitative analysis complete!")
     
@@ -458,8 +477,122 @@ class QualitativeAnalysis:
         output_file = op.join(self.output_dir,f'sub-{subject_id}', f'psd_sub-{subject_id}_ses-{session}.png')
         plt.savefig(output_file, dpi=150, bbox_inches='tight')
         plt.close()
-        print(f"  Saved TFR plots to: {output_file}")
+        print(f"  Saved PSD plots to: {output_file}")
+    
+    def pixel_corr(self, original_epochs: mne.Epochs, recon_epochs: mne.Epochs,
+                              subject_id: str, session: str):
+        
+        orig_data = original_epochs.get_data()
+        recon_data = recon_epochs.get_data()
+        
+        correlations = np.zeros((orig_data.shape[1], orig_data.shape[2]))
 
+        for i in range(orig_data.shape[1]):
+            for j in range(orig_data.shape[2]):
+                correlations[i, j] = np.corrcoef(orig_data[:, i, j], recon_data[:, i, j])[0, 1]
+
+        fig, axes = plt.subplots(1, 1, figsize=(14, 12))
+        
+        sns.heatmap(correlations.T, ax=axes[0, 0], cmap='RdBu_r', center=0)
+        axes[0, 0].set_title(f'Correlation across epochs - sub-{subject_id}_ses-{session}')
+        axes[0, 0].set_xlabel('Times')
+        axes[0, 0].set_ylabel('Channels')
+
+        plt.tight_layout()
+        output_file = op.join(self.output_dir,f'sub-{subject_id}', f'corr_sub-{subject_id}_ses-{session}.png')
+        plt.savefig(output_file, dpi=150, bbox_inches='tight')
+        plt.close()
+        print(f"  Saved correlations plots to: {output_file}")
+    
+    def correlation_heatmaps_grid(self, fif_dir: str):
+        """
+        Pick 9 random subjects, compute Pearson correlation between original and
+        reconstructed signals for each epoch and channel (concatenating time dimension),
+        and plot the results as 9 heatmaps in a 3x3 grid.
+        
+        Args:
+            fif_dir: Directory containing FIF data
+        """
+        print("Computing correlation heatmaps for 9 random subjects...")
+        
+        # Find all available subjects and sessions
+        subjects_sessions = find_subjects_and_sessions(fif_dir)
+        
+        if len(subjects_sessions) < 9:
+            print(f"Warning: Only {len(subjects_sessions)} subject-sessions found, using all available.")
+            selected = subjects_sessions
+        else:
+            # Randomly select 9 subjects
+            selected = random.sample(subjects_sessions, 9)
+        
+        # Create 3x3 subplot grid
+        fig, axes = plt.subplots(3, 3, figsize=(18, 18))
+        axes = axes.flatten()
+        
+        # Compute correlation for each selected subject
+        for idx, item in enumerate(selected):
+            subject_id = item['subject_id']
+            session = item['session']
+            session_path = item['path']
+            
+            print(f"  Processing subject {idx + 1}/9: sub-{subject_id}_ses-{session}")
+            
+            try:
+                # Load both original and reconstructed epochs
+                original_epochs, recon_epochs = load_subject_session_data(
+                    subject_id, session, session_path
+                )
+                
+                # Get data arrays (epochs x channels x times)
+                orig_data = original_epochs.get_data()
+                recon_data = recon_epochs.get_data()
+                
+                n_epochs = orig_data.shape[0]
+                n_channels = orig_data.shape[1]
+                n_times = orig_data.shape[2]
+                
+                # Compute correlation for each (channel, time) pair across epochs
+                correlations = np.zeros((n_channels, n_times))
+                
+                for channel_idx in range(n_channels):
+                    for time_idx in range(n_times):
+                        # Get all epoch values for this channel and time point
+                        orig_epochs_values = orig_data[:, channel_idx, time_idx]
+                        recon_epochs_values = recon_data[:, channel_idx, time_idx]
+                        
+                        # Compute Pearson correlation across epochs
+                        corr, _ = pearsonr(orig_epochs_values, recon_epochs_values)
+                        correlations[channel_idx, time_idx] = corr
+                
+                # Plot heatmap in the grid
+                sns.heatmap(correlations, ax=axes[idx], cmap='RdBu_r', 
+                           center=0, vmin=-1, vmax=1, cbar_kws={'label': 'Correlation'})
+                axes[idx].set_title(f'sub-{subject_id}_ses-{session}')
+                axes[idx].set_xlabel('Time')
+                axes[idx].set_ylabel('Channels')
+                
+            except Exception as e:
+                print(f"  Error processing subject {subject_id}, session {session}: {e}")
+                # Plot empty heatmap with error message
+                axes[idx].text(0.5, 0.5, f'Error loading\nsub-{subject_id}_ses-{session}',
+                             ha='center', va='center', transform=axes[idx].transAxes)
+                axes[idx].set_xticks([])
+                axes[idx].set_yticks([])
+        
+        # If fewer than 9 subjects, hide extra subplots
+        for idx in range(len(selected), 9):
+            axes[idx].axis('off')
+        
+        plt.suptitle('Pearson Correlation between Original and Reconstructed Signals\n(Epoch × Channel)', 
+                    fontsize=20, y=0.995)
+        plt.tight_layout(rect=[0, 0, 1, 0.99])
+        
+        # Save the figure
+        output_file = op.join(self.output_dir, 'correlation_heatmaps_grid_9subjects.png')
+        plt.savefig(output_file, dpi=150, bbox_inches='tight')
+        plt.close()
+        
+        print(f"Saved correlation heatmaps grid to: {output_file}")
 
 def main():
     parser = argparse.ArgumentParser(description='Qualitative Analysis of EEG Data')
@@ -469,6 +602,8 @@ def main():
                         help='Number of subjects to analyze (default: 6)')
     parser.add_argument('--output-dir', default='./results/qualitative_analysis/',
                         help='Directory to save analysis results')
+    parser.add_argument('--only-correlation-grid', action='store_true',
+                        help='Only generate the 3x3 correlation heatmaps grid (skips other analyses)')
 
     args = parser.parse_args()
 
@@ -477,7 +612,8 @@ def main():
     
     # Initialize and run analysis
     analysis = QualitativeAnalysis(output_dir=args.output_dir)
-    analysis.run_analysis(fif_dir=args.fif_dir, num_subjects=args.num_subjects)
+    analysis.run_analysis(fif_dir=args.fif_dir, num_subjects=args.num_subjects, 
+                         only_correlation_grid=args.only_correlation_grid)
 
 
 if __name__ == '__main__':
