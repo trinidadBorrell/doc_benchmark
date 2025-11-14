@@ -146,8 +146,6 @@ states of consciousness. Brain. doi:10.1093/brain/awy251
 
 This work was supported by [Paris Brain Institute America](https://parisbraininstitute-america.org/)’s project on Consciousness mapping.
 
-```
-
 ## Support
 
 For issues or questions:
