@@ -1,5 +1,4 @@
-Benchmark to asses the reconstruction of EEG data of DoC patients. 
-It involves three main phases: 1) markers computation, 2) statistical analysis, 3) and machine learning model training. Built on the NICE neurophysiology framework with enhanced variable electrode support.
+This repository provides a benchmark for assessing the performance of time-series foundation models in reconstructing and forecasting EEG data from patients with disorders of consciousness (DoC). The framework encompasses three main phases: (1) marker computation, (2) statistical analysis, and (3) machine learning model training. It is built on the NICE neurophysiology framework with enhanced support for variable electrode configurations.
 
 ## 🎯 General Aim
 
@@ -142,6 +141,11 @@ Faugeras F., Annen J., Cassol H., Gosseries O., Fernandez-Slezak D.,
 Laureys S., Naccache L., Dehaene S. and Sitt J.D. (2018).
 Robust EEG-based cross-site and cross-protocol classification of
 states of consciousness. Brain. doi:10.1093/brain/awy251
+```
+## Acknowledgements
+
+This work was supported by [Paris Brain Institute America](https://parisbraininstitute-america.org/)’s project on Consciousness mapping.
+
 ```
 
 ## Support
