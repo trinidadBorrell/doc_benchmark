@@ -188,6 +188,7 @@ class QualitativeAnalysis:
                 
                 # Run analyses
                 self.first_second_momentum(original_epochs, recon_epochs, subject_id, session)
+                self.mean_of_difference(original_epochs, recon_epochs, subject_id, session)
                 self.time_frequency_decomposition(original_epochs, recon_epochs, subject_id, session)
                 self.pixel_corr(original_epochs, recon_epochs, subject_id, session)
                 
@@ -230,9 +231,14 @@ class QualitativeAnalysis:
         recon_mean = np.mean(recon_data, axis=2)
         recon_std = np.std(recon_data, axis=2)
         
-        # Create heatmaps
-        fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+        # Compute differences
+        diff_mean = recon_mean - orig_mean
+        diff_std = recon_std - orig_std
         
+        # Create heatmaps with 3 rows
+        fig, axes = plt.subplots(3, 2, figsize=(16, 18))
+        
+        # Row 1: Original
         sns.heatmap(orig_mean.T, ax=axes[0, 0], cmap='RdBu_r', center=0)
         axes[0, 0].set_title(f'Original Mean - sub-{subject_id}_ses-{session}')
         axes[0, 0].set_xlabel('Epochs')
@@ -243,6 +249,7 @@ class QualitativeAnalysis:
         axes[0, 1].set_xlabel('Epochs')
         axes[0, 1].set_ylabel('Channels')
         
+        # Row 2: Reconstructed
         sns.heatmap(recon_mean.T, ax=axes[1, 0], cmap='RdBu_r', center=0)
         axes[1, 0].set_title(f'Reconstructed Mean - sub-{subject_id}_ses-{session}')
         axes[1, 0].set_xlabel('Epochs')
@@ -252,6 +259,17 @@ class QualitativeAnalysis:
         axes[1, 1].set_title(f'Reconstructed Std - sub-{subject_id}_ses-{session}')
         axes[1, 1].set_xlabel('Epochs')
         axes[1, 1].set_ylabel('Channels')
+        
+        # Row 3: Difference (Reconstructed - Original)
+        sns.heatmap(diff_mean.T, ax=axes[2, 0], cmap='RdBu_r', center=0)
+        axes[2, 0].set_title(f'Diff of Mean (Recon - Orig) - sub-{subject_id}_ses-{session}')
+        axes[2, 0].set_xlabel('Epochs')
+        axes[2, 0].set_ylabel('Channels')
+        
+        sns.heatmap(diff_std.T, ax=axes[2, 1], cmap='RdBu_r', center=0)
+        axes[2, 1].set_title(f'Diff of Std (Recon - Orig) - sub-{subject_id}_ses-{session}')
+        axes[2, 1].set_xlabel('Epochs')
+        axes[2, 1].set_ylabel('Channels')
         
         plt.tight_layout()
         os.makedirs(os.path.join(self.output_dir, f'sub-{subject_id}'), exist_ok=True)
@@ -299,7 +317,7 @@ class QualitativeAnalysis:
         print(f"  Saved time×epochs heatmaps to: {output_file}")
         
         # Plot 2: Time vs Channels (mean across epochs)
-        fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+        fig, axes = plt.subplots(3, 2, figsize=(16, 18))
         
         # Mean and std across epochs for each channel and time point
         orig_time_channel_mean = np.mean(orig_data, axis=0)  # Shape: (channels, times)
@@ -307,6 +325,11 @@ class QualitativeAnalysis:
         recon_time_channel_mean = np.mean(recon_data, axis=0)
         recon_time_channel_std = np.std(recon_data, axis=0)
         
+        # Compute differences
+        diff_time_channel_mean = recon_time_channel_mean - orig_time_channel_mean
+        diff_time_channel_std = recon_time_channel_std - orig_time_channel_std
+        
+        # Row 1: Original
         sns.heatmap(orig_time_channel_mean, ax=axes[0, 0], cmap='RdBu_r', center=0)
         axes[0, 0].set_title(f'Original Mean (Time × Channels) - sub-{subject_id}_ses-{session}')
         axes[0, 0].set_xlabel('Time')
@@ -317,6 +340,7 @@ class QualitativeAnalysis:
         axes[0, 1].set_xlabel('Time')
         axes[0, 1].set_ylabel('Channels')
         
+        # Row 2: Reconstructed
         sns.heatmap(recon_time_channel_mean, ax=axes[1, 0], cmap='RdBu_r', center=0)
         axes[1, 0].set_title(f'Reconstructed Mean (Time × Channels) - sub-{subject_id}_ses-{session}')
         axes[1, 0].set_xlabel('Time')
@@ -327,6 +351,17 @@ class QualitativeAnalysis:
         axes[1, 1].set_xlabel('Time')
         axes[1, 1].set_ylabel('Channels')
         
+        # Row 3: Difference (Reconstructed - Original)
+        sns.heatmap(diff_time_channel_mean, ax=axes[2, 0], cmap='RdBu_r', center=0)
+        axes[2, 0].set_title(f'Diff of Mean (Recon - Orig) (Time × Channels) - sub-{subject_id}_ses-{session}')
+        axes[2, 0].set_xlabel('Time')
+        axes[2, 0].set_ylabel('Channels')
+        
+        sns.heatmap(diff_time_channel_std, ax=axes[2, 1], cmap='RdBu_r', center=0)
+        axes[2, 1].set_title(f'Diff of Std (Recon - Orig) (Time × Channels) - sub-{subject_id}_ses-{session}')
+        axes[2, 1].set_xlabel('Time')
+        axes[2, 1].set_ylabel('Channels')
+        
         plt.tight_layout()
         output_file = op.join(self.output_dir, f'sub-{subject_id}', f'time_channels_sub-{subject_id}_ses-{session}.png')
         plt.savefig(output_file, dpi=150, bbox_inches='tight')
@@ -334,7 +369,7 @@ class QualitativeAnalysis:
         print(f"  Saved time×channels heatmaps to: {output_file}")
         
         # Plot 3: Time vs Channels with shared colormaps per column
-        fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+        fig, axes = plt.subplots(3, 2, figsize=(16, 18))
         
         # Compute shared colormap limits for mean column
         mean_vmin = min(orig_time_channel_mean.min(), recon_time_channel_mean.min())
@@ -344,6 +379,7 @@ class QualitativeAnalysis:
         std_vmin = min(orig_time_channel_std.min(), recon_time_channel_std.min())
         std_vmax = max(orig_time_channel_std.max(), recon_time_channel_std.max())
         
+        # Row 1: Original
         sns.heatmap(orig_time_channel_mean, ax=axes[0, 0], cmap='RdBu_r', 
                     center=0, vmin=mean_vmin, vmax=mean_vmax)
         axes[0, 0].set_title(f'Original Mean (Time × Channels) - sub-{subject_id}_ses-{session}')
@@ -356,6 +392,7 @@ class QualitativeAnalysis:
         axes[0, 1].set_xlabel('Time')
         axes[0, 1].set_ylabel('Channels')
         
+        # Row 2: Reconstructed
         sns.heatmap(recon_time_channel_mean, ax=axes[1, 0], cmap='RdBu_r', 
                     center=0, vmin=mean_vmin, vmax=mean_vmax)
         axes[1, 0].set_title(f'Reconstructed Mean (Time × Channels) - sub-{subject_id}_ses-{session}')
@@ -367,6 +404,17 @@ class QualitativeAnalysis:
         axes[1, 1].set_title(f'Reconstructed Std (Time × Channels) - sub-{subject_id}_ses-{session}')
         axes[1, 1].set_xlabel('Time')
         axes[1, 1].set_ylabel('Channels')
+        
+        # Row 3: Difference (Reconstructed - Original)
+        sns.heatmap(diff_time_channel_mean, ax=axes[2, 0], cmap='RdBu_r', center=0)
+        axes[2, 0].set_title(f'Diff of Mean (Recon - Orig) (Time × Channels) - sub-{subject_id}_ses-{session}')
+        axes[2, 0].set_xlabel('Time')
+        axes[2, 0].set_ylabel('Channels')
+        
+        sns.heatmap(diff_time_channel_std, ax=axes[2, 1], cmap='RdBu_r', center=0)
+        axes[2, 1].set_title(f'Diff of Std (Recon - Orig) (Time × Channels) - sub-{subject_id}_ses-{session}')
+        axes[2, 1].set_xlabel('Time')
+        axes[2, 1].set_ylabel('Channels')
         
         plt.tight_layout()
         output_file = op.join(self.output_dir, f'sub-{subject_id}', f'time_channels_shared_cmap_sub-{subject_id}_ses-{session}.png')
@@ -392,39 +440,86 @@ class QualitativeAnalysis:
         
         correlations = np.array(correlations)
         
-        # Compute Mutual Information for each time point
-        mutual_info = []
-        for t in range(len(times)):
-            orig_vals = orig_data[:, :, t].flatten().reshape(-1, 1)
-            recon_vals = recon_data[:, :, t].flatten()
-            mi = mutual_info_regression(orig_vals, recon_vals, random_state=42)[0]
-            mutual_info.append(mi)
+        # # Compute Mutual Information for each time point
+        # # NOTE: Commented out due to computational cost with large datasets
+        # mutual_info = []
+        # for t in range(len(times)):
+        #     orig_vals = orig_data[:, :, t].flatten().reshape(-1, 1)
+        #     recon_vals = recon_data[:, :, t].flatten()
+        #     mi = mutual_info_regression(orig_vals, recon_vals, random_state=42)[0]
+        #     mutual_info.append(mi)
+        # 
+        # mutual_info = np.array(mutual_info)
         
-        mutual_info = np.array(mutual_info)
+        # Create plot with one subplot (only correlation)
+        fig, ax = plt.subplots(1, 1, figsize=(14, 5))
         
-        # Create plot with two subplots
-        fig, axes = plt.subplots(2, 1, figsize=(14, 10))
+        # Pearson Correlation over time
+        ax.plot(times, correlations, linewidth=2, color='steelblue')
+        ax.set_xlabel('Time (s)')
+        ax.set_ylabel('Pearson Correlation')
+        ax.set_title(f'Pearson Correlation between Original and Reconstructed - sub-{subject_id}_ses-{session}')
+        ax.grid(True, alpha=0.3)
+        ax.set_ylim([0, 1])
         
-        # Subplot 1: Pearson Correlation over time
-        axes[0].plot(times, correlations, linewidth=2, color='steelblue')
-        axes[0].set_xlabel('Time (s)')
-        axes[0].set_ylabel('Pearson Correlation')
-        axes[0].set_title(f'Pearson Correlation between Original and Reconstructed - sub-{subject_id}_ses-{session}')
-        axes[0].grid(True, alpha=0.3)
-        axes[0].set_ylim([0, 1])
-        
-        # Subplot 2: Mutual Information over time
-        axes[1].plot(times, mutual_info, linewidth=2, color='darkorange')
-        axes[1].set_xlabel('Time (s)')
-        axes[1].set_ylabel('Mutual Information')
-        axes[1].set_title(f'Mutual Information between Original and Reconstructed - sub-{subject_id}_ses-{session}')
-        axes[1].grid(True, alpha=0.3)
+        # # Subplot 2: Mutual Information over time
+        # axes[1].plot(times, mutual_info, linewidth=2, color='darkorange')
+        # axes[1].set_xlabel('Time (s)')
+        # axes[1].set_ylabel('Mutual Information')
+        # axes[1].set_title(f'Mutual Information between Original and Reconstructed - sub-{subject_id}_ses-{session}')
+        # axes[1].grid(True, alpha=0.3)
         
         plt.tight_layout()
         output_file = op.join(self.output_dir, f'sub-{subject_id}', f'correlation_mi_sub-{subject_id}_ses-{session}.png')
         plt.savefig(output_file, dpi=150, bbox_inches='tight')
         plt.close()
         print(f"  Saved correlation and MI plots to: {output_file}")
+    
+    def mean_of_difference(self, original_epochs: mne.Epochs, recon_epochs: mne.Epochs,
+                          subject_id: str, session: str):
+        """
+        Compute the mean of difference between original and reconstructed signals.
+        
+        For each subject:
+        1. Compute difference between original and reconstructed signal per timepoint and per channel
+           This gives #differences = #epochs per channel and timepoint
+        2. Compute mean across epochs per timepoint and channel
+        3. Result is a heatmap (channels x times)
+        
+        Args:
+            original_epochs: Original epochs data
+            recon_epochs: Reconstructed epochs data
+            subject_id: Subject ID
+            session: Session number
+        """
+        print("  Computing mean of difference...")
+        
+        # Get data arrays (epochs x channels x times)
+        orig_data = original_epochs.get_data()
+        recon_data = recon_epochs.get_data()
+        
+        # Compute difference per epoch, per channel, per timepoint
+        # Shape: (epochs, channels, times)
+        diff_data = recon_data - orig_data
+        
+        # Compute mean across epochs for each channel and timepoint
+        # Shape: (channels, times)
+        mean_diff = np.mean(diff_data, axis=0)
+        
+        # Create heatmap
+        fig, ax = plt.subplots(figsize=(14, 10))
+        
+        sns.heatmap(mean_diff, ax=ax, cmap='RdBu_r', center=0)
+        ax.set_title(f'Mean of Difference (Recon - Orig) across Epochs\nsub-{subject_id}_ses-{session}')
+        ax.set_xlabel('Time')
+        ax.set_ylabel('Channels')
+        
+        plt.tight_layout()
+        os.makedirs(os.path.join(self.output_dir, f'sub-{subject_id}'), exist_ok=True)
+        output_file = op.join(self.output_dir, f'sub-{subject_id}', f'mean_of_difference_sub-{subject_id}_ses-{session}.png')
+        plt.savefig(output_file, dpi=150, bbox_inches='tight')
+        plt.close()
+        print(f"  Saved mean of difference heatmap to: {output_file}")
 
     def time_frequency_decomposition(self, original_epochs: mne.Epochs, recon_epochs: mne.Epochs,
                                      subject_id: str, session: str):
