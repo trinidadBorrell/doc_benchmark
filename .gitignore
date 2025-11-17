@@ -7,7 +7,7 @@ cookbooks/cleanup_hdf5_markers.py
 src/extra_tools/
 src/decoder/doc_benchmark
 src/decoder/results
-src/decoder/doc_benchmark
+src/dummy_model_test/
 src/train_extratrees.py
 src/analysis/__init__.py
 src/analysis/ntbk.ipynb
@@ -15,6 +15,8 @@ src/decoder/res
 src/model/multiple_seeds_analysis.py
 src/model/seed_differences_analysis.py
 src/analysis/results
+src/ground_truth/
+src/markers_old/
 
 .ruff_cache/
 .vscode/
