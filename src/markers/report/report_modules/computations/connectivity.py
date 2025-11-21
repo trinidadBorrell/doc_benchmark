@@ -133,10 +133,13 @@ def _compute_per_band_connectivity(epochs, report_data, output_dir="./tmp_comput
                     break
 
             if wsmi_data is not None:
+                # Convert to numpy array (junifer data comes in correct shape)
                 wsmi_data = np.array(wsmi_data)
-                if wsmi_data.ndim == 2 and wsmi_data.shape[1] == 1:
-                    wsmi_data = wsmi_data.flatten()
-                    logger.info(f"Flattened WSMI {band_name} data to shape: {wsmi_data.shape}")
+                
+                # Squeeze leading dimension if present: (1, epochs, n_pairs) -> (epochs, n_pairs)
+                if wsmi_data.ndim == 3 and wsmi_data.shape[0] == 1:
+                    wsmi_data = wsmi_data.squeeze(0)
+                    logger.info(f"Squeezed WSMI {band_name} data to shape: {wsmi_data.shape}")
                 
                 # Reshape connectivity data from upper triangle to full matrix
                 # WSMI is stored as upper triangle (no diagonal): epochs × (ch×(ch-1)/2)
@@ -144,17 +147,14 @@ def _compute_per_band_connectivity(epochs, report_data, output_dir="./tmp_comput
                 n_channels = len(epochs.ch_names)
                 n_pairs = n_channels * (n_channels - 1) // 2
                 
-                if len(wsmi_data) == n_epochs * n_pairs:
-                    logger.info(f"Reshaping WSMI from ({len(wsmi_data)},) to ({n_epochs}, {n_pairs}) then aggregating")
-                    
-                    # Reshape to (epochs, n_pairs)
-                    wsmi_reshaped = wsmi_data.reshape(n_epochs, n_pairs)
+                if wsmi_data.ndim == 2 and wsmi_data.shape == (n_epochs, n_pairs):
+                    logger.info(f"Processing WSMI with shape ({n_epochs}, {n_pairs})")
                     
                     # Reconstruct symmetric matrices for each epoch
                     wsmi_matrices = np.zeros((n_epochs, n_channels, n_channels))
                     for epoch_idx in range(n_epochs):
                         triu_indices = np.triu_indices(n_channels, k=1)
-                        wsmi_matrices[epoch_idx][triu_indices] = wsmi_reshaped[epoch_idx]
+                        wsmi_matrices[epoch_idx][triu_indices] = wsmi_data[epoch_idx]
                         wsmi_matrices[epoch_idx] = wsmi_matrices[epoch_idx] + wsmi_matrices[epoch_idx].T
                     
                     # Aggregate: median across channels_y, then mean across epochs
@@ -165,11 +165,10 @@ def _compute_per_band_connectivity(epochs, report_data, output_dir="./tmp_comput
                     wsmi_data = wsmi_aggregated
                 else:
                     logger.warning(
-                        f"WSMI data size {len(wsmi_data)} doesn't match expected "
-                        f"epochs×pairs ({n_epochs}×{n_pairs}={n_epochs*n_pairs}). "
-                        f"Using first {n_channels} values only."
+                        f"WSMI data shape {wsmi_data.shape} doesn't match expected "
+                        f"({n_epochs}, {n_pairs}). Using first {n_channels} values."
                     )
-                    wsmi_data = wsmi_data[:n_channels]
+                    wsmi_data = wsmi_data.flatten()[:n_channels]
 
                 try:
                     wsmi_data_aligned, eeg_info = align_data_to_eeg_montage(

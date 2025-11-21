@@ -57,8 +57,13 @@ def main():
     )
     parser.add_argument(
         "--subject_id",
-        default="AA048",
-        help="Subject ID for report generation",
+        default="001",
+        help="Subject ID for report generation (e.g., '001')",
+    )
+    parser.add_argument(
+        "--session",
+        default="01",
+        help="Session number for report generation (e.g., '01')",
     )
     parser.add_argument(
         "--h5_file",
@@ -71,14 +76,19 @@ def main():
         help="Path to FIF file with epochs data",
     )
     parser.add_argument(
-        "--data_dir",
-        default="./tmp_computed_data",
-        help="Directory containing pre-computed data (pickle files)",
+        "--data_dir_original",
+        default="/data/project/eeg_foundation/src/doc_benchmark/results/new_results/MARKERS/sub-001_original",
+        help="Directory containing pre-computed data for ORIGINAL (pickle files)",
+    )
+    parser.add_argument(
+        "--data_dir_recon",
+        default="/data/project/eeg_foundation/src/doc_benchmark/results/new_results/MARKERS/sub-001_recon",
+        help="Directory containing pre-computed data for RECONSTRUCTED (pickle files)",
     )
     parser.add_argument(
         "--output_dir",
-        default="./reports",
-        help="Output directory for HTML report",
+        default=None,
+        help="Output directory for HTML report (default: auto-generated from subject/session)",
     )
     args = parser.parse_args()
 
@@ -89,18 +99,33 @@ def main():
     )
     logger = logging.getLogger(__name__)
 
-    # Check if computed data directory exists
-    data_path = Path(args.data_dir)
-    if not data_path.exists():
-        logger.error(f"❌ Computed data directory not found: {data_path}")
+    # Check if computed data directories exist
+    data_path_original = Path(args.data_dir_original)
+    data_path_recon = Path(args.data_dir_recon)
+    if not data_path_original.exists():
+        logger.error(f"❌ Original computed data directory not found: {data_path_original}")
+        logger.error("Please run compute_data.py first to generate the data.")
+        sys.exit(1)
+    if not data_path_recon.exists():
+        logger.error(f"❌ Reconstructed computed data directory not found: {data_path_recon}")
         logger.error("Please run compute_data.py first to generate the data.")
         sys.exit(1)
 
     # Generate plots from pre-computed data
     try:
-        logger.info(f"Generating report for subject {args.subject_id}")
-        logger.info(f"Loading data from: {args.data_dir}")
-        logger.info(f"Output directory: {args.output_dir}")
+        # Create output directory structure
+        if args.output_dir is None:
+            base_results_dir = Path("/data/project/eeg_foundation/src/doc_benchmark/results/new_results/MARKERS")
+            output_dir = base_results_dir / f"sub-{args.subject_id}" / f"ses-{args.session}" / "report"
+        else:
+            output_dir = Path(args.output_dir)
+        
+        output_dir.mkdir(parents=True, exist_ok=True)
+        
+        logger.info(f"Generating report for subject {args.subject_id}, session {args.session}")
+        logger.info(f"Loading ORIGINAL data from: {args.data_dir_original}")
+        logger.info(f"Loading RECONSTRUCTED data from: {args.data_dir_recon}")
+        logger.info(f"Output directory: {output_dir}")
         
         # Load data
         logger.info("="*60)
@@ -131,57 +156,58 @@ def main():
             logger.error("No epochs object found in data!")
             sys.exit(1)
 
-        # ========== PHASE 2: GENERATE ALL PLOTS ==========
+        # ========== PHASE 2: GENERATE ALL PLOTS (COMPARISON) ==========
         logger.info("="*60)
-        logger.info("PHASE 2: Generating all plots from computed data...")
-        logger.info(f"Loading data from: {data_path}")
+        logger.info("PHASE 2: Generating comparison plots from computed data...")
+        logger.info(f"Original data: {data_path_original}")
+        logger.info(f"Reconstructed data: {data_path_recon}")
         logger.info("="*60)
 
-        report = mne.Report(title=f"Task: Local-Global - subject: {args.subject_id}")
+        report = mne.Report(title=f"Task: Local-Global - subject: {args.subject_id} - COMPARISON: Original vs Reconstructed")
 
         # === PREPROCESSING PLOTS ===
         # Skip preprocessing plots if no preprocessing metadata available
         preprocessing_info = report_data.get("metadata", {}).get("preprocessing_info", {})
         if preprocessing_info:
             logger.info("Adding preprocessing plots...")
-            _add_preprocessing_plots(report, epochs, report_data)
+            _add_preprocessing_plots(report, epochs, report_data, output_dir)
             gc.collect()
         else:
             logger.info("Skipping preprocessing plots (no preprocessing metadata available)")
 
         # === DIAGNOSTIC PLOTS ===
         logger.info("Adding diagnostic plots...")
-        _add_diagnostic_plots(report, epochs, data_path)
+        _add_diagnostic_plots(report, epochs, data_path_original, data_path_recon, output_dir)
         gc.collect()
 
         # === ERP PLOTS ===
         logger.info("Adding ERP plots...")
-        _add_erp_plots(report, epochs, args.skip_clustering, data_path)
+        _add_erp_plots(report, epochs, args.skip_clustering, data_path_original, data_path_recon, output_dir)
         gc.collect()
 
         # === CNV PLOTS ===
         logger.info("Adding CNV plots...")
-        _add_cnv_plots(report, data_path)
+        _add_cnv_plots(report, data_path_original, data_path_recon, output_dir)
         gc.collect()
 
         # === SPECTRAL PLOTS ===
         logger.info("Adding spectral plots...")
-        _add_spectral_plots(report, data_path)
+        _add_spectral_plots(report, data_path_original, data_path_recon, output_dir)
         gc.collect()
 
         # === CONNECTIVITY PLOTS ===
         logger.info("Adding connectivity plots...")
-        _add_connectivity_plots(report, data_path)
+        _add_connectivity_plots(report, data_path_original, data_path_recon, output_dir)
         gc.collect()
 
         # === INFORMATION THEORY PLOTS ===
         logger.info("Adding information theory plots...")
-        _add_information_theory_plots(report, data_path)
+        _add_information_theory_plots(report, data_path_original, data_path_recon, output_dir)
         gc.collect()
 
         # === PREDICTION ANALYSIS ===
         logger.info("Adding prediction analysis...")
-        _add_prediction_plots(report, data_path)
+        _add_prediction_plots(report, data_path_original, data_path_recon, output_dir)
         gc.collect()
 
         logger.info("="*60)
@@ -189,8 +215,7 @@ def main():
         logger.info("="*60)
 
         # Save report
-        output_path = Path(args.output_dir) / f"next_icm_report_{args.subject_id}.html"
-        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path = output_dir / f"sub-{args.subject_id}_ses-{args.session}_report_comparison.html"
         report.save(str(output_path), overwrite=True)
 
         logger.info(f"✅ Next-ICM report generated: {output_path}")
@@ -207,9 +232,11 @@ def main():
         sys.exit(1)
 
 
-def _add_preprocessing_plots(report, epochs, report_data):
+def _add_preprocessing_plots(report, epochs, report_data, save_dir=None):
     """Add preprocessing plots"""
     import json
+    import pickle
+    logger = logging.getLogger(__name__)
     
     # Get preprocessing info
     metadata = report_data.get("metadata", {})
@@ -291,6 +318,22 @@ def _add_preprocessing_plots(report, epochs, report_data):
             
             fig.subplots_adjust(wspace=0, right=1)
             fig.tight_layout()
+            
+            # Save plot and data
+            if save_dir:
+                plot_name = "preprocessing_bad_channels"
+                fig.savefig(Path(save_dir) / f"{plot_name}.png", dpi=150, bbox_inches='tight')
+                # Save data
+                np.savez(
+                    Path(save_dir) / f"{plot_name}.npz",
+                    evoked_data=evoked.data,
+                    times=evoked.times,
+                    ch_names=evoked.ch_names,
+                    bad_channels=eeg_bad_channels,
+                    bad_idx=bad_idx
+                )
+                logger.info(f"   💾 Saved: {plot_name}")
+            
             report.add_figure(fig, title="Bad Channels", section="Preprocessing")
             plt.close(fig)
         except Exception as e:
@@ -332,105 +375,693 @@ def _add_preprocessing_plots(report, epochs, report_data):
     report.add_html(html, title="Preprocessing Summary", section="Preprocessing")
 
 
-def _add_diagnostic_plots(report, epochs, data_path):
-    """Add diagnostic plots"""
-    # 1. Local Global Paradigm
+def _create_side_by_side_figure(fig_left, fig_right, title_left="ORIGINAL", title_right="RECONSTRUCTED"):
+    """Create a single figure with two subfigures side-by-side"""
+    import io
+    from PIL import Image
+    
+    # Convert figures to images
+    def fig_to_img(fig):
+        buf = io.BytesIO()
+        fig.savefig(buf, format='png', bbox_inches='tight', dpi=100)
+        buf.seek(0)
+        img = Image.open(buf)
+        return img, buf
+    
+    img_left, buf_left = fig_to_img(fig_left) if fig_left else (None, None)
+    img_right, buf_right = fig_to_img(fig_right) if fig_right else (None, None)
+    
+    # Create combined figure
+    fig_combined = plt.figure(figsize=(24, 10))
+    
+    if img_left and img_right:
+        # Both exist - show side by side
+        ax1 = fig_combined.add_subplot(1, 2, 1)
+        ax2 = fig_combined.add_subplot(1, 2, 2)
+        
+        ax1.imshow(img_left)
+        ax1.axis('off')
+        ax1.set_title(title_left, fontsize=14, fontweight='bold', pad=10)
+        
+        ax2.imshow(img_right)
+        ax2.axis('off')
+        ax2.set_title(title_right, fontsize=14, fontweight='bold', pad=10)
+    elif img_left:
+        ax = fig_combined.add_subplot(1, 1, 1)
+        ax.imshow(img_left)
+        ax.axis('off')
+        ax.set_title(title_left, fontsize=14, fontweight='bold', pad=10)
+    elif img_right:
+        ax = fig_combined.add_subplot(1, 1, 1)
+        ax.imshow(img_right)
+        ax.axis('off')
+        ax.set_title(title_right, fontsize=14, fontweight='bold', pad=10)
+    
+    plt.tight_layout()
+    
+    # Clean up buffers
+    if buf_left:
+        buf_left.close()
+    if buf_right:
+        buf_right.close()
+    
+    return fig_combined
+
+
+def _create_vertical_stacked_figure(fig_top, fig_bottom, title_top="ORIGINAL", title_bottom="RECONSTRUCTED"):
+    """Create a single figure with two subfigures stacked vertically"""
+    import io
+    from PIL import Image
+    
+    # Convert figures to images
+    def fig_to_img(fig):
+        buf = io.BytesIO()
+        fig.savefig(buf, format='png', bbox_inches='tight', dpi=100)
+        buf.seek(0)
+        img = Image.open(buf)
+        return img, buf
+    
+    img_top, buf_top = fig_to_img(fig_top) if fig_top else (None, None)
+    img_bottom, buf_bottom = fig_to_img(fig_bottom) if fig_bottom else (None, None)
+    
+    # Create combined figure with vertical stacking
+    fig_combined = plt.figure(figsize=(16, 20))
+    
+    if img_top and img_bottom:
+        # Both exist - stack vertically
+        ax1 = fig_combined.add_subplot(2, 1, 1)
+        ax2 = fig_combined.add_subplot(2, 1, 2)
+        
+        ax1.imshow(img_top)
+        ax1.axis('off')
+        ax1.set_title(title_top, fontsize=14, fontweight='bold', pad=10)
+        
+        ax2.imshow(img_bottom)
+        ax2.axis('off')
+        ax2.set_title(title_bottom, fontsize=14, fontweight='bold', pad=10)
+    elif img_top:
+        ax = fig_combined.add_subplot(1, 1, 1)
+        ax.imshow(img_top)
+        ax.axis('off')
+        ax.set_title(title_top, fontsize=14, fontweight='bold', pad=10)
+    elif img_bottom:
+        ax = fig_combined.add_subplot(1, 1, 1)
+        ax.imshow(img_bottom)
+        ax.axis('off')
+        ax.set_title(title_bottom, fontsize=14, fontweight='bold', pad=10)
+    
+    plt.tight_layout()
+    
+    # Clean up buffers
+    if buf_top:
+        buf_top.close()
+    if buf_bottom:
+        buf_bottom.close()
+    
+    return fig_combined
+
+
+def _add_diagnostic_plots(report, epochs, data_path_original, data_path_recon, save_dir=None):
+    """Add diagnostic plots (side-by-side comparison)"""
+    logger = logging.getLogger(__name__)
+    # 1. Local Global Paradigm (same for both)
     fig = mne.viz.plot_events(epochs.events, epochs.info["sfreq"], event_id=epochs.event_id)
     ax = fig.get_axes()[0]
     handles, labels = ax.get_legend_handles_labels()
-    ax.legend(handles[::-1], labels[::-1], loc="center left", bbox_to_anchor=(1, 0.5))
+    ax.legend(handles[::-1], labels[::-1], loc="upper left", bbox_to_anchor=(1.02, 1), 
+             frameon=True, fontsize=9, title="Trial Types")
+    plt.tight_layout()
+    
+    # Save plot and data
+    if save_dir:
+        plot_name = "diagnostic_paradigm"
+        fig.savefig(Path(save_dir) / f"{plot_name}.png", dpi=150, bbox_inches='tight')
+        np.savez(
+            Path(save_dir) / f"{plot_name}.npz",
+            events=epochs.events,
+            event_id=list(epochs.event_id.values()),
+            event_names=list(epochs.event_id.keys()),
+            sfreq=epochs.info["sfreq"]
+        )
+        logger.info(f"   💾 Saved: {plot_name}")
+    
     report.add_figure(fig, title="Local Global Paradigm", section="Diagnostic")
     plt.close(fig)
     
-    # 2. GFP plots
-    gfp_path = Path(data_path) / "diagnostic_gfp.pkl"
-    if gfp_path.exists():
-        fig = plot_gfp(computed_data_path=gfp_path, colors=["b", "b", "r", "r"],
-                      linestyles=["-", "--", "-", "--"], fig_kwargs={"figsize": (12, 6)},
-                      sns_kwargs={"style": "darkgrid"})
-        report.add_figure(fig, title="All Blocks: Global Field Power", section="Diagnostic")
+    # 2. GFP plots (side-by-side)
+    gfp_path_original = Path(data_path_original) / "diagnostic_gfp.pkl"
+    gfp_path_recon = Path(data_path_recon) / "diagnostic_gfp.pkl"
+    
+    if gfp_path_original.exists() or gfp_path_recon.exists():
+        import pickle
+        fig, axes = plt.subplots(1, 2, figsize=(24, 6))
+        
+        # Load data to get shared y-axis limits
+        y_values = []
+        gfp_data_orig, gfp_data_recon = None, None
+        
+        if gfp_path_original.exists():
+            with open(gfp_path_original, 'rb') as f:
+                gfp_data_orig = pickle.load(f)
+                for evoked in gfp_data_orig.get('evokeds', []):
+                    gfp = np.sqrt((evoked.data ** 2).mean(axis=0)) * 1e6
+                    # Only collect valid values
+                    valid_gfp = gfp[np.isfinite(gfp)]
+                    if len(valid_gfp) > 0:
+                        y_values.extend([valid_gfp.min(), valid_gfp.max()])
+        
+        if gfp_path_recon.exists():
+            with open(gfp_path_recon, 'rb') as f:
+                gfp_data_recon = pickle.load(f)
+                for evoked in gfp_data_recon.get('evokeds', []):
+                    gfp = np.sqrt((evoked.data ** 2).mean(axis=0)) * 1e6
+                    # Only collect valid values
+                    valid_gfp = gfp[np.isfinite(gfp)]
+                    if len(valid_gfp) > 0:
+                        y_values.extend([valid_gfp.min(), valid_gfp.max()])
+        
+        # Compute shared limits only if we have valid values
+        use_shared_ylim = len(y_values) > 0
+        if use_shared_ylim:
+            y_min = min(y_values)
+            y_max = max(y_values)
+            # Add 5% margin
+            y_margin = (y_max - y_min) * 0.05
+            y_lim = [y_min - y_margin, y_max + y_margin]
+        
+        # Original (left)
+        if gfp_path_original.exists():
+            plot_gfp(computed_data_path=gfp_path_original, colors=["b", "b", "r", "r"],
+                    linestyles=["-", "--", "-", "--"], ax=axes[0],
+                    sns_kwargs={"style": "darkgrid"})
+            if use_shared_ylim:
+                axes[0].set_ylim(y_lim)
+            axes[0].set_title("ORIGINAL: Global Field Power", fontweight='bold')
+        
+        # Reconstructed (right)
+        if gfp_path_recon.exists():
+            plot_gfp(computed_data_path=gfp_path_recon, colors=["b", "b", "r", "r"],
+                    linestyles=["-", "--", "-", "--"], ax=axes[1],
+                    sns_kwargs={"style": "darkgrid"})
+            if use_shared_ylim:
+                axes[1].set_ylim(y_lim)
+            axes[1].set_title("RECONSTRUCTED: Global Field Power", fontweight='bold')
+        
+        plt.tight_layout()
+        
+        # Save plot and data
+        if save_dir:
+            plot_name = "diagnostic_gfp_comparison"
+            fig.savefig(Path(save_dir) / f"{plot_name}.png", dpi=150, bbox_inches='tight')
+            # Save data from both datasets
+            save_data = {}
+            if gfp_data_orig:
+                save_data['original_evokeds'] = [ev.data for ev in gfp_data_orig.get('evokeds', [])]
+                save_data['original_times'] = gfp_data_orig.get('evokeds', [{}])[0].times if gfp_data_orig.get('evokeds') else []
+            if gfp_data_recon:
+                save_data['reconstructed_evokeds'] = [ev.data for ev in gfp_data_recon.get('evokeds', [])]
+                save_data['reconstructed_times'] = gfp_data_recon.get('evokeds', [{}])[0].times if gfp_data_recon.get('evokeds') else []
+            np.savez(Path(save_dir) / f"{plot_name}.npz", **save_data)
+            logger.info(f"   💾 Saved: {plot_name}")
+        
+        report.add_figure(fig, title="All Blocks: Global Field Power Comparison", section="Diagnostic")
         plt.close(fig)
 
 
-def _add_cnv_plots(report, data_path):
-    """Add CNV plots"""
+def _add_cnv_plots(report, data_path_original, data_path_recon, save_dir=None):
+    """Add CNV plots (vertically stacked with matched scales)"""
+    import pickle
+    import logging
+    logger = logging.getLogger(__name__)
+    
     event_times = {0: "I", 150: "II", 300: "III", 450: "IV", 600: "V"}
-    cnv_path = Path(data_path) / "cnv_computed_data.pkl"
-    if cnv_path.exists():
-        fig_cnv = plot_cnv(computed_data_path=cnv_path, event_times=event_times, sns_kwargs={"style": "white"})
-        report.add_figure(fig_cnv, title="Contingent Negative Variation", section="CNV")
-        plt.close(fig_cnv)
+    cnv_path_original = Path(data_path_original) / "cnv_computed_data.pkl"
+    cnv_path_recon = Path(data_path_recon) / "cnv_computed_data.pkl"
+    
+    fig_orig, fig_recon = None, None
+    
+    # Load both datasets to compute shared scales
+    if cnv_path_original.exists() and cnv_path_recon.exists():
+        with open(cnv_path_original, 'rb') as f:
+            data_orig = pickle.load(f)
+        with open(cnv_path_recon, 'rb') as f:
+            data_recon = pickle.load(f)
+        
+        # Compute combined vminmax
+        vminmax_orig = data_orig.get('vminmax', None)
+        vminmax_recon = data_recon.get('vminmax', None)
+        
+        logger.info(f"📊 CNV SCALE MATCHING:")
+        logger.info(f"   Original vminmax: {vminmax_orig}")
+        logger.info(f"   Reconstructed vminmax: {vminmax_recon}")
+        
+        if vminmax_orig is not None and vminmax_recon is not None:
+            vminmax_combined = max(abs(float(vminmax_orig)), abs(float(vminmax_recon)))
+            logger.info(f"   ✓ Combined vminmax (symmetric): ±{vminmax_combined}")
+            data_orig['vminmax'] = vminmax_combined
+            data_recon['vminmax'] = vminmax_combined
+        else:
+            logger.warning(f"   ⚠️  Could not match scales - missing vminmax values")
+        
+        # Generate both plots
+        fig_orig = plot_cnv(computed_data=data_orig, event_times=event_times, 
+                           sns_kwargs={"style": "white"})
+        fig_recon = plot_cnv(computed_data=data_recon, event_times=event_times,
+                            sns_kwargs={"style": "white"})
+        
+        # Save individual plots and data if save_dir provided
+        if save_dir and fig_orig:
+            save_path = Path(save_dir) / "cnv_original.png"
+            fig_orig.savefig(save_path, dpi=150, bbox_inches='tight')
+            # Save data
+            np.savez(
+                Path(save_dir) / "cnv_original.npz",
+                evokeds=[ev.data for ev in data_orig.get('evokeds', [])],
+                times=data_orig.get('evokeds', [{}])[0].times if data_orig.get('evokeds') else [],
+                vminmax=data_orig.get('vminmax')
+            )
+            logger.info(f"   💾 Saved: cnv_original")
+        if save_dir and fig_recon:
+            save_path = Path(save_dir) / "cnv_reconstructed.png"
+            fig_recon.savefig(save_path, dpi=150, bbox_inches='tight')
+            # Save data
+            np.savez(
+                Path(save_dir) / "cnv_reconstructed.npz",
+                evokeds=[ev.data for ev in data_recon.get('evokeds', [])],
+                times=data_recon.get('evokeds', [{}])[0].times if data_recon.get('evokeds') else [],
+                vminmax=data_recon.get('vminmax')
+            )
+            logger.info(f"   💾 Saved: cnv_reconstructed")
+    else:
+        # Load individual plots if only one exists
+        if cnv_path_original.exists():
+            fig_orig = plot_cnv(computed_data_path=cnv_path_original, event_times=event_times, 
+                               sns_kwargs={"style": "white"})
+            if save_dir and fig_orig:
+                save_path = Path(save_dir) / "cnv_original.png"
+                fig_orig.savefig(save_path, dpi=150, bbox_inches='tight')
+        if cnv_path_recon.exists():
+            fig_recon = plot_cnv(computed_data_path=cnv_path_recon, event_times=event_times,
+                                sns_kwargs={"style": "white"})
+            if save_dir and fig_recon:
+                save_path = Path(save_dir) / "cnv_reconstructed.png"
+                fig_recon.savefig(save_path, dpi=150, bbox_inches='tight')
+    
+    # Create vertically stacked figure
+    if fig_orig or fig_recon:
+        fig_combined = _create_vertical_stacked_figure(fig_orig, fig_recon, 
+                                                       "ORIGINAL: Contingent Negative Variation",
+                                                       "RECONSTRUCTED: Contingent Negative Variation")
+        report.add_figure(fig_combined, title="CNV - Comparison", section="CNV")
+        
+        # Save combined figure and data
+        if save_dir:
+            save_path = Path(save_dir) / "cnv_comparison.png"
+            fig_combined.savefig(save_path, dpi=150, bbox_inches='tight')
+            # Save combined data
+            save_data = {}
+            if data_orig:
+                save_data['original_evokeds'] = [ev.data for ev in data_orig.get('evokeds', [])]
+                save_data['original_times'] = data_orig.get('evokeds', [{}])[0].times if data_orig.get('evokeds') else []
+                save_data['original_vminmax'] = data_orig.get('vminmax')
+            if data_recon:
+                save_data['reconstructed_evokeds'] = [ev.data for ev in data_recon.get('evokeds', [])]
+                save_data['reconstructed_times'] = data_recon.get('evokeds', [{}])[0].times if data_recon.get('evokeds') else []
+                save_data['reconstructed_vminmax'] = data_recon.get('vminmax')
+            np.savez(Path(save_dir) / "cnv_comparison.npz", **save_data)
+            logger.info(f"   💾 Saved: cnv_comparison")
+        
+        plt.close(fig_combined)
+        if fig_orig:
+            plt.close(fig_orig)
+        if fig_recon:
+            plt.close(fig_recon)
 
 
-def _add_spectral_plots(report, data_path):
-    """Add spectral plots"""
+def _add_spectral_plots(report, data_path_original, data_path_recon, save_dir=None):
+    """Add spectral plots (side-by-side comparison with matched scales)"""
+    import pickle
+    logger = logging.getLogger(__name__)
+    
+    # Helper to match scales and plot side-by-side
+    def plot_with_matched_scales(path_orig, path_recon, title_base, section, plot_prefix):
+        if not path_orig.exists() and not path_recon.exists():
+            return
+        
+        # Load data
+        data_orig, data_recon = None, None
+        if path_orig.exists():
+            with open(path_orig, 'rb') as f:
+                data_orig = pickle.load(f)
+        if path_recon.exists():
+            with open(path_recon, 'rb') as f:
+                data_recon = pickle.load(f)
+        
+        # Match scales if both exist
+        if data_orig and data_recon:
+            vmin_o, vmax_o = data_orig.get('vmin'), data_orig.get('vmax')
+            vmin_r, vmax_r = data_recon.get('vmin'), data_recon.get('vmax')
+            
+            if vmin_o is not None and vmin_r is not None:
+                if isinstance(vmin_o, (list, np.ndarray)):
+                    vmin_combined = [min(vo, vr) for vo, vr in zip(vmin_o, vmin_r)]
+                    vmax_combined = [max(vo, vr) for vo, vr in zip(vmax_o, vmax_r)]
+                else:
+                    vmin_combined = min(vmin_o, vmin_r)
+                    vmax_combined = max(vmax_o, vmax_r)
+                
+                data_orig['vmin'] = vmin_combined
+                data_orig['vmax'] = vmax_combined
+                data_recon['vmin'] = vmin_combined
+                data_recon['vmax'] = vmax_combined
+        
+        # Generate figures
+        fig_orig = plot_markers_topos(computed_data=data_orig) if data_orig else None
+        fig_recon = plot_markers_topos(computed_data=data_recon) if data_recon else None
+        
+        # Create side-by-side figure
+        if fig_orig or fig_recon:
+            fig_combined = _create_side_by_side_figure(fig_orig, fig_recon,
+                                                       f"ORIGINAL: {title_base}",
+                                                       f"RECONSTRUCTED: {title_base}")
+            
+            # Save plot and data
+            if save_dir:
+                plot_name = f"{section.lower()}_{plot_prefix}"
+                fig_combined.savefig(Path(save_dir) / f"{plot_name}.png", dpi=150, bbox_inches='tight')
+                # Save data
+                save_data = {}
+                if data_orig:
+                    save_data['original_evokeds'] = data_orig.get('evokeds', [])
+                    save_data['original_vmin'] = data_orig.get('vmin')
+                    save_data['original_vmax'] = data_orig.get('vmax')
+                if data_recon:
+                    save_data['reconstructed_evokeds'] = data_recon.get('evokeds', [])
+                    save_data['reconstructed_vmin'] = data_recon.get('vmin')
+                    save_data['reconstructed_vmax'] = data_recon.get('vmax')
+                np.savez(Path(save_dir) / f"{plot_name}.npz", **save_data)
+                logger.info(f"   💾 Saved: {plot_name}")
+            
+            report.add_figure(fig_combined, title=f"{title_base} - Comparison", section=section)
+            plt.close(fig_combined)
+            if fig_orig:
+                plt.close(fig_orig)
+            if fig_recon:
+                plt.close(fig_recon)
+    
     # 1. Normalized spectral bands
-    bands_path = Path(data_path) / "spectral_bands_normalized.pkl"
-    if bands_path.exists():
-        fig = plot_markers_topos(computed_data_path=bands_path)
-        report.add_figure(fig, title="Spectral Power Bands Normalized (Delta, Theta, Alpha, Beta, Gamma)", section="Spectral")
-        plt.close(fig)
+    plot_with_matched_scales(
+        Path(data_path_original) / "spectral_bands_normalized.pkl",
+        Path(data_path_recon) / "spectral_bands_normalized.pkl",
+        "Spectral Power Bands Normalized",
+        "Spectral",
+        "bands_normalized"
+    )
     
     # 2. Absolute power
-    absolute_path = Path(data_path) / "spectral_absolute_power.pkl"
-    if absolute_path.exists():
-        fig = plot_markers_topos(computed_data_path=absolute_path)
-        report.add_figure(fig, title="Absolute Spectral Power (Log Scale) - Delta, Theta, Alpha, Beta, Gamma", section="Spectral")
-        plt.close(fig)
+    plot_with_matched_scales(
+        Path(data_path_original) / "spectral_absolute_power.pkl",
+        Path(data_path_recon) / "spectral_absolute_power.pkl",
+        "Absolute Spectral Power",
+        "Spectral",
+        "absolute_power"
+    )
     
     # 3. Spectral summaries
-    summaries_path = Path(data_path) / "spectral_summaries.pkl"
-    if summaries_path.exists():
-        fig = plot_markers_topos(computed_data_path=summaries_path)
-        report.add_figure(fig, title="Spectral Summaries (SE, MSF, SEF90, SEF95)", section="Spectral")
-        plt.close(fig)
+    plot_with_matched_scales(
+        Path(data_path_original) / "spectral_summaries.pkl",
+        Path(data_path_recon) / "spectral_summaries.pkl",
+        "Spectral Summaries",
+        "Spectral",
+        "summaries"
+    )
 
 
-def _add_connectivity_plots(report, data_path):
-    """Add connectivity plots"""
+def _add_connectivity_plots(report, data_path_original, data_path_recon, save_dir=None):
+    """Add connectivity plots (vertically stacked with matched scales)"""
+    import pickle
+    logger = logging.getLogger(__name__)
+    
+    # Helper for markers topos
+    def plot_markers_with_matched_scales(path_orig, path_recon, title_base, section):
+        if not path_orig.exists() and not path_recon.exists():
+            return
+        
+        data_orig, data_recon = None, None
+        if path_orig.exists():
+            with open(path_orig, 'rb') as f:
+                data_orig = pickle.load(f)
+        if path_recon.exists():
+            with open(path_recon, 'rb') as f:
+                data_recon = pickle.load(f)
+        
+        if data_orig and data_recon:
+            vmin_o, vmax_o = data_orig.get('vmin'), data_orig.get('vmax')
+            vmin_r, vmax_r = data_recon.get('vmin'), data_recon.get('vmax')
+            
+            if vmin_o is not None and vmin_r is not None:
+                if isinstance(vmin_o, (list, np.ndarray)):
+                    vmin_combined = [min(vo, vr) for vo, vr in zip(vmin_o, vmin_r)]
+                    vmax_combined = [max(vo, vr) for vo, vr in zip(vmax_o, vmax_r)]
+                else:
+                    vmin_combined = min(vmin_o, vmin_r)
+                    vmax_combined = max(vmax_o, vmax_r)
+                
+                data_orig['vmin'] = vmin_combined
+                data_orig['vmax'] = vmax_combined
+                data_recon['vmin'] = vmin_combined
+                data_recon['vmax'] = vmax_combined
+        
+        # Generate figures
+        fig_orig = plot_markers_topos(computed_data=data_orig) if data_orig else None
+        fig_recon = plot_markers_topos(computed_data=data_recon) if data_recon else None
+        
+        # Create vertically stacked figure
+        if fig_orig or fig_recon:
+            fig_combined = _create_vertical_stacked_figure(fig_orig, fig_recon,
+                                                           f"ORIGINAL: {title_base}",
+                                                           f"RECONSTRUCTED: {title_base}")
+            report.add_figure(fig_combined, title=f"{title_base} - Comparison", section=section)
+            plt.close(fig_combined)
+            if fig_orig:
+                plt.close(fig_orig)
+            if fig_recon:
+                plt.close(fig_recon)
+    
+    # Helper for single marker topo
+    def plot_marker_with_matched_scales(path_orig, path_recon, title_base, section):
+        if not path_orig.exists() and not path_recon.exists():
+            return
+        
+        data_orig, data_recon = None, None
+        if path_orig.exists():
+            with open(path_orig, 'rb') as f:
+                data_orig = pickle.load(f)
+        if path_recon.exists():
+            with open(path_recon, 'rb') as f:
+                data_recon = pickle.load(f)
+        
+        if data_orig and data_recon:
+            vmin_o, vmax_o = data_orig.get('vmin'), data_orig.get('vmax')
+            vmin_r, vmax_r = data_recon.get('vmin'), data_recon.get('vmax')
+            
+            if vmin_o is not None and vmin_r is not None:
+                vmin_combined = min(vmin_o, vmin_r)
+                vmax_combined = max(vmax_o, vmax_r)
+                data_orig['vmin'] = vmin_combined
+                data_orig['vmax'] = vmax_combined
+                data_recon['vmin'] = vmin_combined
+                data_recon['vmax'] = vmax_combined
+        
+        # Generate figures
+        fig_orig = plot_marker_topo(computed_data=data_orig) if data_orig else None
+        fig_recon = plot_marker_topo(computed_data=data_recon) if data_recon else None
+        
+        # Create vertically stacked figure
+        if fig_orig or fig_recon:
+            fig_combined = _create_vertical_stacked_figure(fig_orig, fig_recon,
+                                                           f"ORIGINAL: {title_base}",
+                                                           f"RECONSTRUCTED: {title_base}")
+            report.add_figure(fig_combined, title=f"{title_base} - Comparison", section=section)
+            plt.close(fig_combined)
+            if fig_orig:
+                plt.close(fig_orig)
+            if fig_recon:
+                plt.close(fig_recon)
+    
     # 1. WSMI topoplots
-    wsmi_path = Path(data_path) / "wsmi_bands_topo.pkl"
-    if wsmi_path.exists():
-        fig = plot_markers_topos(computed_data_path=wsmi_path)
-        report.add_figure(fig, title="WSMI Connectivity per Frequency Band", section="Connectivity")
-        plt.close(fig)
+    plot_markers_with_matched_scales(
+        Path(data_path_original) / "wsmi_bands_topo.pkl",
+        Path(data_path_recon) / "wsmi_bands_topo.pkl",
+        "WSMI Connectivity per Frequency Band",
+        "Connectivity"
+    )
     
     # 2. Mutual information
-    mi_path = Path(data_path) / "mutual_info_topo.pkl"
-    if mi_path.exists():
-        fig = plot_marker_topo(computed_data_path=mi_path)
-        report.add_figure(fig, title="Connectivity: Mutual Information Topography", section="Information Theory")
-        plt.close(fig)
+    plot_marker_with_matched_scales(
+        Path(data_path_original) / "mutual_info_topo.pkl",
+        Path(data_path_recon) / "mutual_info_topo.pkl",
+        "Mutual Information Topography",
+        "Information Theory"
+    )
 
 
-def _add_information_theory_plots(report, data_path):
-    """Add information theory plots"""
+def _add_information_theory_plots(report, data_path_original, data_path_recon, save_dir=None):
+    """Add information theory plots (side-by-side comparison with matched scales)"""
+    import pickle
+    logger = logging.getLogger(__name__)
+    
+    # Helper for markers topos
+    def plot_markers_with_matched_scales(path_orig, path_recon, title_base, section):
+        if not path_orig.exists() and not path_recon.exists():
+            return
+        
+        data_orig, data_recon = None, None
+        if path_orig.exists():
+            with open(path_orig, 'rb') as f:
+                data_orig = pickle.load(f)
+        if path_recon.exists():
+            with open(path_recon, 'rb') as f:
+                data_recon = pickle.load(f)
+        
+        if data_orig and data_recon:
+            vmin_o, vmax_o = data_orig.get('vmin'), data_orig.get('vmax')
+            vmin_r, vmax_r = data_recon.get('vmin'), data_recon.get('vmax')
+            
+            if vmin_o is not None and vmin_r is not None:
+                if isinstance(vmin_o, (list, np.ndarray)):
+                    vmin_combined = [min(vo, vr) for vo, vr in zip(vmin_o, vmin_r)]
+                    vmax_combined = [max(vo, vr) for vo, vr in zip(vmax_o, vmax_r)]
+                else:
+                    vmin_combined = min(vmin_o, vmin_r)
+                    vmax_combined = max(vmax_o, vmax_r)
+                
+                data_orig['vmin'] = vmin_combined
+                data_orig['vmax'] = vmax_combined
+                data_recon['vmin'] = vmin_combined
+                data_recon['vmax'] = vmax_combined
+        
+        # Generate figures
+        fig_orig = plot_markers_topos(computed_data=data_orig) if data_orig else None
+        fig_recon = plot_markers_topos(computed_data=data_recon) if data_recon else None
+        
+        # Create vertically stacked figure
+        if fig_orig or fig_recon:
+            fig_combined = _create_vertical_stacked_figure(fig_orig, fig_recon,
+                                                           f"ORIGINAL: {title_base}",
+                                                           f"RECONSTRUCTED: {title_base}")
+            report.add_figure(fig_combined, title=f"{title_base} - Comparison", section=section)
+            plt.close(fig_combined)
+            if fig_orig:
+                plt.close(fig_orig)
+            if fig_recon:
+                plt.close(fig_recon)
+    
+    # Helper for single marker topo
+    def plot_marker_with_matched_scales(path_orig, path_recon, title_base, section):
+        if not path_orig.exists() and not path_recon.exists():
+            return
+        
+        data_orig, data_recon = None, None
+        if path_orig.exists():
+            with open(path_orig, 'rb') as f:
+                data_orig = pickle.load(f)
+        if path_recon.exists():
+            with open(path_recon, 'rb') as f:
+                data_recon = pickle.load(f)
+        
+        if data_orig and data_recon:
+            vmin_o, vmax_o = data_orig.get('vmin'), data_orig.get('vmax')
+            vmin_r, vmax_r = data_recon.get('vmin'), data_recon.get('vmax')
+            
+            if vmin_o is not None and vmin_r is not None:
+                vmin_combined = min(vmin_o, vmin_r)
+                vmax_combined = max(vmax_o, vmax_r)
+                data_orig['vmin'] = vmin_combined
+                data_orig['vmax'] = vmax_combined
+                data_recon['vmin'] = vmin_combined
+                data_recon['vmax'] = vmax_combined
+        
+        # Generate figures
+        fig_orig = plot_marker_topo(computed_data=data_orig) if data_orig else None
+        fig_recon = plot_marker_topo(computed_data=data_recon) if data_recon else None
+        
+        # Create vertically stacked figure
+        if fig_orig or fig_recon:
+            fig_combined = _create_vertical_stacked_figure(fig_orig, fig_recon,
+                                                           f"ORIGINAL: {title_base}",
+                                                           f"RECONSTRUCTED: {title_base}")
+            report.add_figure(fig_combined, title=f"{title_base} - Comparison", section=section)
+            plt.close(fig_combined)
+            if fig_orig:
+                plt.close(fig_orig)
+            if fig_recon:
+                plt.close(fig_recon)
+    
     # 1. Permutation Entropy
-    pe_path = Path(data_path) / "permutation_entropy_bands.pkl"
-    if pe_path.exists():
-        fig = plot_markers_topos(computed_data_path=pe_path)
-        report.add_figure(fig, title="Permutation Entropy per Frequency Band", section="Information Theory")
-        plt.close(fig)
+    plot_markers_with_matched_scales(
+        Path(data_path_original) / "permutation_entropy_bands.pkl",
+        Path(data_path_recon) / "permutation_entropy_bands.pkl",
+        "Permutation Entropy per Frequency Band",
+        "Information Theory"
+    )
     
     # 2. Kolmogorov complexity
-    kc_path = Path(data_path) / "kolmogorov_complexity.pkl"
-    if kc_path.exists():
-        fig = plot_markers_topos(computed_data_path=kc_path)
-        report.add_figure(fig, title="Kolmogorov Complexity", section="Information Theory")
-        plt.close(fig)
+    plot_markers_with_matched_scales(
+        Path(data_path_original) / "kolmogorov_complexity.pkl",
+        Path(data_path_recon) / "kolmogorov_complexity.pkl",
+        "Kolmogorov Complexity",
+        "Information Theory"
+    )
     
     # 3. Generic per-channel measures
     for measure_name in ["kolmogorov_complexity", "permutation_entropy"]:
-        measure_path = Path(data_path) / f"info_theory_{measure_name}.pkl"
-        if measure_path.exists():
-            fig = plot_marker_topo(computed_data_path=measure_path)
-            report.add_figure(fig, title=f"Information Theory: {measure_name.upper()}", section="Information Theory")
-            plt.close(fig)
+        plot_marker_with_matched_scales(
+            Path(data_path_original) / f"info_theory_{measure_name}.pkl",
+            Path(data_path_recon) / f"info_theory_{measure_name}.pkl",
+            measure_name.upper(),
+            "Information Theory"
+        )
 
 
-def _add_erp_plots(report, epochs, skip_clustering, data_path):
-    """Add ERP plots"""
+def _add_erp_plots(report, epochs, skip_clustering, data_path_original, data_path_recon, save_dir=None):
+    """Add ERP plots (side-by-side comparison)"""
     logger = logging.getLogger(__name__)
+    
+    logger.info("Generating side-by-side ERP plots...")
+    
+    # Generate figures for both datasets
+    figs_orig = _generate_erp_figures(epochs, skip_clustering, data_path_original, "ORIGINAL", save_dir)
+    figs_recon = _generate_erp_figures(epochs, skip_clustering, data_path_recon, "RECONSTRUCTED", save_dir)
+    
+    # Combine and add to report
+    for key in figs_orig.keys():
+        fig_orig = figs_orig.get(key)
+        fig_recon = figs_recon.get(key)
+        
+        if fig_orig or fig_recon:
+            fig_combined = _create_side_by_side_figure(fig_orig, fig_recon,
+                                                       f"ORIGINAL: {key}",
+                                                       f"RECONSTRUCTED: {key}")
+            
+            # Save plot
+            if save_dir:
+                plot_name = f"erp_{key.lower().replace(' ', '_').replace('(', '').replace(')', '').replace('-', '_')}"
+                fig_combined.savefig(Path(save_dir) / f"{plot_name}.png", dpi=150, bbox_inches='tight')
+                logger.info(f"   💾 Saved: {plot_name}")
+            
+            report.add_figure(fig_combined, title=f"{key} - Comparison", section="ERP")
+            plt.close(fig_combined)
+            if fig_orig:
+                plt.close(fig_orig)
+            if fig_recon:
+                plt.close(fig_recon)
+
+
+def _generate_erp_figures(epochs, skip_clustering, data_path, label_prefix, save_dir=None):
+    """Helper function to generate ERP figures for a single dataset - returns dict of figures"""
+    logger = logging.getLogger(__name__)
+    figures = {}
     
     local_labels = ["Local Deviant", "Local Standard"]
     global_labels = ["Global Deviant", "Global Standard"]
@@ -442,172 +1073,123 @@ def _add_erp_plots(report, epochs, skip_clustering, data_path):
     
     # LOCAL EFFECT
     local_gfp_path = Path(data_path) / "local_effect_gfp.pkl"
-    fig_gfp = plot_gfp(computed_data_path=local_gfp_path, colors=["r", "b"], labels=local_labels,
-                       fig_kwargs=dict(figsize=(12, 6)), sns_kwargs=dict(style="darkgrid"))
+    if local_gfp_path.exists():
+        fig_gfp = plot_gfp(computed_data_path=local_gfp_path, colors=["r", "b"], labels=local_labels,
+                           fig_kwargs=dict(figsize=(12, 6)), sns_kwargs=dict(style="darkgrid"))
+        figures["Local Effect - GFP"] = fig_gfp
+    else:
+        figures["Local Effect - GFP"] = None
     
     local_contrast_path = Path(data_path) / "local_effect_contrast.pkl"
-    evoked, _, _, local_contrast = get_contrast(computed_data_path=local_contrast_path)
-    evoked.shift_time(time_shift)
-    
-    fig_topo = plot_evoked_topomap(evoked, times=plot_times, ch_type="eeg", contours=0, cmap="RdBu_r",
-                                   cbar_fmt="%0.3f", average=0.04, units=r"$\mu{V}$", ncols=10, nrows="auto",
-                                   extrapolate="local", sns_kwargs=dict(style="white"))
-    
-    # Get actual data range for proper statistical color scaling
-    local_contrast.mlog10_p_val.shift_time(time_shift)
-    stat_data = np.array(local_contrast.mlog10_p_val.data)
-    stat_vmin_data = np.nanmin(stat_data)
-    stat_vmax_data = np.nanmax(stat_data)
-    
-    # Use data range but ensure it includes the significance threshold properly
-    stat_vmin_actual = max(0, stat_vmin_data)  # Don't go below 0 for -log10(p)
-    stat_vmax_actual = max(stat_vmax_data, stat_logpsig + 2.0)  # Ensure significance is well-positioned
-    
-    # Generate colormap based on actual data range
-    stat_cmap = get_stat_colormap(stat_logpsig, stat_vmin_actual, stat_vmax_actual)
-    
-    # The local_contrast.mlog10_p_val is already shifted, so don't shift it again
-    # local_contrast.mlog10_p_val.shift_time(time_shift)  # REMOVED - double shift
-    
-    # Use all plot_times - they should work now
-    fig_topo_stat = plot_evoked_topomap(local_contrast.mlog10_p_val, times=plot_times, ch_type="eeg",
-                                       contours=0, cmap=stat_cmap, scalings=1, cbar_fmt="%0.3f", average=0.04,
-                                       units="-log10(p)", ncols=10, nrows="auto", extrapolate="local",
-                                       vlim=(stat_vmin_actual, stat_vmax_actual),  # Use vlim instead of vmin/vmax
-                                       sns_kwargs=dict(style="white"))
-    
-    gc.collect()
+    if local_contrast_path.exists():
+        evoked, _, _, local_contrast = get_contrast(computed_data_path=local_contrast_path)
+        evoked.shift_time(time_shift)
+        
+        fig_topo = plot_evoked_topomap(evoked, times=plot_times, ch_type="eeg", contours=0, cmap="RdBu_r",
+                                       cbar_fmt="%0.3f", average=0.04, units=r"$\mu{V}$", ncols=10, nrows="auto",
+                                       extrapolate="local", sns_kwargs=dict(style="white"))
+        figures["Local Effect - Topographies"] = fig_topo
+        
+        # Statistical color scaling
+        local_contrast.mlog10_p_val.shift_time(time_shift)
+        stat_data = np.array(local_contrast.mlog10_p_val.data)
+        stat_vmin_actual = max(0, np.nanmin(stat_data))
+        stat_vmax_actual = max(np.nanmax(stat_data), stat_logpsig + 2.0)
+        stat_cmap = get_stat_colormap(stat_logpsig, stat_vmin_actual, stat_vmax_actual)
+        
+        fig_topo_stat = plot_evoked_topomap(local_contrast.mlog10_p_val, times=plot_times, ch_type="eeg",
+                                           contours=0, cmap=stat_cmap, scalings=1, cbar_fmt="%0.3f", average=0.04,
+                                           units="-log10(p)", ncols=10, nrows="auto", extrapolate="local",
+                                           vlim=(stat_vmin_actual, stat_vmax_actual),
+                                           sns_kwargs=dict(style="white"))
+        figures["Local Effect - Topographies (-log10(p))"] = fig_topo_stat
+        gc.collect()
+    else:
+        figures["Local Effect - Topographies"] = None
+        figures["Local Effect - Topographies (-log10(p))"] = None
     
     # Cluster test
-    fig_cluster = None
     if not skip_clustering:
         local_cluster_path = Path(data_path) / "local_cluster_test.pkl"
         if local_cluster_path.exists():
             fig_cluster = plot_cluster_test(computed_data_path=local_cluster_path, sns_kwargs={"style": "darkgrid"})
+            figures["Local Effect - Cluster"] = fig_cluster
+        else:
+            figures["Local Effect - Cluster"] = None
+    else:
+        figures["Local Effect - Cluster"] = None
     
-    # Add Local Effect figures
-    figs = [fig_gfp, fig_topo, fig_topo_stat]
-    captions = ["Local Effect: Global Field Power", "Local Effect: Topographies", "Local Effect: Topographies (-log10(p))"]
-    if fig_cluster is not None:
-        figs.insert(0, fig_cluster)
-        captions.insert(0, "Local Effect: Cluster Permutation Test")
-    
-    for fig, caption in zip(figs, captions):
-        if fig is not None:
-            report.add_figure(fig, title=caption, section="ERP")
-            plt.close(fig)
-    
-    # GLOBAL EFFECT (similar structure)
+    # GLOBAL EFFECT
     global_gfp_path = Path(data_path) / "global_effect_gfp.pkl"
-    fig_gfp = plot_gfp(computed_data_path=global_gfp_path, colors=["r", "b"], labels=global_labels,
-                       fig_kwargs=dict(figsize=(12, 6)), sns_kwargs=dict(style="darkgrid"))
+    if global_gfp_path.exists():
+        fig_gfp = plot_gfp(computed_data_path=global_gfp_path, colors=["r", "b"], labels=global_labels,
+                           fig_kwargs=dict(figsize=(12, 6)), sns_kwargs=dict(style="darkgrid"))
+        figures["Global Effect - GFP"] = fig_gfp
+    else:
+        figures["Global Effect - GFP"] = None
     
     global_contrast_path = Path(data_path) / "global_effect_contrast.pkl"
-    evoked, _, _, global_contrast = get_contrast(computed_data_path=global_contrast_path)
-    evoked.shift_time(time_shift)
+    if global_contrast_path.exists():
+        evoked, _, _, global_contrast = get_contrast(computed_data_path=global_contrast_path)
+        evoked.shift_time(time_shift)
+        
+        fig_topo = plot_evoked_topomap(evoked, times=plot_times, ch_type="eeg", contours=0, cmap="RdBu_r",
+                                       cbar_fmt="%0.3f", average=0.04, units=r"$\mu{V}$", ncols=10, nrows="auto",
+                                       extrapolate="local", sns_kwargs=dict(style="white"))
+        figures["Global Effect - Topographies"] = fig_topo
+        
+        # Statistical color scaling
+        global_contrast.mlog10_p_val.shift_time(time_shift)
+        stat_data_global = np.array(global_contrast.mlog10_p_val.data)
+        stat_vmin_global = max(0, np.nanmin(stat_data_global))
+        stat_vmax_global = max(np.nanmax(stat_data_global), stat_logpsig + 2.0)
+        stat_cmap_global = get_stat_colormap(stat_logpsig, stat_vmin_global, stat_vmax_global)
+        
+        fig_topo_stat = plot_evoked_topomap(global_contrast.mlog10_p_val, times=plot_times, ch_type="eeg",
+                                           contours=0, cmap=stat_cmap_global, scalings=1, cbar_fmt="%0.3f", average=0.04,
+                                           units="-log10(p)", ncols=10, nrows="auto", extrapolate="local",
+                                           vlim=(stat_vmin_global, stat_vmax_global),
+                                           sns_kwargs=dict(style="white"))
+        figures["Global Effect - Topographies (-log10(p))"] = fig_topo_stat
+        gc.collect()
+    else:
+        figures["Global Effect - Topographies"] = None
+        figures["Global Effect - Topographies (-log10(p))"] = None
     
-    fig_topo = plot_evoked_topomap(evoked, times=plot_times, ch_type="eeg", contours=0, cmap="RdBu_r",
-                                   cbar_fmt="%0.3f", average=0.04, units=r"$\mu{V}$", ncols=10, nrows="auto",
-                                   extrapolate="local", sns_kwargs=dict(style="white"))
-    
-    # Get actual data range for proper statistical color scaling (global effect)
-    global_contrast.mlog10_p_val.shift_time(time_shift)
-    stat_data_global = np.array(global_contrast.mlog10_p_val.data)
-    stat_vmin_global = max(0, np.nanmin(stat_data_global))  # Don't go below 0 for -log10(p)
-    stat_vmax_global = max(np.nanmax(stat_data_global), stat_logpsig + 2.0)  # Ensure significance is well-positioned
-    
-    # Generate colormap based on actual data range
-    stat_cmap_global = get_stat_colormap(stat_logpsig, stat_vmin_global, stat_vmax_global)
-    
-    # The global_contrast.mlog10_p_val is also already shifted, don't shift it again
-    # global_contrast.mlog10_p_val.shift_time(time_shift)  # REMOVED - double shift
-    
-    fig_topo_stat = plot_evoked_topomap(global_contrast.mlog10_p_val, times=plot_times, ch_type="eeg",
-                                       contours=0, cmap=stat_cmap_global, scalings=1, cbar_fmt="%0.3f", average=0.04,
-                                       units="-log10(p)", ncols=10, nrows="auto", extrapolate="local",
-                                       vlim=(stat_vmin_global, stat_vmax_global),  # Use vlim instead of vmin/vmax
-                                       sns_kwargs=dict(style="white"))
-    
-    gc.collect()
-    
-    fig_cluster = None
+    # Cluster test
     if not skip_clustering:
         global_cluster_path = Path(data_path) / "global_cluster_test.pkl"
         if global_cluster_path.exists():
             fig_cluster = plot_cluster_test(computed_data_path=global_cluster_path, sns_kwargs={"style": "darkgrid"})
+            figures["Global Effect - Cluster"] = fig_cluster
+        else:
+            figures["Global Effect - Cluster"] = None
+    else:
+        figures["Global Effect - Cluster"] = None
     
-    # Add Global Effect figures
-    figs = [fig_gfp, fig_topo, fig_topo_stat]
-    captions = ["Global Effect: Global Field Power", "Global Effect: Topographies", "Global Effect: Topographies (-log10(p))"]
-    if fig_cluster is not None:
-        figs.append(fig_cluster)
-        captions.append("Global Effect: Cluster Permutation Test")
-    
-    for fig, caption in zip(figs, captions):
-        if fig is not None:
-            report.add_figure(fig, title=caption, section="ERP")
-            plt.close(fig)
-    
-    # ERP Statistical Analysis
-    try:
-        n_chans_thresh = 10
-        n_times_thresh = 5
-        p_vals_ticks = [0.05, 0.01, 0.005, 0.001, 0.0005, 0.0001]
-        fig_stats = plot_ttest([local_contrast.p_val.data, global_contrast.p_val.data],
-                              ["Local Effect", "Global Effect"], p_vals_ticks, (epochs.times - 0.6),
-                              n_times_thresh=n_times_thresh, n_chans_thresh=n_chans_thresh, colors=["b", "r"])
-        caption = f"ERP Statistical Analysis (> {n_chans_thresh} channels, > {n_times_thresh} samples)"
-        report.add_figure(fig_stats, title=caption, section="ERP")
-        plt.close(fig_stats)
-    except Exception as e:
-        logger.warning(f"ERP statistical analysis failed: {e}")
-    
-    # ROI Analysis
-    rois = ["Fz", "Cz", "Pz"]
-    fig_rois, axes = plt.subplots(len(rois), 2, figsize=(14, 2 * len(rois)))
-    
-    for i, roi_name in enumerate(rois):
-        # Local Effect
-        local_roi_path = Path(data_path) / f"local_effect_contrast_{roi_name}.pkl"
-        this_evoked, evokeds, evokeds_stderr, this_contrast = get_contrast(computed_data_path=local_roi_path)
-        sig_mask = np.squeeze(this_contrast.p_val.data < stat_psig)
-        plot_evoked(evokeds, std_errs=evokeds_stderr, colors=["r", "b"], labels=["Deviant", "Standard"],
-                   shift_time=time_shift, ax=axes[i, 0], sig_mask=sig_mask, event_times=event_times,
-                   sns_kwargs=dict(style="darkgrid"))
-        col_title = "" if i != 0 else "Local Effect \n\n"
-        axes[i, 0].set_title(f"{col_title}Around {roi_name}")
-        
-        # Global Effect
-        global_roi_path = Path(data_path) / f"global_effect_contrast_{roi_name}.pkl"
-        this_evoked, evokeds, evokeds_stderr, this_contrast = get_contrast(computed_data_path=global_roi_path)
-        sig_mask = np.squeeze(this_contrast.p_val.data < stat_psig)
-        plot_evoked(evokeds, std_errs=evokeds_stderr, colors=["b", "r"], labels=None,
-                   shift_time=time_shift, ax=axes[i, 1], sig_mask=sig_mask, event_times=event_times,
-                   sns_kwargs=dict(style="darkgrid"))
-        col_title = "" if i != 0 else "Global Effect \n\n"
-        axes[i, 1].set_title(f"{col_title}Around {roi_name}")
-    
-    # Legend
-    handles, labels = axes[0, 0].get_legend_handles_labels()
-    handles.append(mpl.patches.Patch(color="r", alpha=0.5, label="Deviant SEM"))
-    handles.append(mpl.patches.Patch(color="b", alpha=0.5, label="Standard SEM"))
-    handles.append(mpl.patches.Patch(color="orange", label=f"Significative (p<{stat_psig})"))
-    axes[0, 0].legend(handles=handles, bbox_to_anchor=(-0.1, 1.0))
-    plt.subplots_adjust(hspace=0.6, left=0.18, right=0.98)
-    
-    report.add_figure(fig_rois, title="ERP ROI Analysis", section="ERP")
-    plt.close(fig_rois)
-    gc.collect()
+    # Return the dictionary of figures
+    return figures
 
 
-def _add_prediction_plots(report, data_path):
-    """Add prediction plots from precomputed results"""
+def _add_prediction_plots(report, data_path_original, data_path_recon, save_dir=None):
+    """Add prediction plots from precomputed results (side-by-side comparison)"""
     import pickle
     logger = logging.getLogger(__name__)
     
-    # Load prediction results
-    prediction_path = Path(data_path) / "prediction_results.pkl"
-    if not prediction_path.exists():
+    # Process original predictions
+    prediction_path_original = Path(data_path_original) / "prediction_results.pkl"
+    if prediction_path_original.exists():
+        logger.info("Processing ORIGINAL prediction data...")
+        _process_prediction_data(report, prediction_path_original, "ORIGINAL", save_dir)
+    
+    # Process reconstructed predictions
+    prediction_path_recon = Path(data_path_recon) / "prediction_results.pkl"
+    if prediction_path_recon.exists():
+        logger.info("Processing RECONSTRUCTED prediction data...")
+        _process_prediction_data(report, prediction_path_recon, "RECONSTRUCTED", save_dir)
+    
+    # If neither exists, show info message
+    if not prediction_path_original.exists() and not prediction_path_recon.exists():
         logger.warning("No prediction results found - skipping prediction section")
         html = """
         <div class="alert alert-info">
@@ -617,7 +1199,12 @@ def _add_prediction_plots(report, data_path):
         </div>
         """
         report.add_html(html, title="Prediction Summary", section="Prediction")
-        return
+
+
+def _process_prediction_data(report, prediction_path, label_prefix, save_dir=None):
+    """Helper function to process prediction data for a single dataset"""
+    import pickle
+    logger = logging.getLogger(__name__)
     
     try:
         with open(prediction_path, 'rb') as f:
@@ -658,7 +1245,7 @@ def _add_prediction_plots(report, data_path):
                 ])
         
         html = render_prediction_summary(prediction_summary)
-        report.add_html(html, title="Prediction Summary", section="Prediction")
+        report.add_html(html, title=f"{label_prefix}: Prediction Summary", section="Prediction")
         
         # 2. Create multivariate visualizations
         sns.set()
@@ -700,7 +1287,20 @@ def _add_prediction_plots(report, data_path):
                      bbox_to_anchor=(0.5, -1.5), ncol=2)
             
             clf_display_name = 'Extra Trees' if clf_type == 'et-reduced' else 'Gaussian SVM'
-            report.add_figure(fig_overall, title=clf_display_name, section='Multivariate')
+            
+            # Save plot and data
+            if save_dir:
+                plot_name = f"prediction_{label_prefix.lower()}_{clf_type}"
+                fig_overall.savefig(Path(save_dir) / f"{plot_name}.png", dpi=150, bbox_inches='tight')
+                np.savez(
+                    Path(save_dir) / f"{plot_name}.npz",
+                    vs_prob=vs_prob,
+                    mcs_prob=mcs_prob,
+                    classifier=clf_type
+                )
+                logger.info(f"   💾 Saved: {plot_name}")
+            
+            report.add_figure(fig_overall, title=f"{label_prefix}: {clf_display_name}", section='Multivariate')
             plt.close(fig_overall)
         
         logger.info("Added multivariate prediction visualizations")
@@ -726,7 +1326,18 @@ def _add_prediction_plots(report, data_path):
             plt.title(f'Summary of univariate prediction ({len(univariate)} markers)')
             plt.subplots_adjust(bottom=0.25)
             
-            report.add_figure(fig_violin, title='Univariate Summary I', section='Univariate Summaries')
+            # Save plot and data
+            if save_dir:
+                plot_name = f"prediction_{label_prefix.lower()}_univariate_violin"
+                fig_violin.savefig(Path(save_dir) / f"{plot_name}.png", dpi=150, bbox_inches='tight')
+                np.savez(
+                    Path(save_dir) / f"{plot_name}.npz",
+                    univariate_data=univariate.to_dict(),
+                    n_markers=len(univariate)
+                )
+                logger.info(f"   💾 Saved: {plot_name}")
+            
+            report.add_figure(fig_violin, title=f'{label_prefix}: Univariate Summary I', section='Univariate Summaries')
             plt.close(fig_violin)
             
             # Grouped bar plot
@@ -795,7 +1406,17 @@ def _add_prediction_plots(report, data_path):
                 plt.subplots_adjust(bottom=0.05, top=0.92)
                 plt.suptitle('Probability of being VS/UWS vs MCS')
                 
-                report.add_figure(fig_bars, title='Univariate Summary II', section='Univariate Summaries')
+                # Save plot and data
+                if save_dir:
+                    plot_name = f"prediction_{label_prefix.lower()}_univariate_bars"
+                    fig_bars.savefig(Path(save_dir) / f"{plot_name}.png", dpi=150, bbox_inches='tight')
+                    np.savez(
+                        Path(save_dir) / f"{plot_name}.npz",
+                        grouped_data={k: v.to_dict() for k, v in grouped_data.items()}
+                    )
+                    logger.info(f"   💾 Saved: {plot_name}")
+                
+                report.add_figure(fig_bars, title=f'{label_prefix}: Univariate Summary II', section='Univariate Summaries')
                 plt.close(fig_bars)
             
             logger.info("Added univariate prediction visualizations")

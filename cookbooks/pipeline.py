@@ -1,23 +1,56 @@
 #!/usr/bin/env python3
 """
-Pipeline to benchmark data
+New Pipeline for EEG Foundation Benchmark
 
-A comprehensive Python pipeline for processing EEG data through three main phases:
-1. Markers: Compute EEG markers and features from raw data
-2. Analysis: Compare markers and perform individual subject analysis
-3. Models: Train extra trees for binary classification (VS vs MCS) 
+Comprehensive pipeline orchestrating decoder, markers, and model training phases.
+Reads from: main_path/sub-{num}/ses-{num}/(orig|recon)/*.fif
 
+Supports 3 settings:
+1. DoC local-global: patient mode, lg task
+2. Control local-global: control mode, lg task  
+3. Control resting-state: control mode, rs task
+
+Pipeline phases:
+A. DECODER: decoder.py → analysis.py → viz.py → results/new_results/DECODER/
+B. MARKERS: compute_markers_with_junifer.py → compute_data.py → generate_plots.py → 
+            compute_scalars.py → compute_topographies.py → results/new_results/MARKERS/
+C. MODEL: support_vector_machine.py → results/new_results/MODEL/ (only for cases 1 & 2)
 
 Usage:
-    python pipeline.py --subject AD023 --metadata-dir /path/to/metadata --data-dir /path/to/fifdata                 # Process one subject
-    python pipeline.py --subjects AD023,YC260 --metadata-dir /path/to/metadata --data-dir /path/to/fifdata             # Process specific subjects  
-    python pipeline.py --all --metadata-dir /path/to/metadata --data-dir /path/to/fifdata                              # Process all subjects
-    python pipeline.py --random 5 --metadata-dir /path/to/metadata --data-dir /path/to/fifdata                         # Process 5 random subjects
-    python pipeline.py --subject AD023 --skip-models --metadata-dir /path/to/metadata --data-dir /path/to/fifdata      # Skip model training
-    python pipeline.py --all --markers-only --metadata-dir /path/to/metadata --data-dir /path/to/fifdata               # Only compute markers
-    python pipeline.py --analysis-only --metadata-dir /path/to/metadata --data-dir /path/to/fifdata                    # Only run analysis on existing results
+    # DoC local-global
+    python pipeline.py --main-path /data/doc --metadata-dir /metadata --mode patient --task lg --all
+    
+    # Control local-global
+    python pipeline.py --main-path /data/control_lg --metadata-dir /metadata --mode control --task lg --all
+    
+    # Control resting-state
+    python pipeline.py --main-path /data/control_rs --metadata-dir /metadata --mode control --task rs --all
 
-    python pipeline.py --subject AD023 --metadata-dir /Users/trinidad.borrell/Documents/Work/PhD/Proyects/nice/doc_a_data/metadata --data-dir /Users/trinidad.borrell/Documents/Work/PhD/data/TOTEM/zero_shot_data/fifdata/fifdata
+More examples:
+    # Run all phases
+    python pipeline.py \
+    --main-path /data/project/eeg_foundation/data/test_data/fif_data_doc/ \
+    --metadata-dir /data/project/eeg_foundation/data/metadata \
+    --mode patient --task lg --all
+
+    # Skip decoder, run only markers and model
+    python pipeline.py \
+    --main-path /data/project/eeg_foundation/data/test_data/fif_data_doc/ \
+    --metadata-dir /data/project/eeg_foundation/data/metadata \
+    --mode patient --task lg --all --skip-decoder
+
+    # Run only markers phase
+    python pipeline.py \
+    --main-path /data/project/eeg_foundation/data/test_data/fif_data_doc/ \
+    --metadata-dir /data/project/eeg_foundation/data/metadata \
+    --mode patient --task lg --all --skip-decoder --skip-model
+
+    # Control resting-state (no trial type filtering in decoder, MODEL skipped automatically)
+    python pipeline.py \
+    --main-path /data/project/eeg_foundation/data/control/control_rs/ \
+    --metadata-dir /data/project/eeg_foundation/data/metadata \
+    --mode control --task rs --all
+    
 Authors: Trinidad Borrell <trinidad.borrell@gmail.com>
 """
 
@@ -26,54 +59,77 @@ import sys
 import subprocess
 import logging
 import random
+import json
 from pathlib import Path
 from datetime import datetime
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import multiprocessing
 
 
 class Pipeline:
-    """Main pipeline class for benchmark data analysis."""
+    """Main pipeline class for EEG Foundation benchmark."""
     
     def __init__(self, 
-                 data_dir: str,
+                 main_path: str,
                  results_dir: str,
                  src_dir: str,
                  metadata_dir: str,
+                 mode: str = 'patient',
+                 task: str = 'lg',
                  batch_size: int = 1,
                  verbose: bool = False,
                  dry_run: bool = False,
-                 skip_smi: bool = False,
-                 skip_gfp: bool = False):
+                 # Decoder parameters
+                 decoder_cv: int = 3,
+                 decoder_n_jobs: int = 1,
+                 # Markers parameters
+                 markers_skip_clustering: bool = False,
+                 markers_keep_h5: bool = False,
+                 # Model parameters
+                 model_marker_type: str = 'scalar'):
         """
         Initialize the pipeline.
         
         Parameters
         ----------
-        data_dir : str
-            Path to the raw data directory
+        main_path : str
+            Path to main data directory with sub-{num}/ses-{num}/(orig|recon)/ structure
         results_dir : str
-            Path to save results
+            Path to save results (will create new_results subdirectories)
         src_dir : str
             Path to the source code directory
         metadata_dir : str
             Path to metadata directory
+        mode : str
+            Analysis mode: 'patient' or 'control' (for decoder and model)
+        task : str
+            Task paradigm: 'lg' (local-global) or 'rs' (resting-state)
         batch_size : int
-            Number of parallel processes
+            Number of parallel processes for subject-level tasks
         verbose : bool
             Enable verbose logging
         dry_run : bool
             Show what would be done without executing
-        skip_smi : bool
-            Skip SymbolicMutualInformation computation (recommended for large datasets)
-        skip_gfp : bool
-            Skip Global Field Power analysis (speeds up global analysis)
+        decoder_cv : int
+            Cross-validation folds for decoder
+        decoder_n_jobs : int
+            Parallel jobs for decoder
+        markers_skip_clustering : bool
+            Skip cluster permutation tests in markers
+        markers_keep_h5 : bool
+            Keep H5 files after markers computation
+        model_marker_type : str
+            Marker type for model training: 'scalar' or 'topo'
         """
-        self.data_dir = Path(data_dir)
+        self.main_path = Path(main_path)
         self.results_dir = Path(results_dir)
         self.src_dir = Path(src_dir)
         self.metadata_dir = Path(metadata_dir)
+        
+        # Core settings
+        self.mode = mode  # 'patient' or 'control'
+        self.task = task  # 'lg' or 'rs'
         
         # Determine optimal batch size
         max_workers = max(1, multiprocessing.cpu_count() - 1)
@@ -81,8 +137,13 @@ class Pipeline:
         
         self.verbose = verbose
         self.dry_run = dry_run
-        self.skip_smi = skip_smi
-        self.skip_gfp = skip_gfp
+        
+        # Component parameters
+        self.decoder_cv = decoder_cv
+        self.decoder_n_jobs = decoder_n_jobs
+        self.markers_skip_clustering = markers_skip_clustering
+        self.markers_keep_h5 = markers_keep_h5
+        self.model_marker_type = model_marker_type
         
         # Setup logging (must come before using self.logger)
         self._setup_logging()
@@ -93,8 +154,9 @@ class Pipeline:
         else:
             self.logger.info(f"⚙️  Sequential processing (use --batch-size N for parallel processing)")
         
-        # Validate directories
+        # Validate directories and configuration
         self._validate_directories()
+        self._validate_configuration()
         
         # Track progress
         self.completed_subjects = []
@@ -102,7 +164,7 @@ class Pipeline:
         
     def _setup_logging(self):
         """Setup logging configuration."""
-        log_dir = self.results_dir / "logs"
+        log_dir = self.results_dir / "new_results" / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
         
         log_file = log_dir / f"pipeline_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
@@ -124,24 +186,26 @@ class Pipeline:
         
     def _validate_directories(self):
         """Validate that required directories exist."""
-        if not self.data_dir.exists():
-            raise FileNotFoundError(f"Data directory not found: {self.data_dir}")
+        if not self.main_path.exists():
+            raise FileNotFoundError(f"Main data directory not found: {self.main_path}")
             
         if not self.src_dir.exists():
             raise FileNotFoundError(f"Source directory not found: {self.src_dir}")
             
         # Create results directory if it doesn't exist
-        self.results_dir.mkdir(parents=True, exist_ok=True)
+        (self.results_dir / "new_results").mkdir(parents=True, exist_ok=True)
         
         # Check for required source files
         required_files = [
-            "markers/compute_doc_forest_markers_variable.py",
-            "markers/compute_doc_forest_features_variable.py",
-            "model/extratrees.py",
-            "analysis/individual_analysis.py",
-            "analysis/global_analysis.py",
-            "analysis/statistical_analysis.py",
-            "decoder/decoder.py"
+            "decoder/decoder.py",
+            "decoder/analysis/analysis.py",
+            "decoder/analysis/viz.py",
+            "markers/compute_markers_with_junifer.py",
+            "markers/report/compute_data.py",
+            "markers/report/generate_plots.py",
+            "markers/compute_scalars.py",
+            "markers/compute_topographies.py",
+            "model/support_vector_machine.py"
         ]
         
         missing_files = []
@@ -152,13 +216,87 @@ class Pipeline:
         if missing_files:
             raise FileNotFoundError(f"Missing required source files: {missing_files}")
     
+    def _validate_configuration(self):
+        """Validate pipeline configuration parameters."""
+        if self.mode not in ['patient', 'control']:
+            raise ValueError(f"Invalid mode '{self.mode}'. Must be 'patient' or 'control'")
+        
+        if self.task not in ['lg', 'rs']:
+            raise ValueError(f"Invalid task '{self.task}'. Must be 'lg' or 'rs'")
+        
+        # Check YAML templates exist
+        yaml_template = self._get_yaml_template()
+        if not yaml_template.exists():
+            raise FileNotFoundError(f"YAML template not found: {yaml_template}")
+        
+        self.logger.info(f"Configuration: mode={self.mode}, task={self.task}")
+        self.logger.info(f"YAML template: {yaml_template}")
+    
+    def _get_yaml_template(self) -> Path:
+        """Get appropriate YAML template based on task."""
+        if self.task == 'lg':
+            return self.src_dir / "markers" / "input" / "icm_complete_individual_markers_local_global.yaml"
+        else:  # rs
+            return self.src_dir / "markers" / "input" / "icm_complete_individual_markers_resting_state.yaml"
+    
+    def discover_subjects(self, force_recompute: bool = False) -> List[Tuple[str, str]]:
+        """
+        Discover all subjects with available sessions from main_path.
+        Supports two directory structures:
+        1. main_path/sub-{num}/ses-{num}/orig/*.fif and .../recon/*.fif
+        2. main_path/sub-{num}/ses-{num}/*_original.fif and *_recon.fif
+        
+        Parameters
+        ----------
+        force_recompute : bool
+            If True, include subjects even if they are already complete
+            
+        Returns
+        -------
+        List[Tuple[str, str]]
+            List of (subject_id, session) tuples
+        """
+        subjects = []
+        
+        for subject_dir in self.main_path.glob("sub-*"):
+            if not subject_dir.is_dir():
+                continue
+                
+            subject_id = subject_dir.name.replace("sub-", "")
+            
+            # Find all sessions for this subject
+            for session_dir in subject_dir.glob("ses-*"):
+                if not session_dir.is_dir():
+                    continue
+                    
+                session = session_dir.name.replace("ses-", "")
+                
+                # Check two possible structures:
+                # Structure 1: orig/recon subdirectories
+                orig_dir = session_dir / "orig"
+                recon_dir = session_dir / "recon"
+                
+                has_orig_dir = orig_dir.exists() and list(orig_dir.glob("*.fif"))
+                has_recon_dir = recon_dir.exists() and list(recon_dir.glob("*.fif"))
+                
+                # Structure 2: files with _original/_recon suffixes in session dir
+                has_orig_files = list(session_dir.glob("*_original.fif"))
+                has_recon_files = list(session_dir.glob("*_recon.fif"))
+                
+                if has_orig_dir or has_recon_dir or has_orig_files or has_recon_files:
+                    subjects.append((subject_id, session))
+                    if has_orig_dir or has_recon_dir:
+                        self.logger.debug(f"Found: sub-{subject_id}/ses-{session} (orig/:{has_orig_dir}, recon/:{has_recon_dir})")
+                    else:
+                        self.logger.debug(f"Found: sub-{subject_id}/ses-{session} (*_original:{bool(has_orig_files)}, *_recon:{bool(has_recon_files)})")
+        
+        subjects.sort()
+        self.logger.info(f"📋 Discovered {len(subjects)} subject/session pairs")
+        return subjects
+
     def is_subject_complete(self, subject_id: str, session: str) -> bool:
         """
-        Check if a subject/session is already complete based on required files and folders.
-        
-        A subject is considered complete if all four .npy feature files exist.
-        The .hdf5 marker files and analysis files are optional for completeness check,
-        as the features are what's needed for downstream model training.
+        Check if a subject/session has completed all processing stages.
         
         Parameters
         ----------
@@ -172,158 +310,17 @@ class Pipeline:
         bool
             True if subject/session is complete, False otherwise
         """
-        results_dir = self.results_dir / "SUBJECTS" / f"sub-{subject_id}" / session
+        # Check decoder results
+        decoder_dir = self.results_dir / "new_results" / "DECODER" / f"sub-{subject_id}" / f"ses-{session}"
+        decoder_complete = (decoder_dir / "data" / "decoding_results.pkl").exists()
         
-        # Check if the main result directory exists
-        if not results_dir.exists():
-            return False
+        # Check markers results (both orig and recon)
+        markers_dir = self.results_dir / "new_results" / "MARKERS"
+        orig_scalars = (markers_dir / f"sub-{subject_id}_ses-{session}_orig" / f"scalars_{subject_id}_ses-{session}_orig.npz").exists()
+        recon_scalars = (markers_dir / f"sub-{subject_id}_ses-{session}_recon" / f"scalars_{subject_id}_ses-{session}_recon.npz").exists()
         
-        # Check features_variable folder and required .npy files
-        # This is the PRIMARY requirement - if all features exist, subject is complete
-        features_dir = results_dir / "features_variable"
-        required_npy_files = [
-            'scalars_reconstructed.npy',
-            'topos_reconstructed.npy', 
-            'topos_original.npy',
-            'scalars_original.npy'
-        ]
+        return decoder_complete and orig_scalars and recon_scalars
         
-        if not features_dir.exists():
-            return False
-            
-        for npy_file in required_npy_files:
-            if not (features_dir / npy_file).exists():
-                return False
-        
-        # If all feature files exist, the subject is considered complete
-        # We don't require .hdf5 marker files or analysis files to exist
-        # This allows users to delete intermediate .hdf5 files to save space
-        return True
-
-    def is_decoder_subject_complete(self, subject_id: str, session: str, decoder_output_dir: Path) -> bool:
-        """
-        Check if decoder results already exist for a subject/session.
-        
-        Parameters
-        ----------
-        subject_id : str
-            Subject identifier
-        session : str
-            Session identifier
-        decoder_output_dir : Path
-            Decoder output directory to check
-            
-        Returns
-        -------
-        bool
-            True if decoder results exist, False otherwise
-        """
-        sub_ses_dir = decoder_output_dir / f"sub-{subject_id}" / f"ses-{session}"
-        
-        # Check for required decoder files
-        required_files = [
-            sub_ses_dir / "data" / "decoding_results.pkl",
-            sub_ses_dir / "data" / "decoding_summary.json", 
-            sub_ses_dir / "data" / "times.npy"
-        ]
-        
-        return all(f.exists() for f in required_files)
-        
-    def find_best_decoder_results_directory(self) -> Tuple[Path, dict]:
-        """
-        Find the best decoder results directory (one with most completed subjects).
-        
-        Returns
-        -------
-        Tuple[Path, dict]
-            Path to best decoder directory and dict with completion stats per directory
-        """
-        decoder_base_dir = self.results_dir / "DECODER"
-        if not decoder_base_dir.exists():
-            return None, {}
-            
-        # Find all decoder_results_* directories
-        decoder_dirs = list(decoder_base_dir.glob("decoder_results_*"))
-        if not decoder_dirs:
-            return None, {}
-        
-        # Get all subjects that could potentially be processed
-        subjects_with_data = self.discover_subjects(force_recompute=True)
-        
-        # Check completion status for each directory
-        directory_stats = {}
-        for decoder_dir in decoder_dirs:
-            completed_count = 0
-            completed_subjects = []
-            
-            for subject_id, session in subjects_with_data:
-                if self.is_decoder_subject_complete(subject_id, session, decoder_dir):
-                    completed_count += 1
-                    completed_subjects.append((subject_id, session))
-            
-            directory_stats[decoder_dir] = {
-                'completed_count': completed_count,
-                'completed_subjects': completed_subjects,
-                'total_possible': len(subjects_with_data)
-            }
-        
-        # Find directory with most completed subjects
-        if not directory_stats:
-            return None, {}
-        
-        best_dir = max(directory_stats.keys(), key=lambda d: directory_stats[d]['completed_count'])
-        return best_dir, directory_stats
-
-    def discover_subjects(self, force_recompute: bool = False) -> List[Tuple[str, str]]:
-        """
-        Discover all subjects with available sessions.
-        
-        Parameters
-        ----------
-        force_recompute : bool
-            If True, include subjects even if they are already complete
-            
-        Returns
-        -------
-        List[Tuple[str, str]]
-            List of (subject_id, session) tuples
-        """
-        subjects = []
-        skipped_complete = []
-        
-        for subject_dir in self.data_dir.glob("sub-*"):
-            if not subject_dir.is_dir():
-                continue
-                
-            subject_id = subject_dir.name.replace("sub-", "")
-            
-            # Find all sessions for this subject
-            for session_dir in subject_dir.glob("ses-*"):
-                if not session_dir.is_dir():
-                    continue
-                    
-                session = session_dir.name
-                
-                # Check if both original and reconstructed files exist
-                original_files = list(session_dir.glob("*_original.fif"))
-                recon_files = list(session_dir.glob("*_recon.fif"))
-                
-                if original_files and recon_files:
-                    # Check if subject is already complete
-                    if not force_recompute and self.is_subject_complete(subject_id, session):
-                        skipped_complete.append((subject_id, session))
-                        self.logger.info(f"⏭️  Skipping {subject_id}/{session} - already complete")
-                    else:
-                        subjects.append((subject_id, session))
-        
-        if skipped_complete:
-            self.logger.info(f"📋 Skipped {len(skipped_complete)} already completed subjects")
-            if self.verbose:
-                for subject_id, session in skipped_complete:
-                    self.logger.debug(f"   - {subject_id}/{session}")
-                    
-        return subjects
-    
     def resolve_subjects(self, subject_args: List[str], force_recompute: bool = False) -> List[Tuple[str, str]]:
         """
         Resolve subject selection arguments to actual subject/session pairs.
@@ -343,7 +340,7 @@ class Pipeline:
         all_subjects = self.discover_subjects(force_recompute=force_recompute)
         
         if not all_subjects:
-            raise ValueError("No subjects found in data directory")
+            raise ValueError("No subjects found in main_path directory")
             
         resolved = []
         
@@ -367,441 +364,342 @@ class Pipeline:
         resolved.sort()
         
         return resolved
+
     
-    def run_markers_phase(self, subject_id: str, session: str) -> bool:
+    def run_decoder_phase(self) -> bool:
         """
-        Run the markers computation phase for a subject/session.
+        Run decoder phase for all subjects: decoder.py → analysis.py → viz.py
+        Saves results to new_results/DECODER/
         
-        Parameters
-        ----------
-        subject_id : str
-            Subject identifier
-        session : str
-            Session identifier
-            
         Returns
         -------
         bool
             True if successful, False otherwise
         """
         try:
-            subject_dir = self.data_dir / f"sub-{subject_id}" / session
-            results_dir = self.results_dir / "SUBJECTS" / f"sub-{subject_id}" / session
+            self.logger.info("=" * 60)
+            self.logger.info("PHASE A: DECODER")
+            self.logger.info("=" * 60)
             
-            # Create output directories
-            markers_dir = results_dir / "markers_variable"
-            features_dir = results_dir / "features_variable"
-            markers_dir.mkdir(parents=True, exist_ok=True)
-            features_dir.mkdir(parents=True, exist_ok=True)
+            decoder_output_dir = self.results_dir / "new_results" / "DECODER"
+            decoder_output_dir.mkdir(parents=True, exist_ok=True)
             
-            # Find data files
-            original_file = next(subject_dir.glob("*_original.fif"), None)
-            recon_file = next(subject_dir.glob("*_recon.fif"), None)
-            
-            if not original_file or not recon_file:
-                self.logger.error(f"Missing data files for {subject_id}/{session}")
-                return False
-                
-            self.logger.info(f"Computing markers for {subject_id}/{session}")
-            
-            # Process original data
-            self.logger.info(f"  Step 1: Computing markers from {original_file.name}")
+            # Step 1: Run decoder.py
+            self.logger.info("Step A1: Running decoder.py...")
             cmd = [
-                "python", str(self.src_dir / "markers/compute_doc_forest_markers_variable.py"),
-                str(original_file),
-                "--output", str(markers_dir / "markers_original.hdf5"),
-                "--plot"
-            ]
-            if self.skip_smi:
-                cmd.append("--skip-smi")
-            if not self._run_command(cmd):
-                return False
-                
-            self.logger.info("  Step 2: Computing features from markers_original.hdf5")
-            if not self._run_command([
-                "python", str(self.src_dir / "markers/compute_doc_forest_features_variable.py"),
-                str(markers_dir / "markers_original.hdf5"),
-                "--output-scalars", str(features_dir / "scalars_original.npy"),
-                "--output-topos", str(features_dir / "topos_original.npy")
-            ]):
-                return False
-            
-            # Process reconstructed data
-            self.logger.info(f"  Step 3: Computing markers from {recon_file.name}")
-            cmd = [
-                "python", str(self.src_dir / "markers/compute_doc_forest_markers_variable.py"),
-                str(recon_file),
-                "--output", str(markers_dir / "markers_reconstructed.hdf5"),
-                "--plot"
-            ]
-            if self.skip_smi:
-                cmd.append("--skip-smi")
-            if not self._run_command(cmd):
-                return False
-                
-            self.logger.info("  Step 4: Computing features from markers_reconstructed.hdf5")
-            if not self._run_command([
-                "python", str(self.src_dir / "markers/compute_doc_forest_features_variable.py"),
-                str(markers_dir / "markers_reconstructed.hdf5"),
-                "--output-scalars", str(features_dir / "scalars_reconstructed.npy"),
-                "--output-topos", str(features_dir / "topos_reconstructed.npy")
-            ]):
-                return False
-            
-            self.logger.info(f"✓ Markers completed for {subject_id}/{session}")
-            return True
-            
-        except Exception as e:
-            self.logger.error(f"✗ Markers failed for {subject_id}/{session}: {e}")
-            return False
-    
-    def run_models_phase(self) -> bool:
-        """
-        Run the model training phase across all processed subjects.
-        This should be called after all subjects have completed markers and analysis phases.
-        
-        Returns
-        -------
-        bool
-            True if successful, False otherwise
-        """
-        try:
-            self.logger.info("Running global models training")
-            
-            # First check if we have enough successful subjects
-            subjects_dir = self.results_dir / "SUBJECTS"
-            if not subjects_dir.exists():
-                self.logger.error("No subjects directory found")
-                return False
-                
-            # Count subjects with complete data
-            complete_subjects = []
-            for subject_dir in subjects_dir.glob("sub-*"):
-                if not subject_dir.is_dir():
-                    continue
-                for session_dir in subject_dir.glob("ses-*"):
-                    if not session_dir.is_dir():
-                        continue
-                    features_dir = session_dir / "features_variable"
-                    if (features_dir.exists() and 
-                        (features_dir / "scalars_original.npy").exists() and
-                        (features_dir / "scalars_reconstructed.npy").exists()):
-                        complete_subjects.append(f"{subject_dir.name}/{session_dir.name}")
-            
-            self.logger.info(f"Found {len(complete_subjects)} subjects with complete data")
-            if len(complete_subjects) < 2:
-                self.logger.error("Need at least 2 subjects with complete data for model training")
-                return False
-            
-            # Create global models output directory
-            models_output_dir = self.results_dir / "EXTRATREES" / f"models_{datetime.now().strftime('%Y-%m-%d_%H%M%S')}"
-            models_output_dir.mkdir(parents=True, exist_ok=True)
-            
-            # Get patient labels path from metadata directory
-            patient_labels_path = self.metadata_dir / "patient_labels_with_controls.csv"
-            
-            if not patient_labels_path.exists():
-                self.logger.error(f"Patient labels file not found at: {patient_labels_path}")
-                self.logger.error(f"Please check that the file exists and the --metadata-dir path is correct")
-                self.logger.info(f"Looking for: patient_labels_with_controls.csv")
-                self.logger.info(f"In directory: {self.metadata_dir}")
-                return False
-            
-            self.logger.info(f"Using patient labels: {patient_labels_path}")
-            
-            # Train cross-data models for different marker types
-            marker_types = ["scalar", "topo"]
-            
-            success = True
-            for marker_type in marker_types:
-                self.logger.info(f"Training cross-data {marker_type} models...")
-                self.logger.info("=" * 70)
-                self.logger.info("CROSS-DATA CLASSIFICATION APPROACH:")
-                self.logger.info("  This approach ensures NO SUBJECT BIAS and NO DATA LEAKAGE:")
-                self.logger.info("  1. Uses SAME train/test subject splits for both original and reconstructed")
-                self.logger.info("  2. Trains Model A on ORIGINAL data")
-                self.logger.info("  3. Trains Model B on RECONSTRUCTED data")
-                self.logger.info("  4. Tests BOTH models on BOTH test sets (original & reconstructed)")
-                self.logger.info("  5. All 4 test scenarios use the SAME test subjects")
-                self.logger.info("=" * 70)
-                
-                config_output_dir = models_output_dir / f"{marker_type}"
-                
-                # Use the new cross-data classification which trains both models and tests on both test sets
-                # CRITICAL: The --cross-data flag enables proper cross-testing with consistent subjects
-                if not self._run_command([
-                    "python", str(self.src_dir / "model/extratrees.py"),
-                    "--data-dir", str(self.results_dir / "SUBJECTS"),
-                    "--patient-labels", str(patient_labels_path),
-                    "--output-dir", str(config_output_dir),
-                    "--marker-type", marker_type,
-                    "--cross-data"  # CRITICAL: Enables CrossDataClassifier for proper cross-testing
-                ]):
-                    self.logger.error(f"Failed to train cross-data {marker_type} models")
-                    success = False
-                else:
-                    self.logger.info(f"✓ Cross-data {marker_type} models completed")
-                    self.logger.info(f"   Results saved with 4 test scenarios:")
-                    self.logger.info(f"   - Model A (original) → Original test subjects")
-                    self.logger.info(f"   - Model A (original) → Reconstructed test subjects")
-                    self.logger.info(f"   - Model B (reconstructed) → Original test subjects")
-                    self.logger.info(f"   - Model B (reconstructed) → Reconstructed test subjects")
-            
-            if success:
-                self.logger.info("✓ Global models training completed")
-            else:
-                self.logger.error("✗ Some models failed to train")
-                
-            return success
-            
-        except Exception as e:
-            self.logger.error(f"✗ Global models training failed: {e}")
-            return False
-    
-    def run_analysis_phase(self, subject_id: str, session: str) -> bool:
-        """
-        Run the analysis phase for a subject/session.
-        
-        Parameters
-        ----------
-        subject_id : str
-            Subject identifier
-        session : str
-            Session identifier
-            
-        Returns
-        -------
-        bool
-            True if successful, False otherwise
-        """
-        try:
-            results_dir = self.results_dir / "SUBJECTS" / f"sub-{subject_id}" / session 
-            analysis_dir = results_dir / "individual_analysis"
-            analysis_dir.mkdir(parents=True, exist_ok=True)
-            
-            # Check if required feature files exist
-            features_dir = results_dir / "features_variable"
-            required_files = [
-                features_dir / "scalars_original.npy",
-                features_dir / "scalars_reconstructed.npy",
-                features_dir / "topos_original.npy",
-                features_dir / "topos_reconstructed.npy"
-            ]
-            
-            missing_files = [f for f in required_files if not f.exists()]
-            if missing_files:
-                self.logger.warning(f"Missing feature files for {subject_id}/{session}: {[f.name for f in missing_files]}")
-                self.logger.warning(f"Skipping analysis for {subject_id}/{session}")
-                return False
-            
-            self.logger.info(f"Running analysis for {subject_id}/{session}")
-            
-            # Get the fif data directory for GFP analysis
-            fif_data_dir = self.data_dir / f"sub-{subject_id}" / session
-            
-            # Run individual analysis (replaces compare_markers.py)
-            if not self._run_command([
-                "python", str(self.src_dir / "analysis/individual_analysis.py"),
-                str(results_dir),
-                str(fif_data_dir),
-                "--output", str(analysis_dir)
-            ]):
-                return False
-            
-            self.logger.info(f"✓ Analysis completed for {subject_id}/{session}")
-            return True
-            
-        except Exception as e:
-            self.logger.error(f"✗ Analysis failed for {subject_id}/{session}: {e}")
-            return False
-    
-    def run_decoder_phase(self, force_recompute: bool = False, aggregate_only: bool = False) -> bool:
-        """
-        Run decoder phase across all processed subjects.
-        This decodes original vs reconstructed EEG data.
-        
-        Parameters
-        ----------
-        force_recompute : bool
-            If True, recompute all subjects even if they already exist
-        aggregate_only : bool
-            If True, only aggregate existing results without processing subjects
-        
-        Returns
-        -------
-        bool
-            True if successful, False otherwise
-        """
-        try:
-            self.logger.info("Running decoder analysis")
-            
-            # Check for existing decoder results across ALL directories
-            best_decoder_dir, directory_stats = self.find_best_decoder_results_directory()
-            decoder_output_dir = None
-            
-            if best_decoder_dir and not force_recompute:
-                # Display summary of all decoder directories
-                self.logger.info("📊 Decoder directories found:")
-                for decoder_dir, stats in directory_stats.items():
-                    completion_pct = (stats['completed_count'] / stats['total_possible']) * 100 if stats['total_possible'] > 0 else 0
-                    status = "✅ BEST" if decoder_dir == best_decoder_dir else "📁"
-                    self.logger.info(f"   {status} {decoder_dir.name}: {stats['completed_count']}/{stats['total_possible']} subjects ({completion_pct:.1f}%)")
-                
-                # Get stats for best directory
-                best_stats = directory_stats[best_decoder_dir]
-                completed_subjects = best_stats['completed_subjects']
-                subjects_with_data = self.discover_subjects(force_recompute=True)
-                pending_subjects = [s for s in subjects_with_data if s not in completed_subjects]
-                
-                self.logger.info(f"🎯 Using best directory: {best_decoder_dir}")
-                self.logger.info(f"📈 Status: {len(completed_subjects)} completed, {len(pending_subjects)} pending")
-                
-                if pending_subjects:
-                    # Use best existing directory 
-                    decoder_output_dir = best_decoder_dir
-                    self.logger.info(f"🔄 Resuming decoder analysis in existing directory")
-                    self.logger.info(f"📋 Pending subjects: {[f'{s}/{ses}' for s, ses in pending_subjects[:5]]}{'...' if len(pending_subjects) > 5 else ''}")
-                else:
-                    self.logger.info("✅ All subjects already processed - skipping decoder analysis")
-                    return True
-            else:
-                if force_recompute:
-                    self.logger.info("🔄 Force recompute enabled - will create new directory")
-                else:
-                    self.logger.info("📁 No existing decoder directories found - will create new directory")
-            
-            if decoder_output_dir is None:
-                # Create new decoder output directory
-                decoder_output_dir = self.results_dir / "DECODER" / f"decoder_results_{datetime.now().strftime('%Y-%m-%d_%H%M%S')}"
-                decoder_output_dir.mkdir(parents=True, exist_ok=True)
-                self.logger.info(f"🆕 Created new decoder output directory: {decoder_output_dir}")
-            
-            self.logger.info(f"🎯 Final decoder directory: {decoder_output_dir}")
-            
-            # Build decoder command
-            cmd = [
-                "python", str(self.src_dir / "decoder/decoder.py"),
-                "--main_path", str(self.data_dir),
+                "python", str(self.src_dir / "decoder" / "decoder.py"),
+                "--main_path", str(self.main_path),
                 "--output_dir", str(decoder_output_dir),
-                "--cv", "3",
-                "--n_jobs", "1",  # Avoid memory multiplication from parallelization
-                "--verbose"
+                "--cv", str(self.decoder_cv),
+                "--n_jobs", str(self.decoder_n_jobs),
+                "--mode", self.mode
             ]
             
-            # Add patient labels for subject-type aggregation
+            # Add patient labels if in patient mode
             patient_labels_path = self.metadata_dir / "patient_labels_with_controls.csv"
             if patient_labels_path.exists():
                 cmd.extend(["--patient-labels", str(patient_labels_path)])
-                self.logger.info(f"📊 Using patient labels for subject-type aggregation: {patient_labels_path}")
             
-            # Add aggregate-only flag if requested
-            if aggregate_only:
-                cmd.append("--aggregate-only")
-                self.logger.info("🔄 Aggregate-only mode: will only aggregate existing results")
+            # For resting-state, don't filter trial types (no stratification)
+            if self.task == 'rs':
+                self.logger.info("Resting-state: disabling trial type filtering")
+                # decoder.py will not filter trial types when --filter_trial_types is not provided
             
-            # Run decoder on all available subjects for robust population-level analysis
-            # Memory optimization: decoder now uses float32 and n_jobs=1
-            # The decoder script itself will skip subjects that are already complete
+            if self.verbose:
+                cmd.append("--verbose")
+            
             if not self._run_command(cmd):
+                self.logger.error("decoder.py failed")
                 return False
             
-            self.logger.info("✓ Decoder analysis completed")
-            return True
-            
-        except Exception as e:
-            self.logger.error(f"✗ Decoder analysis failed: {e}")
-            return False
-    
-    def run_global_analysis(self) -> bool:
-        """
-        Run global analysis across all processed subjects.
-        
-        Returns
-        -------
-        bool
-            True if successful, False otherwise
-        """
-        try:
-            self.logger.info("Running global analysis")
-            
-            patient_labels_path = self.metadata_dir / "patient_labels_with_controls.csv"
-            
-            if not patient_labels_path.exists():
-                self.logger.error(f"Patient labels file not found at: {patient_labels_path}")
-                self.logger.error(f"Please check that the file exists and the --metadata-dir path is correct")
+            # Find the most recent decoder results directory
+            decoder_dirs = sorted(decoder_output_dir.glob("decoding-*"))
+            if not decoder_dirs:
+                self.logger.error("No decoder results directory found")
                 return False
             
-            global_output_dir = self.results_dir / "GLOBAL" / f"global_results_{datetime.now().strftime('%Y-%m-%d_%H%M%S')}"
-            global_output_dir.mkdir(parents=True, exist_ok=True)
-            results_dir = self.results_dir / "SUBJECTS"
+            latest_decoder_dir = decoder_dirs[-1]
+            self.logger.info(f"Using decoder results from: {latest_decoder_dir}")
             
-            # Build command with optional skip-gfp parameter
+            # Step 2: Run analysis.py
+            self.logger.info("Step A2: Running analysis.py...")
             cmd = [
-                "python", str(self.src_dir / "analysis/global_analysis.py"),
-                "--results-dir", str(results_dir),
-                "--output-dir", str(global_output_dir),
-                "--patient-labels", str(patient_labels_path),
-                "--data-dir", str(self.data_dir)
+                "python", str(self.src_dir / "decoder" / "analysis" / "analysis.py"),
+                "--results-dir", str(latest_decoder_dir)
             ]
             
-            if self.skip_gfp:
-                cmd.append("--skip-gfp")
-                self.logger.info("🚫 Skip GFP option enabled for global analysis")
-            
             if not self._run_command(cmd):
+                self.logger.error("analysis.py failed")
                 return False
             
-            self.logger.info("✓ Global analysis completed")
+            # Step 3: Run viz.py
+            self.logger.info("Step A3: Running viz.py...")
+            # Map mode: patient -> DOC, control -> control
+            viz_mode = "DOC" if self.mode == "patient" else "control"
+            cmd = [
+                "python", str(self.src_dir / "decoder" / "analysis" / "viz.py"),
+                "--results-dir", str(latest_decoder_dir),
+                "--mode", viz_mode
+            ]
+            
+            if not self._run_command(cmd):
+                self.logger.error("viz.py failed")
+                return False
+            
+            self.logger.info("✓ DECODER phase completed")
             return True
             
         except Exception as e:
-            self.logger.error(f"✗ Global analysis failed: {e}")
+            self.logger.error(f"✗ DECODER phase failed: {e}")
             return False
     
-    def run_statistical_analysis(self) -> bool:
+    def run_markers_phase_for_subject(self, subject_id: str, session: str, file_type: str) -> bool:
         """
-        Run statistical analysis across all processed subjects.
+        Run markers phase for a single subject/session/file_type.
         
+        Parameters
+        ----------
+        subject_id : str
+            Subject identifier (e.g., '001')
+        session : str
+            Session identifier (e.g., '01')
+        file_type : str
+            'orig' or 'recon'
+            
         Returns
         -------
         bool
             True if successful, False otherwise
         """
         try:
-            self.logger.info("Running statistical analysis")
+            session_dir = self.main_path / f"sub-{subject_id}" / f"ses-{session}"
             
-            patient_labels_path = self.metadata_dir / "patient_labels_with_controls.csv"
+            # Try Structure 1: orig/recon subdirectories
+            fif_folder = session_dir / file_type
+            fif_files = []
             
-            if not patient_labels_path.exists():
-                self.logger.error(f"Patient labels file not found at: {patient_labels_path}")
-                self.logger.error(f"Please check that the file exists and the --metadata-dir path is correct")
+            if fif_folder.exists():
+                fif_files = list(fif_folder.glob("*.fif"))
+            
+            # Try Structure 2: files with _original/_recon suffixes
+            if not fif_files:
+                suffix = "_original.fif" if file_type == "orig" else "_recon.fif"
+                fif_files = list(session_dir.glob(f"*{suffix}"))
+                # For structure 2, the fif_folder is the session dir itself
+                if fif_files:
+                    fif_folder = session_dir
+            
+            if not fif_files:
+                self.logger.warning(f"No .fif files found for {subject_id}/ses-{session}/{file_type}")
                 return False
             
-            stats_output_dir = self.results_dir / "STATISTICS" / f"statistics_results_{datetime.now().strftime('%Y-%m-%d_%H%M%S')}"
-            stats_output_dir.mkdir(parents=True, exist_ok=True)
-            results_dir = self.results_dir / "SUBJECTS"
+            fif_file = fif_files[0]  # Use first .fif file found
             
-            if not self._run_command([
-                "python", str(self.src_dir / "analysis/statistical_analysis.py"),
-                "--results-dir", str(results_dir),
-                "--output-dir", str(stats_output_dir),
-                "--patient-labels", str(patient_labels_path)
-            ]):
+            # Output directory: MARKERS/sub-{ID}/ses-{num}/orig/ or MARKERS/sub-{ID}/ses-{num}/recon/
+            subject_dir = self.results_dir / "new_results" / "MARKERS" / f"sub-{subject_id}"
+            session_dir_out = subject_dir / f"ses-{session}"
+            subject_markers_dir = session_dir_out / file_type  # orig or recon
+            subject_markers_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Check if results already exist (check all required outputs)
+            scalars_file = subject_markers_dir / f"scalars_{subject_id}_ses-{session}_{file_type}.npz"
+            topos_file = subject_markers_dir / f"topos_{subject_id}_ses-{session}_{file_type}.npz"
+            h5_file = subject_markers_dir / "icm_complete_features.h5"
+            
+            # Check for key output files to determine if processing is complete
+            if scalars_file.exists() and topos_file.exists():
+                self.logger.info(f"⏭️  Skipping {subject_id}/ses-{session}/{file_type} - results already exist")
+                return True
+            
+            self.logger.info(f"Processing {subject_id}/ses-{session}/{file_type}")
+            
+            # Step 1: compute_markers_with_junifer.py (ALWAYS keep H5 until after report generation)
+            self.logger.info("  Step B1: compute_markers_with_junifer.py...")
+            
+            cmd = [
+                "python", str(self.src_dir / "markers" / "compute_markers_with_junifer.py"),
+                "--fif_folder", str(fif_folder),
+                "--task", self.task,
+                "--output-dir", str(subject_markers_dir),  # Use direct output directory
+                "--skip-clustering",  # Always skip clustering (default for speed)
+                "--keep-h5"  # ALWAYS keep H5 file - we'll delete it later after report generation
+            ]
+            
+            if not self._run_command(cmd):
+                self.logger.error("compute_markers_with_junifer.py failed")
                 return False
             
-            self.logger.info("✓ Statistical analysis completed")
+            # Check if H5 file was created
+            if not h5_file.exists():
+                self.logger.error(f"H5 file not found: {h5_file}")
+                return False
+            
+            # Step 2: compute_data.py
+            self.logger.info("  Step B2: compute_data.py...")
+            cmd = [
+                "python", str(self.src_dir / "markers" / "report" / "compute_data.py"),
+                "--subject_id", subject_id,
+                "--h5_file", str(h5_file),
+                "--fif_file", str(fif_file),
+                "--output_dir", str(subject_markers_dir),
+                "--task", self.task
+            ]
+            
+            if self.markers_skip_clustering:
+                cmd.append("--skip-clustering")
+            
+            if not self._run_command(cmd):
+                self.logger.error("compute_data.py failed")
+                return False
+            
+            # Step 3: compute_scalars.py
+            self.logger.info("  Step B3: compute_scalars.py...")
+            cmd = [
+                "python", str(self.src_dir / "markers" / "compute_scalars.py"),
+                "--h5_file", str(h5_file),
+                "--output_file", str(scalars_file)
+            ]
+            
+            if not self._run_command(cmd):
+                self.logger.error("compute_scalars.py failed")
+                return False
+            
+            # Step 4: compute_topographies.py
+            self.logger.info("  Step B4: compute_topographies.py...")
+            cmd = [
+                "python", str(self.src_dir / "markers" / "compute_topographies.py"),
+                "--h5_file", str(h5_file),
+                "--output_file", str(topos_file)
+            ]
+            
+            if not self._run_command(cmd):
+                self.logger.error("compute_topographies.py failed")
+                return False
+            
+            # Verify all outputs were created
+            if not scalars_file.exists():
+                self.logger.error(f"Scalars file not created: {scalars_file}")
+                return False
+            if not topos_file.exists():
+                self.logger.error(f"Topographies file not created: {topos_file}")
+                return False
+            
+            self.logger.info(f"✓ Markers completed for {subject_id}/ses-{session}/{file_type}")
             return True
             
         except Exception as e:
-            self.logger.error(f"✗ Statistical analysis failed: {e}")
+            self.logger.error(f"✗ Markers failed for {subject_id}/ses-{session}/{file_type}: {e}")
             return False
     
-    def process_subject(self, subject_id: str, session: str, 
-                       skip_markers: bool = False,
-                       skip_models: bool = False, 
-                       skip_analysis: bool = False) -> bool:
+    def run_markers_phase_for_all_subjects(self, subjects: List[Tuple[str, str]]) -> bool:
         """
-        Process a single subject through individual phases (markers and analysis).
+        Run markers phase for all subjects (both orig and recon files).
+        
+        NEW WORKFLOW: Process each subject/session completely before moving to next:
+        1. Run markers for orig
+        2. Run markers for recon
+        3. Generate report (requires both orig and recon H5 files)
+        4. Verify all outputs
+        5. Delete H5 files (only if not keeping them)
+        6. Move to next subject/session
+        
+        Parameters
+        ----------
+        subjects : List[Tuple[str, str]]
+            List of (subject_id, session) tuples
+            
+        Returns
+        -------
+        bool
+            True if all successful, False otherwise
+        """
+        try:
+            self.logger.info("=" * 60)
+            self.logger.info("PHASE B: MARKERS")
+            self.logger.info("=" * 60)
+            self.logger.info("Processing workflow: markers (orig) → markers (recon) → report → cleanup")
+            self.logger.info("=" * 60)
+            
+            success_count = 0
+            failed_subjects = []
+            
+            for subject_id, session in subjects:
+                self.logger.info("")
+                self.logger.info("=" * 60)
+                self.logger.info(f"Processing subject: {subject_id}, session: {session}")
+                self.logger.info("=" * 60)
+                
+                # Check if this subject/session is already completely processed
+                if self._is_subject_complete(subject_id, session):
+                    self.logger.info(f"⏭️  Skipping {subject_id}/ses-{session} - all outputs already exist")
+                    success_count += 1
+                    continue
+                
+                subject_success = True
+                
+                # Step 1: Process orig file
+                self.logger.info(f"[1/4] Processing orig data for {subject_id}/ses-{session}...")
+                if not self.run_markers_phase_for_subject(subject_id, session, "orig"):
+                    self.logger.error(f"Failed to process orig data for {subject_id}/ses-{session}")
+                    subject_success = False
+                    failed_subjects.append((subject_id, session, "orig"))
+                
+                # Step 2: Process recon file
+                self.logger.info(f"[2/4] Processing recon data for {subject_id}/ses-{session}...")
+                if not self.run_markers_phase_for_subject(subject_id, session, "recon"):
+                    self.logger.error(f"Failed to process recon data for {subject_id}/ses-{session}")
+                    subject_success = False
+                    failed_subjects.append((subject_id, session, "recon"))
+                
+                # Step 3: Generate report (only if both orig and recon succeeded)
+                if subject_success:
+                    self.logger.info(f"[3/4] Generating report for {subject_id}/ses-{session}...")
+                    report_success = self._generate_report_for_subject(subject_id, session)
+                    
+                    if not report_success:
+                        self.logger.warning(f"Report generation failed for {subject_id}/ses-{session} (continuing anyway)")
+                    
+                    # Step 4: Cleanup H5 files (only if not keeping them)
+                    if not self.markers_keep_h5:
+                        self.logger.info(f"[4/4] Cleaning up H5 files for {subject_id}/ses-{session}...")
+                        self._cleanup_h5_files(subject_id, session)
+                    else:
+                        self.logger.info(f"[4/4] Keeping H5 files for {subject_id}/ses-{session} (--keep-h5 flag set)")
+                    
+                    success_count += 1
+                    self.logger.info(f"✓ Completed processing for {subject_id}/ses-{session}")
+                else:
+                    self.logger.error(f"✗ Skipping report and cleanup for {subject_id}/ses-{session} due to marker failures")
+            
+            # Summary
+            self.logger.info("")
+            self.logger.info("=" * 60)
+            self.logger.info("MARKERS PHASE SUMMARY")
+            self.logger.info("=" * 60)
+            self.logger.info(f"Successfully processed: {success_count}/{len(subjects)} subjects")
+            
+            if failed_subjects:
+                self.logger.warning(f"Failed processing for {len(failed_subjects)} subject/session/file_type combinations:")
+                for subj_id, sess, ftype in failed_subjects:
+                    self.logger.warning(f"  - {subj_id}/ses-{sess}/{ftype}")
+            
+            self.logger.info("✓ MARKERS phase completed")
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"✗ MARKERS phase failed: {e}")
+            import traceback
+            self.logger.error(traceback.format_exc())
+            return False
+    
+    def _is_subject_complete(self, subject_id: str, session: str) -> bool:
+        """
+        Check if a subject/session has been completely processed.
+        
+        Verifies that ALL required outputs exist:
+        - orig: scalars, topos, pkl files
+        - recon: scalars, topos, pkl files
+        - HTML report
         
         Parameters
         ----------
@@ -809,82 +707,286 @@ class Pipeline:
             Subject identifier
         session : str
             Session identifier
-        skip_markers : bool
-            Skip markers computation phase
-        skip_models : bool
-            Skip models training phase 
-        skip_analysis : bool
-            Skip analysis phase
             
         Returns
         -------
         bool
-            True if all requested phases completed successfully
+            True if all outputs exist, False otherwise
         """
-        self.logger.info(f"Processing {subject_id}/{session}")
-        
-        success = True
-        
-        # Phase 1: Markers
-        if not skip_markers:
-            if not self.run_markers_phase(subject_id, session):
-                success = False
-        else:
-            self.logger.info(f"Skipping markers for {subject_id}/{session}")
-        
-        # Phase 2: Analysis  
-        if not skip_analysis and success:
-            if not self.run_analysis_phase(subject_id, session):
-                success = False
-        else:
-            if skip_analysis:
-                self.logger.info(f"Skipping analysis for {subject_id}/{session}")
-        
-        # Don't modify instance variables here - will be handled by caller
-        # This is important for parallel processing
-        if success:
-            self.logger.info(f"✓ Completed {subject_id}/{session}")
-        else:
-            self.logger.error(f"✗ Failed {subject_id}/{session}")
+        try:
+            subject_dir = self.results_dir / "new_results" / "MARKERS" / f"sub-{subject_id}"
+            session_dir_out = subject_dir / f"ses-{session}"
+            orig_dir = session_dir_out / "orig"
+            recon_dir = session_dir_out / "recon"
+            reports_dir = session_dir_out / "reports"
             
-        return success
+            # Check orig outputs
+            orig_scalars = orig_dir / f"scalars_{subject_id}_ses-{session}_orig.npz"
+            orig_topos = orig_dir / f"topos_{subject_id}_ses-{session}_orig.npz"
+            
+            # Check recon outputs
+            recon_scalars = recon_dir / f"scalars_{subject_id}_ses-{session}_recon.npz"
+            recon_topos = recon_dir / f"topos_{subject_id}_ses-{session}_recon.npz"
+            
+            # Check report output
+            report_file = reports_dir / f"sub-{subject_id}_ses-{session}_report_comparison.html"
+            
+            # Check for at least some pkl files (from compute_data.py)
+            orig_pkl_files = list(orig_dir.glob("*.pkl"))
+            recon_pkl_files = list(recon_dir.glob("*.pkl"))
+            
+            # All required files must exist
+            required_files = [
+                orig_scalars,
+                orig_topos,
+                recon_scalars,
+                recon_topos,
+                report_file
+            ]
+            
+            all_exist = all(f.exists() for f in required_files)
+            has_pkl_files = len(orig_pkl_files) > 0 and len(recon_pkl_files) > 0
+            
+            if all_exist and has_pkl_files:
+                self.logger.debug(f"All outputs verified for {subject_id}/ses-{session}")
+                return True
+            else:
+                # Log what's missing for debugging
+                missing = []
+                if not orig_scalars.exists():
+                    missing.append("orig scalars")
+                if not orig_topos.exists():
+                    missing.append("orig topos")
+                if not recon_scalars.exists():
+                    missing.append("recon scalars")
+                if not recon_topos.exists():
+                    missing.append("recon topos")
+                if not report_file.exists():
+                    missing.append("HTML report")
+                if len(orig_pkl_files) == 0:
+                    missing.append("orig pkl files")
+                if len(recon_pkl_files) == 0:
+                    missing.append("recon pkl files")
+                
+                if missing:
+                    self.logger.debug(f"Missing outputs for {subject_id}/ses-{session}: {', '.join(missing)}")
+                
+                return False
+                
+        except Exception as e:
+            self.logger.debug(f"Error checking completion status for {subject_id}/ses-{session}: {e}")
+            return False
     
-    def run_pipeline(self, subjects: List[Tuple[str, str]],
-                    skip_markers: bool = False,
-                    skip_models: bool = False,
-                    skip_analysis: bool = False,
-                    skip_decoder: bool = False,
-                    skip_global: bool = False,
-                    skip_statistics: bool = False,
-                    force_recompute: bool = False) -> dict:
+    def _generate_report_for_subject(self, subject_id: str, session: str) -> bool:
         """
-        Run the complete pipeline for multiple subjects.
+        Generate HTML report for a subject/session (combines orig and recon data).
         
-        Pipeline order:
-        1. Individual subject processing (markers + analysis)
-        2. Decoder analysis
-        3. Global analysis
-        4. Statistical analysis
-        5. Model training
-
+        Parameters
+        ----------
+        subject_id : str
+            Subject identifier
+        session : str
+            Session identifier
+            
+        Returns
+        -------
+        bool
+            True if successful, False otherwise
+        """
+        try:
+            subject_dir = self.results_dir / "new_results" / "MARKERS" / f"sub-{subject_id}"
+            session_dir_out = subject_dir / f"ses-{session}"
+            orig_dir = session_dir_out / "orig"
+            recon_dir = session_dir_out / "recon"
+            
+            # Find FIF files - support both structures
+            session_dir = self.main_path / f"sub-{subject_id}" / f"ses-{session}"
+            
+            # Try Structure 1: orig/recon subdirectories
+            orig_fif_folder = session_dir / "orig"
+            recon_fif_folder = session_dir / "recon"
+            
+            orig_fif = list(orig_fif_folder.glob("*.fif"))[0] if orig_fif_folder.exists() and list(orig_fif_folder.glob("*.fif")) else None
+            recon_fif = list(recon_fif_folder.glob("*.fif"))[0] if recon_fif_folder.exists() and list(recon_fif_folder.glob("*.fif")) else None
+            
+            # Try Structure 2: files with _original/_recon suffixes
+            if not orig_fif:
+                orig_files = list(session_dir.glob("*_original.fif"))
+                orig_fif = orig_files[0] if orig_files else None
+            
+            if not recon_fif:
+                recon_files = list(session_dir.glob("*_recon.fif"))
+                recon_fif = recon_files[0] if recon_files else None
+            
+            # Check prerequisites
+            if not (orig_fif and recon_fif):
+                self.logger.error(f"Missing FIF files for {subject_id}/ses-{session}")
+                return False
+            
+            if not (orig_dir.exists() and recon_dir.exists()):
+                self.logger.error(f"Missing marker directories for {subject_id}/ses-{session}")
+                return False
+            
+            # Find H5 files
+            orig_h5 = orig_dir / "icm_complete_features.h5"
+            recon_h5 = recon_dir / "icm_complete_features.h5"
+            
+            if not (orig_h5.exists() and recon_h5.exists()):
+                self.logger.error(f"Missing H5 files for {subject_id}/ses-{session}")
+                self.logger.error(f"  orig H5: {orig_h5.exists()}")
+                self.logger.error(f"  recon H5: {recon_h5.exists()}")
+                return False
+            
+            # Reports go in MARKERS/sub-{ID}/ses-{num}/reports/
+            output_dir = session_dir_out / "reports"
+            output_dir.mkdir(parents=True, exist_ok=True)
+            
+            cmd = [
+                "python", str(self.src_dir / "markers" / "report" / "generate_plots.py"),
+                "--subject_id", subject_id,
+                "--session", session,
+                "--h5_file", str(orig_h5),  # Can use either, script needs both via data_dir
+                "--fif_file", str(orig_fif),
+                "--data_dir_original", str(orig_dir),
+                "--data_dir_recon", str(recon_dir),
+                "--output_dir", str(output_dir)
+            ]
+            
+            if self.markers_skip_clustering:
+                cmd.append("--skip-clustering")
+            
+            # Run and check success
+            if self._run_command(cmd):
+                # Verify report was created
+                report_file = output_dir / f"sub-{subject_id}_ses-{session}_report_comparison.html"
+                if report_file.exists():
+                    self.logger.info(f"✓ Report generated: {report_file}")
+                    return True
+                else:
+                    self.logger.warning(f"Report command succeeded but file not found: {report_file}")
+                    return False
+            else:
+                self.logger.error(f"Report generation command failed for {subject_id}/ses-{session}")
+                return False
+                
+        except Exception as e:
+            self.logger.error(f"Exception during report generation for {subject_id}/ses-{session}: {e}")
+            import traceback
+            self.logger.error(traceback.format_exc())
+            return False
+    
+    def _cleanup_h5_files(self, subject_id: str, session: str) -> None:
+        """
+        Delete H5 files after all processing is complete.
+        
+        Parameters
+        ----------
+        subject_id : str
+            Subject identifier
+        session : str
+            Session identifier
+        """
+        try:
+            subject_dir = self.results_dir / "new_results" / "MARKERS" / f"sub-{subject_id}"
+            session_dir_out = subject_dir / f"ses-{session}"
+            
+            h5_files = [
+                session_dir_out / "orig" / "icm_complete_features.h5",
+                session_dir_out / "recon" / "icm_complete_features.h5"
+            ]
+            
+            for h5_file in h5_files:
+                if h5_file.exists():
+                    try:
+                        h5_file.unlink()
+                        self.logger.info(f"  Deleted: {h5_file}")
+                    except Exception as e:
+                        self.logger.warning(f"  Could not delete {h5_file}: {e}")
+                        
+        except Exception as e:
+            self.logger.warning(f"Exception during H5 cleanup for {subject_id}/ses-{session}: {e}")
+    
+    def run_model_phase(self) -> bool:
+        """
+        Run model training phase (only for cases 1 and 2, not resting-state).
+        Uses support_vector_machine.py for VS vs MCS classification.
+        Saves results to new_results/MODEL/
+        
+        Returns
+        -------
+        bool
+            True if successful, False otherwise
+        """
+        try:
+            # Skip model phase for resting-state
+            if self.task == 'rs':
+                self.logger.info("Skipping MODEL phase for resting-state data")
+                return True
+            
+            self.logger.info("=" * 60)
+            self.logger.info("PHASE C: MODEL")
+            self.logger.info("=" * 60)
+            
+            model_output_dir = self.results_dir / "new_results" / "MODEL"
+            model_output_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Check patient labels file
+            patient_labels_path = self.metadata_dir / "patient_labels_with_controls.csv"
+            if not patient_labels_path.exists():
+                self.logger.error(f"Patient labels file not found: {patient_labels_path}")
+                return False
+            
+            markers_dir = self.results_dir / "new_results" / "MARKERS"
+            
+            # Run SVM with cross-data classification
+            self.logger.info(f"Training SVM classifier ({self.model_marker_type} markers)...")
+            cmd = [
+                "python", str(self.src_dir / "model" / "support_vector_machine.py"),
+                "--data-dir", str(markers_dir),
+                "--patient-labels", str(patient_labels_path),
+                "--marker-type", self.model_marker_type,
+                "--output-dir", str(model_output_dir / self.model_marker_type),
+                "--cross-data"  # Enable cross-data classification
+            ]
+            
+            if not self._run_command(cmd):
+                self.logger.error("support_vector_machine.py failed")
+                return False
+            
+            self.logger.info("✓ MODEL phase completed")
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"✗ MODEL phase failed: {e}")
+            return False
+    
+    def run_pipeline(self, subjects: List[Tuple[str, str]], 
+                    skip_decoder: bool = False,
+                    skip_markers: bool = False,
+                    skip_model: bool = False) -> dict:
+        """
+        Run the complete pipeline for the specified subjects.
+        
+        Pipeline flow:
+        A. DECODER phase: decoder.py → analysis.py → viz.py
+        B. MARKERS phase: For each subject, both orig and recon:
+           - compute_markers_with_junifer.py
+           - compute_data.py
+           - compute_scalars.py
+           - compute_topographies.py
+           - generate_plots.py (combines orig and recon)
+        C. MODEL phase: support_vector_machine.py (skip for resting-state)
+        
         Parameters
         ----------
         subjects : List[Tuple[str, str]]
             List of (subject_id, session) tuples to process
-        skip_markers : bool
-            Skip markers computation phase
-        skip_models : bool
-            Skip global models training phase
-        skip_analysis : bool
-            Skip individual analysis phase
         skip_decoder : bool
-            Skip decoder analysis phase
-        skip_global : bool
-            Skip global analysis phase
-        skip_statistics : bool
-            Skip statistical analysis phase
-        force_recompute : bool
-            Force recomputation of all phases, including decoder
+            Skip DECODER phase
+        skip_markers : bool
+            Skip MARKERS phase
+        skip_model : bool
+            Skip MODEL phase
             
         Returns
         -------
@@ -893,114 +995,89 @@ class Pipeline:
         """
         start_time = datetime.now()
         
-        self.logger.info("=" * 60)
+        self.logger.info("=" * 70)
         self.logger.info("PIPELINE START")
-        self.logger.info("=" * 60)
+        self.logger.info("=" * 70)
+        self.logger.info(f"Configuration: mode={self.mode}, task={self.task}")
         self.logger.info(f"Start time: {start_time}")
         self.logger.info(f"Subjects to process: {len(subjects)}")
-        self.logger.info(f"Parallel processes: {self.batch_size}")
+        self.logger.info(f"Subjects: {subjects}")
+        self.logger.info("=" * 70)
         
         if self.dry_run:
             self.logger.info("DRY RUN MODE - No actual processing")
             return {"status": "dry_run", "subjects": subjects}
         
-        # Phase 1: Process subjects
-        if self.batch_size > 1:
-            self._run_parallel(subjects, skip_markers, skip_models, skip_analysis)
+        results = {
+            "decoder": False if not skip_decoder else "skipped",
+            "markers": False if not skip_markers else "skipped",
+            "model": False if not skip_model else "skipped"
+        }
+        
+        # Phase A: DECODER
+        if not skip_decoder:
+            self.logger.info("\n" + "=" * 70)
+            if self.run_decoder_phase():
+                results["decoder"] = True
+            else:
+                self.logger.error("DECODER phase failed - continuing with MARKERS phase")
         else:
-            self._run_sequential(subjects, skip_markers, skip_models, skip_analysis)
-
-        # Phase 2: Decoder Analysis
-        if not skip_decoder and self.completed_subjects:
-            self.logger.info("Starting decoder analysis phase...")
-            decoder_success = self.run_decoder_phase(force_recompute=force_recompute)
-            if not decoder_success:
-                self.logger.error("Decoder analysis failed")
-
-        # Phase 3: Global Analysis  
-        if not skip_global and self.completed_subjects:
-            self.run_global_analysis()
+            self.logger.info("\n" + "=" * 70)
+            self.logger.info("PHASE A: DECODER - SKIPPED")
         
-        # Phase 4: Statistical Analysis (after global) - only run if global analysis was skipped
-        if not skip_statistics and self.completed_subjects and skip_global:
-            self.logger.info("Starting standalone statistical analysis phase...")
-            stats_success = self.run_statistical_analysis()
-            if not stats_success:
-                self.logger.error("Statistical analysis failed")
-        elif not skip_statistics and not skip_global:
-            self.logger.info("✓ Statistical analysis was included in global analysis")
+        # Phase B: MARKERS
+        if not skip_markers:
+            self.logger.info("\n" + "=" * 70)
+            if self.run_markers_phase_for_all_subjects(subjects):
+                results["markers"] = True
+            else:
+                self.logger.error("MARKERS phase failed - continuing with MODEL phase")
+        else:
+            self.logger.info("\n" + "=" * 70)
+            self.logger.info("PHASE B: MARKERS - SKIPPED")
         
-        # Phase 5: Models Training (run even if some subjects failed, as long as we have enough data)
-        if not skip_models:
-            self.logger.info("Starting global models training phase...")
-            models_success = self.run_models_phase()
-            if not models_success:
-                self.logger.error("Global models training failed")
+        # Phase C: MODEL (only for lg task, not rs)
+        if not skip_model and self.task != 'rs':
+            self.logger.info("\n" + "=" * 70)
+            if self.run_model_phase():
+                results["model"] = True
+            else:
+                self.logger.error("MODEL phase failed")
+        elif skip_model:
+            self.logger.info("\n" + "=" * 70)
+            self.logger.info("PHASE C: MODEL - SKIPPED")
+        # else: task == 'rs', model phase skipped automatically
         
         # Summary
         end_time = datetime.now()
         duration = end_time - start_time
         
-        self.logger.info("=" * 60)
+        self.logger.info("\n" + "=" * 70)
         self.logger.info("PIPELINE COMPLETE")
-        self.logger.info("=" * 60)
+        self.logger.info("=" * 70)
         self.logger.info(f"End time: {end_time}")
         self.logger.info(f"Duration: {duration}")
-        self.logger.info(f"Completed: {len(self.completed_subjects)}")
-        self.logger.info(f"Failed: {len(self.failed_subjects)}")
+        self.logger.info(f"Results:")
+        decoder_status = '✓ Success' if results['decoder'] is True else ('⏸ Skipped' if results['decoder'] == 'skipped' else '✗ Failed')
+        markers_status = '✓ Success' if results['markers'] is True else ('⏸ Skipped' if results['markers'] == 'skipped' else '✗ Failed')
+        model_status = '✓ Success' if results['model'] is True else ('⏸ Skipped' if results['model'] == 'skipped' else '✗ Failed')
         
-        if self.failed_subjects:
-            self.logger.error(f"Failed subjects: {self.failed_subjects}")
+        self.logger.info(f"  - DECODER: {decoder_status}")
+        self.logger.info(f"  - MARKERS: {markers_status}")
+        if self.task != 'rs':
+            self.logger.info(f"  - MODEL: {model_status}")
+        else:
+            self.logger.info(f"  - MODEL: Skipped (resting-state)")
+        self.logger.info("=" * 70)
         
         return {
             "status": "complete",
             "start_time": start_time,
             "end_time": end_time,
             "duration": duration,
-            "completed": self.completed_subjects,
-            "failed": self.failed_subjects
+            "results": results,
+            "subjects": subjects
         }
-    
-    def _run_parallel(self, subjects: List[Tuple[str, str]],
-                     skip_markers: bool, skip_models: bool, skip_analysis: bool):
-        """Run processing in parallel."""
-        self.logger.info(f"Running parallel processing with {self.batch_size} processes")
-        
-        with ProcessPoolExecutor(max_workers=self.batch_size) as executor:
-            # Submit all jobs
-            future_to_subject = {
-                executor.submit(self.process_subject, subj_id, session, 
-                              skip_markers, skip_models, skip_analysis): (subj_id, session)
-                for subj_id, session in subjects
-            }
-            
-            # Collect results
-            for future in as_completed(future_to_subject):
-                subject_id, session = future_to_subject[future]
-                try:
-                    success = future.result()
-                    if success:
-                        self.completed_subjects.append((subject_id, session))
-                    else:
-                        self.failed_subjects.append((subject_id, session))
-                except Exception as e:
-                    self.logger.error(f"Exception processing {subject_id}/{session}: {e}")
-                    self.failed_subjects.append((subject_id, session))
-    
-    def _run_sequential(self, subjects: List[Tuple[str, str]],
-                       skip_markers: bool, skip_models: bool, skip_analysis: bool):
-        """Run processing sequentially."""
-        self.logger.info("Running sequential processing")
-        
-        for i, (subject_id, session) in enumerate(subjects, 1):
-            self.logger.info(f"Progress: {i}/{len(subjects)}")
-            success = self.process_subject(subject_id, session, skip_markers, skip_models, skip_analysis)
-            
-            # Track completed/failed subjects
-            if success:
-                self.completed_subjects.append((subject_id, session))
-            else:
-                self.failed_subjects.append((subject_id, session))
     
     def _run_command(self, cmd: List[str]) -> bool:
         """
@@ -1051,93 +1128,85 @@ class Pipeline:
             if e.stderr:
                 self.logger.error(f"STDERR: {e.stderr}")
             return False
+    
+
 
 
 def main():
     """Main function for command line usage."""
     parser = argparse.ArgumentParser(
-        description="Benchmark Data Analysis Pipeline",
+        description="EEG Foundation Benchmark Pipeline - Supports 3 settings: DoC local-global, Control local-global, Control resting-state",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-    python pipeline.py --subject AD023
-    python pipeline.py --subjects AD023,YC260,BC031  
-    python pipeline.py --all --skip-models
-    python pipeline.py --random 5 --batch-size 4
-    python pipeline.py --analysis-only --all
+    # DoC local-global
+    python pipeline.py --main-path /data/doc --metadata-dir /metadata --mode patient --task lg --all
+    
+    # Control local-global
+    python pipeline.py --main-path /data/control_lg --metadata-dir /metadata --mode control --task lg --all
+    
+    # Control resting-state
+    python pipeline.py --main-path /data/control_rs --metadata-dir /metadata --mode control --task rs --all
         """
     )
 
     # Set default paths relative to script location
-    # Default root is doc_benchmark
     project_root = str(Path(__file__).parent.parent)
+    
+    # Core configuration
+    parser.add_argument('--main-path', required=True,
+                       help='Path to main data directory with sub-{num}/ses-{num}/(orig|recon)/ structure')
+    parser.add_argument('--metadata-dir', required=True,
+                       help='Path to metadata directory (must contain patient_labels_with_controls.csv)')
+    parser.add_argument('--mode', choices=['patient', 'control'], required=True,
+                       help='Analysis mode: patient (DoC) or control')
+    parser.add_argument('--task', choices=['lg', 'rs'], required=True,
+                       help='Task paradigm: lg (local-global) or rs (resting-state)')
     
     # Subject selection (mutually exclusive)
     subject_group = parser.add_mutually_exclusive_group(required=True)
     subject_group.add_argument('--subject', 
-                              help='Process single subject')
+                              help='Process single subject ID')
     subject_group.add_argument('--subjects',
-                              help='Process specific subjects (comma-separated)')
+                              help='Process specific subjects (comma-separated IDs)')
     subject_group.add_argument('--all', action='store_true',
                               help='Process all available subjects')
     subject_group.add_argument('--random', type=int, metavar='N',
                               help='Process N random subjects')
     
-    # Phase control
-    phase_group = parser.add_mutually_exclusive_group()
-    phase_group.add_argument('--markers-only', action='store_true',
-                            help='Only run markers computation')
-    phase_group.add_argument('--analysis-only', action='store_true',
-                            help='Only run analysis (markers + individual analysis)')
-    phase_group.add_argument('--individual-analysis-only', action='store_true',
-                            help='Only run individual analysis (requires existing markers)')
-    phase_group.add_argument('--decoder-only', action='store_true',
-                            help='Only run decoder analysis')
-    phase_group.add_argument('--global-only', action='store_true',
-                            help='Only run global analysis')
-    phase_group.add_argument('--models-only', action='store_true',
-                            help='Only run model training')
-    phase_group.add_argument('--statistics-only', action='store_true',
-                            help='Only run statistical analysis')
-    
-    # Individual phase skipping
-    parser.add_argument('--skip-markers', action='store_true',
-                       help='Skip markers computation phase')
-    parser.add_argument('--skip-analysis', action='store_true',
-                       help='Skip analysis phase')
-    parser.add_argument('--skip-decoder', action='store_true',
-                       help='Skip decoder analysis phase')
-    parser.add_argument('--skip-global', action='store_true',
-                       help='Skip global analysis')
-    parser.add_argument('--skip-statistics', action='store_true',
-                       help='Skip statistical analysis phase')
-    parser.add_argument('--skip-models', action='store_true', 
-                       help='Skip model training phase')
-    parser.add_argument('--skip-smi', action='store_true',
-                       help='Skip SymbolicMutualInformation computation (recommended for large datasets)')
-    parser.add_argument('--skip-gfp', action='store_true',
-                       help='Skip Global Field Power analysis (speeds up global analysis)')
-    parser.add_argument('--force-recompute', action='store_true',
-                       help='Force recomputation of already completed subjects')
-    parser.add_argument('--aggregate', action='store_true',
-                       help='For --decoder-only: aggregate existing results without processing subjects')
-    
-    # Configuration
-    parser.add_argument('--data-dir', 
-                        required=True,
-                       help='Path to data directory')
+    # Optional configuration
     parser.add_argument('--results-dir',
                        default=f'{project_root}/results',
-                       help='Path to results directory')
+                       help='Path to results directory (default: ./results)')
     parser.add_argument('--src-dir',
                        default=f'{project_root}/src',
-                       help='Path to source code directory')
-    parser.add_argument('--metadata-dir',
-                       required=True,
-                       help='Path to metadata directory')
-
-    parser.add_argument('--batch-size', type=int, default=4,
-                       help='Number of parallel processes (default: 4)')
+                       help='Path to source code directory (default: ./src)')
+    parser.add_argument('--batch-size', type=int, default=1,
+                       help='Number of parallel processes (default: 1, sequential)')
+    
+    # Decoder parameters
+    parser.add_argument('--decoder-cv', type=int, default=3,
+                       help='Cross-validation folds for decoder (default: 3)')
+    parser.add_argument('--decoder-n-jobs', type=int, default=1,
+                       help='Parallel jobs for decoder (default: 1)')
+    
+    # Markers parameters
+    parser.add_argument('--skip-clustering', action='store_true',
+                       help='Skip cluster permutation tests in markers computation')
+    parser.add_argument('--keep-h5', action='store_true',
+                       help='Keep H5 files after markers computation')
+    
+    # Model parameters
+    parser.add_argument('--model-marker-type', choices=['scalar', 'topo'], default='scalar',
+                       help='Marker type for model training (default: scalar)')
+    
+    # Phase skipping
+    parser.add_argument('--skip-decoder', action='store_true',
+                       help='Skip DECODER phase')
+    parser.add_argument('--skip-markers', action='store_true',
+                       help='Skip MARKERS phase')
+    parser.add_argument('--skip-model', action='store_true',
+                       help='Skip MODEL phase')
     
     # Other options
     parser.add_argument('--verbose', '-v', action='store_true',
@@ -1158,74 +1227,44 @@ Examples:
     elif args.random:
         subject_args = [f"RANDOM:{args.random}"]
     
-    # Handle phase-only modes
-    skip_markers = (args.skip_markers or args.models_only or args.decoder_only or 
-                   args.global_only or args.statistics_only or args.individual_analysis_only)
-    skip_models = (args.skip_models or args.markers_only or args.analysis_only or 
-                  args.decoder_only or args.global_only or args.statistics_only or 
-                  args.individual_analysis_only)
-    skip_analysis = (args.skip_analysis or args.markers_only or args.models_only or 
-                    args.decoder_only or args.global_only or args.statistics_only)
-    skip_decoder = (args.skip_decoder or args.markers_only or args.models_only or 
-                   args.analysis_only or args.global_only or args.statistics_only or 
-                   args.individual_analysis_only)
-    skip_global = (args.skip_global or args.markers_only or args.models_only or 
-                  args.analysis_only or args.decoder_only or args.individual_analysis_only)
-    skip_statistics = (args.skip_statistics or args.markers_only or args.models_only or 
-                      args.analysis_only or args.decoder_only or args.individual_analysis_only)
-    
     # Create pipeline
     pipeline = Pipeline(
-        data_dir=args.data_dir,
+        main_path=args.main_path,
         results_dir=args.results_dir,
         src_dir=args.src_dir,
         metadata_dir=args.metadata_dir,
+        mode=args.mode,
+        task=args.task,
         batch_size=args.batch_size,
         verbose=args.verbose,
         dry_run=args.dry_run,
-        skip_smi=args.skip_smi,
-        skip_gfp=args.skip_gfp
+        decoder_cv=args.decoder_cv,
+        decoder_n_jobs=args.decoder_n_jobs,
+        markers_skip_clustering=args.skip_clustering,
+        markers_keep_h5=args.keep_h5,
+        model_marker_type=args.model_marker_type
     )
     
-    # Handle statistics-only mode
-    if args.statistics_only:
-        pipeline.run_statistical_analysis()
-        return
-    
-    # Handle decoder-only mode
-    if args.decoder_only:
-        aggregate_only = getattr(args, 'aggregate', False)
-        pipeline.run_decoder_phase(force_recompute=args.force_recompute, aggregate_only=aggregate_only)
-        return
-    
-    # Handle global-only mode
-    if args.global_only:
-        pipeline.run_global_analysis()
-        return
-    
-    # Handle models-only mode  
-    if args.models_only:
-        pipeline.run_models_phase()
-        return
-
     # Resolve subjects
-    subjects = pipeline.resolve_subjects(subject_args, force_recompute=args.force_recompute)
+    subjects = pipeline.resolve_subjects(subject_args)
     
     if not subjects:
         print("No subjects to process")
         return
-        
+    
     # Run pipeline
-    pipeline.run_pipeline(
-        subjects=subjects,
-        skip_markers=skip_markers,
-        skip_models=skip_models, 
-        skip_analysis=skip_analysis,
-        skip_decoder=skip_decoder,
-        skip_global=skip_global,
-        skip_statistics=skip_statistics,
-        force_recompute=args.force_recompute
+    result = pipeline.run_pipeline(
+        subjects,
+        skip_decoder=args.skip_decoder,
+        skip_markers=args.skip_markers,
+        skip_model=args.skip_model
     )
+    
+    # Exit with appropriate code
+    if result.get("status") == "complete":
+        sys.exit(0)
+    else:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

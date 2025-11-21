@@ -120,27 +120,26 @@ def _compute_per_band_permutation_entropy(epochs, report_data, output_dir):
             if pe_key not in report_data:
                 logger.warning(f"PE data key '{pe_key}' not found in report data")
                 continue
-            pe_data = report_data[pe_key]
+            
+            # Convert to numpy array (junifer data comes in correct shape)
+            pe_data = np.array(report_data[pe_key])
             logger.info(f"Found PE {band_name} band data in key '{pe_key}' with shape: {pe_data.shape}")
             
-            # Reshape from (epochs*channels, 1) to (epochs, channels) then aggregate
-            n_epochs = len(epochs)
-            n_channels = len(epochs.ch_names)
-            pe_data_array = np.array(pe_data).flatten()
+            # Aggregate across epochs if data is (epochs, channels)
+            if pe_data.ndim == 3 and pe_data.shape[0] == 1:
+                # Shape is (1, epochs, channels) - squeeze first dimension
+                pe_data = pe_data.squeeze(0)
             
-            if len(pe_data_array) == n_epochs * n_channels:
-                logger.info(f"Reshaping PE {band_name} from ({len(pe_data_array)},) to ({n_epochs}, {n_channels})")
-                pe_data_reshaped = pe_data_array.reshape(n_epochs, n_channels)
-                # Aggregate across epochs (mean)
-                pe_data_aggregated = np.mean(pe_data_reshaped, axis=0)
-                logger.info(f"Aggregated PE {band_name} across {n_epochs} epochs: shape {pe_data_aggregated.shape}")
-                pe_data = pe_data_aggregated
+            if pe_data.ndim == 2:
+                # Data is (epochs, channels) - aggregate across epochs
+                logger.info(f"Aggregating PE {band_name} across {pe_data.shape[0]} epochs")
+                pe_data = np.mean(pe_data, axis=0)
+                logger.info(f"Aggregated PE {band_name}: shape {pe_data.shape}")
+            elif pe_data.ndim == 1:
+                # Data is already aggregated (channels,)
+                logger.info(f"PE {band_name} already aggregated: shape {pe_data.shape}")
             else:
-                logger.warning(
-                    f"PE {band_name} data size {len(pe_data_array)} doesn't match "
-                    f"epochs×channels ({n_epochs}×{n_channels}={n_epochs*n_channels})"
-                )
-                pe_data = pe_data_array[:n_channels]
+                logger.warning(f"Unexpected PE {band_name} shape: {pe_data.shape}")
 
             try:
                 pe_data_aligned, eeg_info = align_data_to_eeg_montage(
@@ -215,36 +214,26 @@ def _compute_kolmogorov_complexity(epochs, report_data, output_dir):
             logger.warning("No Kolmogorov complexity data found")
             return None
 
-        if hasattr(kc_data, "shape"):
-            logger.info(f"Kolmogorov complexity data shape: {kc_data.shape}")
-            if len(kc_data.shape) > 1:
-                kc_data = kc_data.flatten()
-                logger.info(f"Flattened Kolmogorov complexity data to shape: {kc_data.shape}")
+        # Convert to numpy array (junifer data comes in correct shape)
+        kc_data = np.array(kc_data)
+        logger.info(f"Kolmogorov complexity data shape: {kc_data.shape}")
+        
+        # Aggregate across epochs if data is (epochs, channels)
+        if kc_data.ndim == 3 and kc_data.shape[0] == 1:
+            # Shape is (1, epochs, channels) - squeeze first dimension
+            kc_data = kc_data.squeeze(0)
+        
+        if kc_data.ndim == 2:
+            # Data is (epochs, channels) - aggregate across epochs
+            logger.info(f"Aggregating Kolmogorov across {kc_data.shape[0]} epochs")
+            kc_data = np.mean(kc_data, axis=0)
+            logger.info(f"Aggregated Kolmogorov: shape {kc_data.shape}")
+        elif kc_data.ndim == 1:
+            # Data is already aggregated (channels,)
+            logger.info(f"Kolmogorov already aggregated: shape {kc_data.shape}")
         else:
-            logger.warning(
-                f"Unexpected data shape for kolmogorov_complexity: {kc_data.shape if hasattr(kc_data, 'shape') else type(kc_data)}"
-            )
+            logger.warning(f"Unexpected Kolmogorov shape: {kc_data.shape}")
             return None
-
-        logger.info(f"Found Kolmogorov complexity data with {len(kc_data)} values")
-        
-        # Reshape from (epochs*channels, 1) to (epochs, channels) then aggregate
-        n_epochs = len(epochs)
-        n_channels = len(epochs.ch_names)
-        
-        if len(kc_data) == n_epochs * n_channels:
-            logger.info(f"Reshaping Kolmogorov from ({len(kc_data)},) to ({n_epochs}, {n_channels})")
-            kc_data_reshaped = kc_data.reshape(n_epochs, n_channels)
-            # Aggregate across epochs (mean)
-            kc_data_aggregated = np.mean(kc_data_reshaped, axis=0)
-            logger.info(f"Aggregated Kolmogorov across {n_epochs} epochs: shape {kc_data_aggregated.shape}")
-            kc_data = kc_data_aggregated
-        else:
-            logger.warning(
-                f"Kolmogorov data size {len(kc_data)} doesn't match "
-                f"epochs×channels ({n_epochs}×{n_channels}={n_epochs*n_channels})"
-            )
-            kc_data = kc_data[:n_channels]
 
         try:
             kc_data_aligned, eeg_info = align_data_to_eeg_montage(

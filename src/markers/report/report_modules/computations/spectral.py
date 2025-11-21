@@ -100,27 +100,26 @@ def _compute_normalized_spectral_bands(epochs, normalized_spectral, preprocessin
 
         for band in band_names:
             if band in normalized_spectral:
-                band_data = normalized_spectral[band]
-                logger.info(f"Found {band} band data with shape: {np.array(band_data).shape}")
+                # Convert to numpy array (junifer data comes in correct shape)
+                band_data = np.array(normalized_spectral[band])
+                logger.info(f"Found {band} band data with shape: {band_data.shape}")
                 
-                # Reshape from (epochs*channels, 1) to (epochs, channels) then aggregate
-                n_epochs = len(epochs)
-                n_channels = len(epochs.ch_names)
-                band_data_array = np.array(band_data).flatten()
+                # Aggregate across epochs if data is (epochs, channels)
+                if band_data.ndim == 3 and band_data.shape[0] == 1:
+                    # Shape is (1, epochs, channels) - squeeze first dimension
+                    band_data = band_data.squeeze(0)
                 
-                if len(band_data_array) == n_epochs * n_channels:
-                    logger.info(f"Reshaping {band} from ({len(band_data_array)},) to ({n_epochs}, {n_channels})")
-                    band_data_reshaped = band_data_array.reshape(n_epochs, n_channels)
-                    # Aggregate across epochs (mean)
-                    band_data_aggregated = np.mean(band_data_reshaped, axis=0)
-                    logger.info(f"Aggregated {band} across {n_epochs} epochs: shape {band_data_aggregated.shape}")
-                    band_data = band_data_aggregated
+                if band_data.ndim == 2:
+                    # Data is (epochs, channels) - aggregate across epochs
+                    logger.info(f"Aggregating {band} across {band_data.shape[0]} epochs")
+                    band_data = np.mean(band_data, axis=0)
+                    logger.info(f"Aggregated {band}: shape {band_data.shape}")
+                elif band_data.ndim == 1:
+                    # Data is already aggregated (channels,)
+                    logger.info(f"{band} already aggregated: shape {band_data.shape}")
                 else:
-                    logger.warning(
-                        f"{band} data size {len(band_data_array)} doesn't match "
-                        f"epochs×channels ({n_epochs}×{n_channels}={n_epochs*n_channels})"
-                    )
-                    band_data = band_data_array[:n_channels]
+                    logger.warning(f"Unexpected {band} shape: {band_data.shape}")
+                    continue
 
                 try:
                     band_data_aligned, eeg_info = align_data_to_eeg_montage(
@@ -192,27 +191,26 @@ def _compute_spectral_power_log(epochs, per_channel_spectral, preprocessing_bad_
 
         for band in band_names:
             if band in per_channel_spectral:
-                band_data = per_channel_spectral[band]
-                logger.info(f"Found {band} band for absolute power with shape: {np.array(band_data).shape}")
+                # Convert to numpy array (junifer data comes in correct shape)
+                band_data = np.array(per_channel_spectral[band])
+                logger.info(f"Found {band} band for absolute power with shape: {band_data.shape}")
                 
-                # Reshape from (epochs*channels, 1) to (epochs, channels) then aggregate
-                n_epochs = len(epochs)
-                n_channels = len(epochs.ch_names)
-                band_data_array = np.array(band_data).flatten()
+                # Aggregate across epochs if data is (epochs, channels)
+                if band_data.ndim == 3 and band_data.shape[0] == 1:
+                    # Shape is (1, epochs, channels) - squeeze first dimension
+                    band_data = band_data.squeeze(0)
                 
-                if len(band_data_array) == n_epochs * n_channels:
-                    logger.info(f"Reshaping {band} from ({len(band_data_array)},) to ({n_epochs}, {n_channels})")
-                    band_data_reshaped = band_data_array.reshape(n_epochs, n_channels)
-                    # Aggregate across epochs (mean)
-                    band_data_aggregated = np.mean(band_data_reshaped, axis=0)
-                    logger.info(f"Aggregated {band} across {n_epochs} epochs: shape {band_data_aggregated.shape}")
-                    band_data = band_data_aggregated
+                if band_data.ndim == 2:
+                    # Data is (epochs, channels) - aggregate across epochs
+                    logger.info(f"Aggregating {band} across {band_data.shape[0]} epochs")
+                    band_data = np.mean(band_data, axis=0)
+                    logger.info(f"Aggregated {band}: shape {band_data.shape}")
+                elif band_data.ndim == 1:
+                    # Data is already aggregated (channels,)
+                    logger.info(f"{band} already aggregated: shape {band_data.shape}")
                 else:
-                    logger.warning(
-                        f"{band} data size {len(band_data_array)} doesn't match "
-                        f"epochs×channels ({n_epochs}×{n_channels}={n_epochs*n_channels})"
-                    )
-                    band_data = band_data_array[:n_channels]
+                    logger.warning(f"Unexpected {band} shape: {band_data.shape}")
+                    continue
 
                 try:
                     band_data_aligned, eeg_info = align_data_to_eeg_montage(

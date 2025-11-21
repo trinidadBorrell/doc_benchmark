@@ -219,7 +219,7 @@ class CrossSubjectClassifier:
         return marker_names, abbreviated_names
     
     def load_feature_names(self):
-        """Load feature names from the first available subject's scalar_metrics.csv file.
+        """Load feature names from the first available subject's .npz file.
         
         Returns
         -------
@@ -228,7 +228,7 @@ class CrossSubjectClassifier:
         """
         print(" Loading feature names...")
         
-        # First, try to load from old structure (scalar_metrics.csv)
+        # First, try to load from .npz files in the new structure
         if op.exists(self.data_dir):
             subject_dirs = [d for d in os.listdir(self.data_dir) if d.startswith('sub-')]
             
@@ -237,22 +237,29 @@ class CrossSubjectClassifier:
                 if not op.isdir(subject_path):
                     continue
                     
-                # Look for session directories
-                try:
-                    session_dirs = [d for d in os.listdir(subject_path) if d.startswith('ses-')]
-                except PermissionError:
-                    continue
-                
-                for session_dir in sorted(session_dirs):
-                    session_path = op.join(subject_path, session_dir)
+                # Check if this is the new structure (sub-XXX_original or sub-XXX_recon)
+                if '_' in subject_dir and (subject_dir.endswith('_original') or subject_dir.endswith('_recon')):
+                    # Map data type for compatibility
+                    data_type = subject_dir.split('_')[-1]
+                    if data_type == 'recon':
+                        data_type = 'reconstructed'
                     
-                    # Try to find scalar_metrics.csv (old structure)
-                    metrics_file = op.join(session_path, 'compare_markers', 'scalars', 'metrics', 'scalar_metrics.csv')
+                    # Only process if data_type matches our data_origin
+                    if data_type != self.data_origin:
+                        continue
                     
-                    if op.exists(metrics_file):
+                    # Extract subject ID
+                    subject_id_raw = subject_dir.split('_')[0].replace('sub-', '')
+                    
+                    # Look for .npz file
+                    npz_filename = f"scalars_{subject_id_raw}_{subject_dir.split('_')[-1]}.npz"
+                    npz_path = op.join(subject_path, npz_filename)
+                    
+                    if op.exists(npz_path):
                         try:
-                            df = pd.read_csv(metrics_file, index_col=0)
-                            feature_names = df.index.tolist()
+                            # Load feature names from .npz file
+                            data_dict = np.load(npz_path)
+                            feature_names = sorted(data_dict.files())
                             
                             # Abbreviate long feature names for better display
                             abbreviated_names = []
@@ -280,14 +287,72 @@ class CrossSubjectClassifier:
                                 
                                 abbreviated_names.append(abbrev)
                             
-                            print(f"   ✓ Loaded {len(feature_names)} feature names from {subject_dir}/{session_dir}")
+                            print(f"   ✓ Loaded {len(feature_names)} feature names from {npz_filename}")
                             print(f"   Features: {', '.join(abbreviated_names[:5])}{'...' if len(abbreviated_names) > 5 else ''}")
                             
                             return feature_names, abbreviated_names
                             
                         except Exception as e:
-                            print(f"    Error loading {metrics_file}: {e}")
+                            print(f"    Error loading {npz_path}: {e}")
                             continue
+        
+        # OLD structure: try to load from scalar_metrics.csv
+        for subject_dir in sorted(subject_dirs):
+            subject_path = op.join(self.data_dir, subject_dir)
+            if not op.isdir(subject_path):
+                continue
+                
+            # Look for session directories
+            try:
+                session_dirs = [d for d in os.listdir(subject_path) if d.startswith('ses-')]
+            except PermissionError:
+                continue
+            
+            for session_dir in sorted(session_dirs):
+                session_path = op.join(subject_path, session_dir)
+                
+                # Try to find scalar_metrics.csv (old structure)
+                metrics_file = op.join(session_path, 'compare_markers', 'scalars', 'metrics', 'scalar_metrics.csv')
+                
+                if op.exists(metrics_file):
+                    try:
+                        df = pd.read_csv(metrics_file, index_col=0)
+                        feature_names = df.index.tolist()
+                        
+                        # Abbreviate long feature names for better display
+                        abbreviated_names = []
+                        for name in feature_names:
+                            # Create abbreviations
+                            if name.startswith('PowerSpectralDensity_'):
+                                abbrev = name.replace('PowerSpectralDensity_', 'PSD_')
+                            elif name.startswith('PowerSpectralDensitySummary_'):
+                                abbrev = name.replace('PowerSpectralDensitySummary_', 'PSD_Sum_')
+                            elif name.startswith('TimeLockedContrast_'):
+                                abbrev = name.replace('TimeLockedContrast_', 'TLC_')
+                            elif name.startswith('TimeLockedTopography_'):
+                                abbrev = name.replace('TimeLockedTopography_', 'TLT_')
+                            elif name.startswith('ContingentNegativeVariation'):
+                                abbrev = 'CNV'
+                            elif name.startswith('PermutationEntropy'):
+                                abbrev = 'PE'
+                            elif name.startswith('SymbolicMutualInformation'):
+                                abbrev = 'SMI'  
+                            elif name.startswith('KolmogorovComplexity'):
+                                abbrev = 'KC'
+                            else:
+                                # Keep original if no abbreviation rule
+                                abbrev = name
+                            
+                            abbreviated_names.append(abbrev)
+                        
+                        print(f"   ✓ Loaded {len(feature_names)} feature names from {subject_dir}/{session_dir}")
+                        print(f"   Features: {', '.join(abbreviated_names[:5])}{'...' if len(abbreviated_names) > 5 else ''}")
+                        
+                        return feature_names, abbreviated_names
+                        
+                    except Exception as e:
+                        print(f"    Error loading {metrics_file}: {e}")
+                        continue
         
         # Fallback: use standard marker names
         print("   Using standard marker names (NICE collection order)")
@@ -310,7 +375,7 @@ class CrossSubjectClassifier:
         Parameters
         ----------
         subject_session_path : str
-            Path to subject/session directory
+            Path to subject/session directory (or direct path to .npz file)
             
         Returns
         -------
@@ -318,24 +383,56 @@ class CrossSubjectClassifier:
             Marker data or None if loading failed
         """
         
-        # Determine filename based on marker type and data origin
-        if self.marker_type == 'scalar':
-            filename = f"scalars_{self.data_origin}.npy"
-            features_dir = "features_variable"
-        elif self.marker_type == 'topo':
-            filename = f"topos_{self.data_origin}.npy"
-            features_dir = "features_variable"
+        # Check if subject_session_path is a direct .npz file path
+        if subject_session_path.endswith('.npz'):
+            filepath = subject_session_path
         else:
-            raise ValueError(f"Unknown marker_type: {self.marker_type}")
-        
-        filepath = op.join(subject_session_path, features_dir, filename)
+            # Determine filename based on marker type and data origin
+            if self.marker_type == 'scalar':
+                filename = f"scalars_{self.data_origin}.npy"
+                features_dir = "features_variable"
+            elif self.marker_type == 'topo':
+                filename = f"topos_{self.data_origin}.npy"
+                features_dir = "features_variable"
+            else:
+                raise ValueError(f"Unknown marker_type: {self.marker_type}")
+            
+            filepath = op.join(subject_session_path, features_dir, filename)
         
         if not op.exists(filepath):
-            print(f"    Missing {filename} in {subject_session_path}")
+            print(f"    Missing file: {filepath}")
             return None
         
         try:
-            data = np.load(filepath)
+            # Handle both .npy and .npz files
+            if filepath.endswith('.npz'):
+                # Load .npz file
+                data_dict = np.load(filepath)
+                
+                # Try common keys for single array
+                if 'scalars' in data_dict:
+                    data = data_dict['scalars']
+                elif 'arr_0' in data_dict:
+                    data = data_dict['arr_0']
+                else:
+                    # .npz might have individual markers as separate keys
+                    # Collect all scalar values into a single array
+                    keys = sorted(data_dict.keys())
+                    if len(keys) > 0:
+                        # Check if all values are scalars (shape ())
+                        all_scalars = all(data_dict[k].shape == () for k in keys)
+                        if all_scalars:
+                            # Collect all scalar values into a single array
+                            data = np.array([float(data_dict[k]) for k in keys])
+                            print(f"      Collected {len(keys)} scalar markers from .npz file")
+                        else:
+                            # Use the first available key
+                            data = data_dict[keys[0]]
+                    else:
+                        raise ValueError(f"No data found in .npz file: {filepath}")
+            else:
+                # Load .npy file
+                data = np.load(filepath)
             
             if self.marker_type == 'scalar':
                 # Scalar data: (n_markers,) -> flatten to 1D
@@ -379,35 +476,50 @@ class CrossSubjectClassifier:
         subjects_skipped = 0
         
         for subject_dir in sorted(subject_dirs):
-            subject_id = subject_dir.replace('sub-', '')
             subject_path = op.join(self.data_dir, subject_dir)
             
             if not op.isdir(subject_path):
                 continue
             
-            # Look for session directories
-            try:
-                session_dirs = [d for d in os.listdir(subject_path) if d.startswith('ses-')]
-            except PermissionError:
-                print(f"   Permission denied accessing {subject_path}")
-                continue
-            
-            for session_dir in sorted(session_dirs):
-                session_path = op.join(subject_path, session_dir)
+            # NEW: Check if this is the new structure (sub-XXX_original or sub-XXX_recon)
+            # Format: sub-001_original or sub-001_recon
+            if '_' in subject_dir and (subject_dir.endswith('_original') or subject_dir.endswith('_recon')):
+                # New structure: data is directly in this directory
+                parts = subject_dir.rsplit('_', 1)
+                subject_id_raw = parts[0].replace('sub-', '')  # e.g., "001"
+                data_type = parts[1]  # 'original' or 'recon'
                 
-                if not op.isdir(session_path):
+                # Only process if data_type matches our data_origin
+                # Map 'recon' to 'reconstructed' for compatibility
+                if data_type == 'recon':
+                    data_type = 'reconstructed'
+                
+                if data_type != self.data_origin:
                     continue
                 
-                subject_session_key = f"{subject_id}_{session_dir}"
+                # Look for .npz file directly in this directory
+                # The file might be named with the numeric ID
+                npz_filename = f"scalars_{subject_id_raw}_{parts[1]}.npz"
+                npz_path = op.join(subject_path, npz_filename)
                 
-                # Check if we have labels for this subject/session
+                # For label lookup, we need to match the subject ID format in patient_labels.csv
+                # The numeric ID might map to a different format (e.g., "001" -> "AA048")
+                # Try both numeric format and with ses-01
+                subject_session_key = f"{subject_id_raw}_ses-01"
+                
+                # Check if we have labels for this subject
                 if subject_session_key not in labels_dict:
                     print(f"    Skipping {subject_session_key}: no label found")
                     subjects_skipped += 1
                     continue
                 
-                # Load marker data
-                marker_data = self.load_subject_data(session_path)
+                # Load marker data from .npz file
+                if not op.exists(npz_path):
+                    print(f"    Missing {npz_filename} in {subject_path}")
+                    subjects_skipped += 1
+                    continue
+                
+                marker_data = self.load_subject_data(npz_path)
                 
                 if marker_data is None:
                     print(f"   ⏭️  Skipping {subject_session_key}: failed to load data")
@@ -431,6 +543,57 @@ class CrossSubjectClassifier:
                 subjects_processed += 1
                 
                 print(f"   ✓ Loaded {subject_session_key}: {marker_data.shape} features, state={labels_dict[subject_session_key]}")
+                
+            else:
+                # OLD structure: sub-XXX/ses-YY/features_variable/scalars_*.npy
+                subject_id = subject_dir.replace('sub-', '')
+                
+                # Look for session directories
+                try:
+                    session_dirs = [d for d in os.listdir(subject_path) if d.startswith('ses-')]
+                except PermissionError:
+                    print(f"   Permission denied accessing {subject_path}")
+                    continue
+                
+                for session_dir in sorted(session_dirs):
+                    session_path = op.join(subject_path, session_dir)
+                    
+                    if not op.isdir(session_path):
+                        continue
+                    
+                    subject_session_key = f"{subject_id}_{session_dir}"
+                    
+                    # Check if we have labels for this subject/session
+                    if subject_session_key not in labels_dict:
+                        print(f"    Skipping {subject_session_key}: no label found")
+                        subjects_skipped += 1
+                        continue
+                    
+                    # Load marker data
+                    marker_data = self.load_subject_data(session_path)
+                    
+                    if marker_data is None:
+                        print(f"   ⏭️  Skipping {subject_session_key}: failed to load data")
+                        subjects_skipped += 1
+                        continue
+                    
+                    # Validate shape consistency
+                    if len(subject_data) > 0:
+                        expected_shape = subject_data[0].shape
+                        
+                        if marker_data.shape != expected_shape:
+                            print(f"   ⚠️  Skipping {subject_session_key}: shape mismatch")
+                            print(f"       Expected: {expected_shape}, got: {marker_data.shape}")
+                            subjects_skipped += 1
+                            continue
+                    
+                    # Store data
+                    subject_data.append(marker_data)
+                    subject_labels.append(labels_dict[subject_session_key])
+                    collected_subjects.append(subject_session_key)
+                    subjects_processed += 1
+                    
+                    print(f"   ✓ Loaded {subject_session_key}: {marker_data.shape} features, state={labels_dict[subject_session_key]}")
         
         print("\n📊 DATA COLLECTION SUMMARY:")
         print(f"    Successfully loaded: {subjects_processed} subject/sessions")
@@ -1426,10 +1589,16 @@ class CrossDataClassifier:
         return marker_names, abbreviated_names
     
     def load_feature_names(self):
-        """Load feature names from the first available subject's scalar_metrics.csv file."""
+        """Load feature names from the first available subject's .npz file.
+        
+        Returns
+        -------
+        list
+            List of feature names, abbreviated for display
+        """
         print(" Loading feature names...")
         
-        # First, try to load from old structure (scalar_metrics.csv)
+        # First, try to load from .npz files in the new structure
         if op.exists(self.data_dir):
             subject_dirs = [d for d in os.listdir(self.data_dir) if d.startswith('sub-')]
             
@@ -1438,22 +1607,29 @@ class CrossDataClassifier:
                 if not op.isdir(subject_path):
                     continue
                     
-                # Look for session directories
-                try:
-                    session_dirs = [d for d in os.listdir(subject_path) if d.startswith('ses-')]
-                except PermissionError:
-                    continue
-                
-                for session_dir in sorted(session_dirs):
-                    session_path = op.join(subject_path, session_dir)
+                # Check if this is the new structure (sub-XXX_original or sub-XXX_recon)
+                if '_' in subject_dir and (subject_dir.endswith('_original') or subject_dir.endswith('_recon')):
+                    # Map data type for compatibility
+                    data_type = subject_dir.split('_')[-1]
+                    if data_type == 'recon':
+                        data_type = 'reconstructed'
                     
-                    # Try to find scalar_metrics.csv (old structure)
-                    metrics_file = op.join(session_path, 'compare_markers', 'scalars', 'metrics', 'scalar_metrics.csv')
+                    # Only process if data_type matches our data_origin
+                    if data_type != self.data_origin:
+                        continue
                     
-                    if op.exists(metrics_file):
+                    # Extract subject ID
+                    subject_id_raw = subject_dir.split('_')[0].replace('sub-', '')
+                    
+                    # Look for .npz file
+                    npz_filename = f"scalars_{subject_id_raw}_{subject_dir.split('_')[-1]}.npz"
+                    npz_path = op.join(subject_path, npz_filename)
+                    
+                    if op.exists(npz_path):
                         try:
-                            df = pd.read_csv(metrics_file, index_col=0)
-                            feature_names = df.index.tolist()
+                            # Load feature names from .npz file
+                            data_dict = np.load(npz_path)
+                            feature_names = sorted(data_dict.files())
                             
                             # Abbreviate long feature names for better display
                             abbreviated_names = []
@@ -1481,14 +1657,72 @@ class CrossDataClassifier:
                                 
                                 abbreviated_names.append(abbrev)
                             
-                            print(f"   ✓ Loaded {len(feature_names)} feature names from {subject_dir}/{session_dir}")
+                            print(f"   ✓ Loaded {len(feature_names)} feature names from {npz_filename}")
                             print(f"   Features: {', '.join(abbreviated_names[:5])}{'...' if len(abbreviated_names) > 5 else ''}")
                             
                             return feature_names, abbreviated_names
                             
                         except Exception as e:
-                            print(f"    Error loading {metrics_file}: {e}")
+                            print(f"    Error loading {npz_path}: {e}")
                             continue
+        
+        # OLD structure: try to load from scalar_metrics.csv
+        for subject_dir in sorted(subject_dirs):
+            subject_path = op.join(self.data_dir, subject_dir)
+            if not op.isdir(subject_path):
+                continue
+                
+            # Look for session directories
+            try:
+                session_dirs = [d for d in os.listdir(subject_path) if d.startswith('ses-')]
+            except PermissionError:
+                continue
+            
+            for session_dir in sorted(session_dirs):
+                session_path = op.join(subject_path, session_dir)
+                
+                # Try to find scalar_metrics.csv (old structure)
+                metrics_file = op.join(session_path, 'compare_markers', 'scalars', 'metrics', 'scalar_metrics.csv')
+                
+                if op.exists(metrics_file):
+                    try:
+                        df = pd.read_csv(metrics_file, index_col=0)
+                        feature_names = df.index.tolist()
+                        
+                        # Abbreviate long feature names for better display
+                        abbreviated_names = []
+                        for name in feature_names:
+                            # Create abbreviations
+                            if name.startswith('PowerSpectralDensity_'):
+                                abbrev = name.replace('PowerSpectralDensity_', 'PSD_')
+                            elif name.startswith('PowerSpectralDensitySummary_'):
+                                abbrev = name.replace('PowerSpectralDensitySummary_', 'PSD_Sum_')
+                            elif name.startswith('TimeLockedContrast_'):
+                                abbrev = name.replace('TimeLockedContrast_', 'TLC_')
+                            elif name.startswith('TimeLockedTopography_'):
+                                abbrev = name.replace('TimeLockedTopography_', 'TLT_')
+                            elif name.startswith('ContingentNegativeVariation'):
+                                abbrev = 'CNV'
+                            elif name.startswith('PermutationEntropy'):
+                                abbrev = 'PE'
+                            elif name.startswith('SymbolicMutualInformation'):
+                                abbrev = 'SMI'  
+                            elif name.startswith('KolmogorovComplexity'):
+                                abbrev = 'KC'
+                            else:
+                                # Keep original if no abbreviation rule
+                                abbrev = name
+                            
+                            abbreviated_names.append(abbrev)
+                        
+                        print(f"   ✓ Loaded {len(feature_names)} feature names from {subject_dir}/{session_dir}")
+                        print(f"   Features: {', '.join(abbreviated_names[:5])}{'...' if len(abbreviated_names) > 5 else ''}")
+                        
+                        return feature_names, abbreviated_names
+                        
+                    except Exception as e:
+                        print(f"    Error loading {metrics_file}: {e}")
+                        continue
         
         # Fallback: use standard marker names
         print("   Using standard marker names (NICE collection order)")
@@ -1519,35 +1753,77 @@ class CrossDataClassifier:
             (original_data, reconstructed_data) or (None, None) if loading failed
         """
         
-        # Determine filename based on marker type
+        # Extract subject and session identifiers from path
+        subject_dir = op.basename(op.dirname(subject_session_path))  # e.g. "sub-001"
+        session_dir = op.basename(subject_session_path)              # e.g. "ses-01"
+        subject_id = subject_dir.replace('sub-', '')
+        session_id = session_dir.replace('ses-', '')
+
+        # New MARKERS layout expected by the pipeline:
+        #   data_dir/
+        #       sub-{ID}/ses-{XX}/orig/scalars_{ID}.npz
+        #       sub-{ID}/ses-{XX}/recon/scalars_{ID}.npz
+        # (same filename in orig and recon, repeated across sessions)
+        # We also support the previous naming convention used by the
+        # markers phase as a fallback:
+        #   scalars_{ID}_ses-{XX}_orig.npz and scalars_{ID}_ses-{XX}_recon.npz
+
+        orig_dir = op.join(subject_session_path, 'orig')
+        recon_dir = op.join(subject_session_path, 'recon')
+
+        # Determine candidate filenames based on marker type
         if self.marker_type == 'scalar':
-            filename_orig = "scalars_original.npy"
-            filename_recon = "scalars_reconstructed.npy"
-            features_dir = "features_variable"
+            primary_name = f"scalars_{subject_id}.npz"
+            fallback_name_orig = f"scalars_{subject_id}_ses-{session_id}_orig.npz"
+            fallback_name_recon = f"scalars_{subject_id}_ses-{session_id}_recon.npz"
         elif self.marker_type == 'topo':
-            filename_orig = "topos_original.npy"
-            filename_recon = "topos_reconstructed.npy"
-            features_dir = "features_variable"
+            primary_name = f"topos_{subject_id}.npz"
+            fallback_name_orig = f"topos_{subject_id}_ses-{session_id}_orig.npz"
+            fallback_name_recon = f"topos_{subject_id}_ses-{session_id}_recon.npz"
         else:
             raise ValueError(f"Unknown marker_type: {self.marker_type}")
-        
-        filepath_orig = op.join(subject_session_path, features_dir, filename_orig)
-        filepath_recon = op.join(subject_session_path, features_dir, filename_recon)
-        
+
+        # Resolve filepaths with graceful fallback
+        def _resolve_filepath(base_dir, primary, fallback):
+            primary_path = op.join(base_dir, primary)
+            if op.exists(primary_path):
+                return primary_path
+            fallback_path = op.join(base_dir, fallback)
+            if op.exists(fallback_path):
+                return fallback_path
+            return None
+
+        filepath_orig = _resolve_filepath(orig_dir, primary_name, fallback_name_orig)
+        filepath_recon = _resolve_filepath(recon_dir, primary_name, fallback_name_recon)
+
         # Check if both files exist
-        if not op.exists(filepath_orig):
-            print(f"    Missing {filename_orig} in {subject_session_path}")
+        if filepath_orig is None:
+            print(f"    Missing scalar/topo file for ORIGINAL in {orig_dir}")
             return None, None
-        
-        if not op.exists(filepath_recon):
-            print(f"    Missing {filename_recon} in {subject_session_path}")
+
+        if filepath_recon is None:
+            print(f"    Missing scalar/topo file for RECON in {recon_dir}")
             return None, None
-        
+
         try:
-            # Load original data
-            data_orig = np.load(filepath_orig)
-            data_recon = np.load(filepath_recon)
-            
+            # Load original and reconstructed data (.npz or .npy)
+            def _load_array(path):
+                if path.endswith('.npz'):
+                    data_dict = np.load(path)
+                    keys = list(data_dict.keys())
+                    if not keys:
+                        raise ValueError(f"No arrays stored in {path}")
+                    # If a single array is stored, use it; otherwise
+                    # collect all scalar values into a single vector
+                    if len(keys) == 1:
+                        return data_dict[keys[0]]
+                    return np.array([float(data_dict[k]) for k in keys])
+                else:
+                    return np.load(path)
+
+            data_orig = _load_array(filepath_orig)
+            data_recon = _load_array(filepath_recon)
+
             # Flatten data based on marker type
             if self.marker_type == 'scalar':
                 # Scalar data: (n_markers,) -> flatten to 1D
@@ -1557,9 +1833,9 @@ class CrossDataClassifier:
                 # Topographic data: (n_markers, n_channels) -> flatten to 1D
                 data_orig = data_orig.flatten()
                 data_recon = data_recon.flatten()
-            
+
             return data_orig, data_recon
-            
+
         except Exception as e:
             print(f"   Error loading data from {subject_session_path}: {e}")
             return None, None
@@ -1596,66 +1872,181 @@ class CrossDataClassifier:
         subjects_skipped = 0
         
         for subject_dir in sorted(subject_dirs):
-            subject_id = subject_dir.replace('sub-', '')
             subject_path = op.join(self.data_dir, subject_dir)
             
             if not op.isdir(subject_path):
                 continue
             
-            # Look for session directories
-            try:
-                session_dirs = [d for d in os.listdir(subject_path) if d.startswith('ses-')]
-            except PermissionError:
-                print(f"   Permission denied accessing {subject_path}")
-                continue
-            
-            for session_dir in sorted(session_dirs):
-                session_path = op.join(subject_path, session_dir)
+            # NEW: Check if this is the new structure (sub-XXX_original or sub-XXX_recon)
+            # Format: sub-001_original or sub-001_recon
+            if '_' in subject_dir and (subject_dir.endswith('_original') or subject_dir.endswith('_recon')):
+                # New structure: data is directly in this directory
+                parts = subject_dir.rsplit('_', 1)
+                subject_id_raw = parts[0].replace('sub-', '')  # e.g., "001"
+                data_type = parts[1]  # 'original' or 'recon'
                 
-                if not op.isdir(session_path):
+                # Only process if data_type matches our data_origin
+                # Map 'recon' to 'reconstructed' for compatibility
+                if data_type == 'recon':
+                    data_type = 'reconstructed'
+                
+                if data_type != self.data_origin:
                     continue
                 
-                subject_session_key = f"{subject_id}_{session_dir}"
+                # Look for .npz file directly in this directory
+                # The file might be named with the numeric ID
+                npz_filename = f"scalars_{subject_id_raw}_{parts[1]}.npz"
+                npz_path = op.join(subject_path, npz_filename)
                 
-                # Check if we have labels for this subject/session
+                # For label lookup, we need to match the subject ID format in patient_labels.csv
+                # The numeric ID might map to a different format (e.g., "001" -> "AA048")
+                # Try both numeric format and with ses-01
+                subject_session_key = f"{subject_id_raw}_ses-01"
+                
+                # Check if we have labels for this subject
                 if subject_session_key not in labels_dict:
                     print(f"    Skipping {subject_session_key}: no label found")
                     subjects_skipped += 1
                     continue
                 
-                # Load both original and reconstructed marker data
-                marker_data_orig, marker_data_recon = self.load_subject_data_both(session_path)
-                
-                if marker_data_orig is None or marker_data_recon is None:
-                    print(f"   ⏭️  Skipping {subject_session_key}: failed to load both data types")
+                # Load marker data from .npz file
+                if not op.exists(npz_path):
+                    print(f"    Missing {npz_filename} in {subject_path}")
                     subjects_skipped += 1
                     continue
                 
-                # Validate shape consistency
-                if len(subject_data_orig) > 0:
-                    expected_shape_orig = subject_data_orig[0].shape
-                    expected_shape_recon = subject_data_recon[0].shape
-                    
-                    if marker_data_orig.shape != expected_shape_orig:
-                        print(f"   ⚠️  Skipping {subject_session_key}: shape mismatch")
-                        print(f"       Expected orig: {expected_shape_orig}, got: {marker_data_orig.shape}")
-                        subjects_skipped += 1
-                        continue
-                    
-                    if marker_data_recon.shape != expected_shape_recon:
-                        print(f"   ⚠️  Skipping {subject_session_key}: shape mismatch")
-                        print(f"       Expected recon: {expected_shape_recon}, got: {marker_data_recon.shape}")
-                        subjects_skipped += 1
-                        continue
+                marker_data = self.load_subject_data(npz_path)
                 
-                # Store data
-                subject_data_orig.append(marker_data_orig)
-                subject_data_recon.append(marker_data_recon)
-                subject_labels.append(labels_dict[subject_session_key])
-                collected_subjects.append(subject_session_key)
+                if marker_data is None:
+                    print(f"   ⏭️  Skipping {subject_session_key}: failed to load data")
+                    subjects_skipped += 1
+                    continue
+                
+                # For CrossDataClassifier, we need both original and reconstructed data
+                # This new structure separates them, so we need to handle this differently
+                # For now, store the data and we'll pair them later
+                if not hasattr(self, '_temp_data_storage'):
+                    self._temp_data_storage = {}
+                
+                self._temp_data_storage[subject_session_key] = {
+                    'data': marker_data,
+                    'data_type': data_type
+                }
+                
+                print(f"   ✓ Loaded {subject_session_key}: {marker_data.shape} features ({data_type}), state={labels_dict[subject_session_key]}")
                 subjects_processed += 1
                 
-                print(f"   ✓ Loaded {subject_session_key}: orig={marker_data_orig.shape}, recon={marker_data_recon.shape}, state={labels_dict[subject_session_key]}")
+            else:
+                # OLD structure: sub-XXX/ses-YY/orig/recon
+                subject_id = subject_dir.replace('sub-', '')
+                
+                # Look for session directories
+                try:
+                    session_dirs = [d for d in os.listdir(subject_path) if d.startswith('ses-')]
+                except PermissionError:
+                    print(f"   Permission denied accessing {subject_path}")
+                    continue
+                
+                for session_dir in sorted(session_dirs):
+                    session_path = op.join(subject_path, session_dir)
+                    
+                    if not op.isdir(session_path):
+                        continue
+                    
+                    subject_session_key = f"{subject_id}_{session_dir}"
+                    
+                    # Check if we have labels for this subject/session
+                    if subject_session_key not in labels_dict:
+                        print(f"    Skipping {subject_session_key}: no label found")
+                        subjects_skipped += 1
+                        continue
+                    
+                    # Load both original and reconstructed marker data
+                    marker_data_orig, marker_data_recon = self.load_subject_data_both(session_path)
+                    
+                    if marker_data_orig is None or marker_data_recon is None:
+                        print(f"   ⏭️  Skipping {subject_session_key}: failed to load both data types")
+                        subjects_skipped += 1
+                        continue
+                    
+                    # Validate shape consistency
+                    if len(subject_data_orig) > 0:
+                        expected_shape_orig = subject_data_orig[0].shape
+                        expected_shape_recon = subject_data_recon[0].shape
+                        
+                        if marker_data_orig.shape != expected_shape_orig:
+                            print(f"   ⚠️  Skipping {subject_session_key}: shape mismatch")
+                            print(f"       Expected orig: {expected_shape_orig}, got: {marker_data_orig.shape}")
+                            subjects_skipped += 1
+                            continue
+                        
+                        if marker_data_recon.shape != expected_shape_recon:
+                            print(f"   ⚠️  Skipping {subject_session_key}: shape mismatch")
+                            print(f"       Expected recon: {expected_shape_recon}, got: {marker_data_recon.shape}")
+                            subjects_skipped += 1
+                            continue
+                    
+                    # Store data
+                    subject_data_orig.append(marker_data_orig)
+                    subject_data_recon.append(marker_data_recon)
+                    subject_labels.append(labels_dict[subject_session_key])
+                    collected_subjects.append(subject_session_key)
+                    subjects_processed += 1
+                    
+                    print(f"   ✓ Loaded {subject_session_key}: orig={marker_data_orig.shape}, recon={marker_data_recon.shape}, state={labels_dict[subject_session_key]}")
+        
+        # Handle new structure data pairing
+        if hasattr(self, '_temp_data_storage'):
+            print("\n   Processing new structure data...")
+            
+            # Find subjects that have both original and reconstructed data
+            paired_subjects = []
+            for subject_key, data_info in self._temp_data_storage.items():
+                # Look for the corresponding data in the other type
+                other_type = 'reconstructed' if data_info['data_type'] == 'original' else 'original'
+                other_key = None
+                
+                # Try to find matching subject with other data type
+                for other_subject_key, other_data_info in self._temp_data_storage.items():
+                    if (other_data_info['data_type'] == other_type and 
+                        subject_key.replace('_ses-01', '') == other_subject_key.replace('_ses-01', '')):
+                        other_key = other_subject_key
+                        break
+                
+                if other_key is not None:
+                    # We have both data types for this subject
+                    if data_info['data_type'] == 'original':
+                        orig_data = data_info['data']
+                        recon_data = self._temp_data_storage[other_key]['data']
+                    else:
+                        orig_data = self._temp_data_storage[other_key]['data']
+                        recon_data = data_info['data']
+                    
+                    # Validate shape consistency
+                    if len(subject_data_orig) > 0:
+                        expected_shape_orig = subject_data_orig[0].shape
+                        expected_shape_recon = subject_data_recon[0].shape
+                        
+                        if orig_data.shape != expected_shape_orig:
+                            print(f"   ⚠️  Skipping {subject_key}: original shape mismatch")
+                            continue
+                        
+                        if recon_data.shape != expected_shape_recon:
+                            print(f"   ⚠️  Skipping {subject_key}: reconstructed shape mismatch")
+                            continue
+                    
+                    subject_data_orig.append(orig_data)
+                    subject_data_recon.append(recon_data)
+                    subject_labels.append(labels_dict[subject_key])
+                    collected_subjects.append(subject_key)
+                    paired_subjects.append(subject_key)
+                    
+                    print(f"   ✓ Paired {subject_key}: orig={orig_data.shape}, recon={recon_data.shape}")
+            
+            print(f"   ✓ Paired {len(paired_subjects)} subjects from new structure")
+            
+            # Clean up temporary storage
+            delattr(self, '_temp_data_storage')
         
         print("\n📊 DATA COLLECTION SUMMARY:")
         print(f"    Successfully loaded: {subjects_processed} subject/sessions")
@@ -1749,17 +2140,15 @@ class CrossDataClassifier:
         return pipeline
     
     def _grid_search_hyperparameters(self, X_train, y_train, groups_train, cv_strategy, n_splits):
-        """Perform grid search for best kernel, C, and gamma parameters.
+        """Perform grid search for best C parameter with linear kernel.
         
         Returns
         -------
         dict
             Dictionary with best parameters: {'kernel', 'C', 'gamma', 'score'}
         """
-        # Parameter grid
-        kernels = ['linear', 'rbf']
+        # Parameter grid - only linear kernel with different C values
         C_values = [0.001, 0.01, 0.1, 1, 10, 100]
-        gamma_values = ['scale', 'auto', 0.001, 0.01, 0.1]  # Only for RBF
         
         # Set up stratified CV
         if cv_strategy == 'loo':
@@ -1769,9 +2158,9 @@ class CrossDataClassifier:
             cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=self.random_state)
             print(f"      Using StratifiedKFold with {n_splits} splits")
         
-        best_params = {'kernel': None, 'C': None, 'gamma': None, 'score': -np.inf}
+        best_params = {'kernel': 'linear', 'C': None, 'gamma': 'scale', 'score': -np.inf}
         
-        # Test linear kernel
+        # Test linear kernel with different C values
         print(f"\n      Testing LINEAR kernel:")
         for C in C_values:
             pipeline = self.create_pipeline(C=C, kernel='linear')
@@ -1785,23 +2174,7 @@ class CrossDataClassifier:
             if mean_score > best_params['score']:
                 best_params = {'kernel': 'linear', 'C': C, 'gamma': 'scale', 'score': mean_score}
         
-        # Test RBF kernel
-        print(f"\n      Testing RBF kernel:")
-        for C in C_values:
-            for gamma in gamma_values:
-                pipeline = self.create_pipeline(C=C, kernel='rbf', gamma=gamma)
-                
-                scores = cross_val_score(estimator=pipeline, X=X_train, y=y_train, 
-                                       cv=cv, scoring='balanced_accuracy', n_jobs=-1)
-                mean_score = np.mean(scores)
-                
-                gamma_str = f"{gamma:8.3f}" if isinstance(gamma, float) else f"{gamma:>8s}"
-                print(f"         C={C:8.3f}, gamma={gamma_str}: {mean_score:.3f} ± {np.std(scores):.3f}")
-                
-                if mean_score > best_params['score']:
-                    best_params = {'kernel': 'rbf', 'C': C, 'gamma': gamma, 'score': mean_score}
-        
-        print(f"\n      ✓ Best parameters: kernel={best_params['kernel']}, C={best_params['C']}, gamma={best_params['gamma']}, Score={best_params['score']:.3f}")
+        print(f"\n      ✓ Best parameters: kernel={best_params['kernel']}, C={best_params['C']}, Score={best_params['score']:.3f}")
         return best_params
     
     def run_cross_data_classification(self, cv_strategy='stratified', n_splits=5, test_size=0.2):
@@ -1936,7 +2309,7 @@ class CrossDataClassifier:
             
             # Step 3: Train models with grid search
             print("\n🔧 Training models with hyperparameter grid search...")
-            print("   Searching over: kernels=['linear', 'rbf'], C=[0.001-100], gamma=['scale', 'auto', 0.001-0.1]")
+            print("   Searching over: kernel=['linear'], C=[0.001-100]")
             
             # Grid search for Model A (original data)
             print("\n   🔍 Grid Search for Model A (original data):")
@@ -3436,7 +3809,7 @@ def main():
                        help='Output directory for results (default: results/svm/{marker_type})')
     parser.add_argument('--cv-strategy', choices=['stratified', 'loo'], default='stratified',
                        help='Cross-validation strategy')
-    parser.add_argument('--n-splits', type=int, default=4,
+    parser.add_argument('--n-splits', type=int, default=2,
                        help='Number of CV splits (ignored for LOO)')
     parser.add_argument('--random-state', type=int, default=42,
                        help='Random state for reproducibility')
