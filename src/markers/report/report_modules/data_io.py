@@ -470,24 +470,14 @@ class ReportDataLoader:
             intercept_key = "cnv_detailed_cnvintercept"
         
         if slope_key and intercept_key:
-            slopes = report_data[slope_key]
-            intercepts = report_data[intercept_key]
+            # Convert to numpy arrays (junifer data comes as (1, trials, channels))
+            slopes = np.array(report_data[slope_key])
+            intercepts = np.array(report_data[intercept_key])
             
-            # Reshape CNV data if needed
-            if slopes.ndim == 2 and slopes.shape[1] == 1:
-                # Data is flattened as (total_elements, 1) - try common EGI montages
-                total_elements = slopes.shape[0]
-                
-                # Try common EGI channel counts (prioritize 256 - full EGI montage)
-                for n_ch in [256, 265, 257, 234, 129, 128]:
-                    if total_elements % n_ch == 0:
-                        n_trials = total_elements // n_ch
-                        slopes = slopes.reshape(n_trials, n_ch)
-                        intercepts = intercepts.reshape(n_trials, n_ch)
-                        logger.info(f"Reshaped CNV data from ({total_elements}, 1) to ({n_trials}, {n_ch})")
-                        break
-                else:
-                    logger.warning(f"Could not determine proper CNV reshape for {slopes.shape}")
+            # Squeeze leading dimension if present: (1, trials, channels) -> (trials, channels)
+            if slopes.ndim == 3 and slopes.shape[0] == 1:
+                slopes = slopes.squeeze(0)
+                intercepts = intercepts.squeeze(0)
             
             report_data["cnv_data"] = {
                 "cnv_slopes_trials": slopes,

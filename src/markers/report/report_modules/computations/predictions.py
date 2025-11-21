@@ -21,7 +21,7 @@ from .reductions import (
 
 logger = logging.getLogger(__name__)
 
-# Pretrained models directory
+# Pretrained models directory (project root, not in src/)
 MODELS_DIR = Path(__file__).parent.parent.parent.parent / "trained_models"
 
 class ICMPredictor:
@@ -58,7 +58,7 @@ class ICMPredictor:
         # Set models directory
         self.models_dir = Path(models_dir) if models_dir else MODELS_DIR
         
-        # Load pretrained models
+        # Load pretrained models (will raise error if not found)
         self.classifiers, self.feature_cols, self.training_metadata = self._load_pretrained_models()
         
         # Marker groups for univariate analysis (matching NICE structure)
@@ -115,11 +115,16 @@ class ICMPredictor:
             List of feature column names
         training_metadata : dict
             Training metadata
+            
+        Raises
+        ------
+        FileNotFoundError
+            If models directory or required files are not found
         """
         if not self.models_dir.exists():
             raise FileNotFoundError(
                 f"Models directory not found: {self.models_dir}\n"
-                f"Please run train_models.py first to train and save models."
+                f"Please ensure trained models are available."
             )
         
         logger.info(f"Loading pretrained models from {self.models_dir}")
@@ -138,13 +143,15 @@ class ICMPredictor:
         training_metadata = joblib.load(metadata_path)
         logger.info(f"Loaded training metadata: {training_metadata['n_samples']} samples, {training_metadata['n_features']} features")
         
-        # Load classifiers
+        # Load classifiers (fail if any requested classifier is missing)
         classifiers = {}
         for clf_name in self.clf_types:
             model_path = self.models_dir / f"{clf_name}_model.joblib"
             if not model_path.exists():
-                logger.warning(f"Model not found: {model_path}, skipping {clf_name}")
-                continue
+                raise FileNotFoundError(
+                    f"Required classifier model not found: {model_path}\n"
+                    f"Expected classifiers: {self.clf_types}"
+                )
             
             clf = joblib.load(model_path)
             classifiers[clf_name] = clf
@@ -158,7 +165,16 @@ class ICMPredictor:
                 logger.info(f"  In-sample accuracy: {clf_metadata['in_sample_score']:.3f}")
         
         if not classifiers:
-            raise ValueError(f"No valid classifiers found in {self.models_dir}")
+            raise ValueError(f"No classifiers loaded from {self.models_dir}")
+        
+        # Load univariate models (optional - for better univariate predictions)
+        univariate_path = self.models_dir / "univariate_models.joblib"
+        if univariate_path.exists():
+            self.univariate_models = joblib.load(univariate_path)
+            logger.info(f"Loaded {len(self.univariate_models)} univariate models")
+        else:
+            self.univariate_models = None
+            logger.warning("Univariate models not found - will use simplified approach")
         
         return classifiers, feature_cols, training_metadata
     
@@ -201,8 +217,11 @@ class ICMPredictor:
         # Perform multivariate predictions with pretrained models
         multivariate_results = self._multivariate_prediction_pretrained(X_subject)
         
-        # Perform univariate predictions (simplified - no retraining)
-        univariate_results = self._univariate_prediction_simple(X_subject, self.feature_cols)
+        # Perform univariate predictions
+        if self.univariate_models is not None:
+            univariate_results = self._univariate_prediction_pretrained(X_subject, self.feature_cols)
+        else:
+            univariate_results = self._univariate_prediction_simple(X_subject, self.feature_cols)
         
         # Combine results
         prediction_results = {
@@ -264,20 +283,36 @@ class ICMPredictor:
         ]
         
         # PowerSpectralDensity - Absolute power
+        # CRITICAL: Training data has PSD in dB scale (10*log10), so we must convert
         if 'per_channel_spectral' in markers_data:
             spectral_data = markers_data['per_channel_spectral']
             for band in ['delta', 'theta', 'alpha', 'beta', 'gamma']:
                 if band in spectral_data:
+                    raw_data = np.array(spectral_data[band])
+                    
+                    # Check if data is in linear scale (all positive, typical range >0.001)
+                    # If so, convert to dB scale to match training data
+                    is_linear_scale = np.all(raw_data > 0) and np.mean(raw_data) > 0.001
+                    if is_linear_scale:
+                        logger.info(f"PSD/{band}: Converting from linear to dB scale (10*log10)")
+                        band_data_db = 10 * np.log10(raw_data)
+                        logger.info(f"  Before: min={np.min(raw_data):.6f}, max={np.max(raw_data):.6f}")
+                        logger.info(f"  After:  min={np.min(band_data_db):.3f}, max={np.max(band_data_db):.3f}")
+                    else:
+                        logger.info(f"PSD/{band}: Already in dB scale (has negative values or very small values)")
+                        band_data_db = raw_data
+                    
                     for reduction_type in reduction_types:
                         try:
                             scalar_value = reduce_to_scalar(
-                                spectral_data[band], n_epochs, n_channels,
+                                band_data_db, n_epochs, n_channels,
                                 marker_type='PowerSpectralDensity',
                                 reduction_type=reduction_type,
                                 is_connectivity=False
                             )
                             key = f"nice/marker/PowerSpectralDensity/{band}_{reduction_type}"
                             features[key] = scalar_value
+                            logger.info(f"  {key} = {scalar_value:.6f}")
                         except Exception as e:
                             logger.debug(f"Failed PSD/{band}/{reduction_type}: {e}")
         
@@ -396,29 +431,27 @@ class ICMPredictor:
                     logger.debug(f"Failed CNV/{reduction_type}: {e}")
         
         # TimeLockedTopography (p1, p3a, p3b)
-        # Junifer stores as: (epochs*channels*times, 1) flattened
+        # Junifer stores as: (1, epochs, channels, times) or (epochs, channels, times)
         # No ROI specified in config → uses all 256 channels
-        # Reshape to (epochs, channels, times) → avg time → apply reduce_to_scalar
+        # Average across time → apply reduce_to_scalar
         for topo_type in ['p1', 'p3a', 'p3b']:
             topo_key = f"{topo_type}_topography_timelockedtopo"
             if topo_key in markers_data:
-                topo_data = np.array(markers_data[topo_key]).flatten()
+                # Convert to numpy array (junifer data comes in correct shape)
+                topo_data = np.array(markers_data[topo_key])
+                
+                # Squeeze leading dimension if present: (1, epochs, channels, times) -> (epochs, channels, times)
+                if topo_data.ndim == 4 and topo_data.shape[0] == 1:
+                    topo_data = topo_data.squeeze(0)
                 
                 # TimeLockedTopography uses no ROI → 256 channels
                 n_channels_topo = 256
-                expected_base = n_epochs * n_channels_topo
                 
-                # Check if we can reshape
-                if len(topo_data) % expected_base == 0:
-                    n_times = len(topo_data) // expected_base
+                if topo_data.ndim == 3 and topo_data.shape[1] == n_channels_topo:
+                    # Data is (epochs, channels, times) - average across time
+                    topo_time_avg = np.mean(topo_data, axis=2)  # -> (epochs, channels)
                     
-                    # Reshape to (epochs, channels, times)
-                    topo_reshaped = topo_data.reshape(n_epochs, n_channels_topo, n_times)
-                    
-                    # Average across time dimension → (epochs, channels)
-                    topo_time_avg = np.mean(topo_reshaped, axis=2)
-                    
-                    # Now apply standard reduction pipeline for each reduction type
+                    # Apply standard reduction pipeline for each reduction type
                     for reduction_type in reduction_types:
                         try:
                             scalar_value = reduce_to_scalar(
@@ -433,13 +466,13 @@ class ICMPredictor:
                         except Exception as e:
                             logger.warning(f"Failed TimeLockedTopography/{topo_type}/{reduction_type}: {e}")
                 else:
-                    logger.warning(f"Cannot reshape {topo_key}: {len(topo_data)} elements not divisible by {expected_base}")
+                    logger.warning(f"Unexpected shape for {topo_key}: {topo_data.shape}, expected (epochs, {n_channels_topo}, times)")
         
         # TimeLockedContrast (LSGS-LDGD, LSGD-LDGS, LD-LS, mmn, p3a, GD-GS, p3b)
-        # Junifer stores as: (combined_epochs*256*times, 1) flattened - full 256 channels
+        # Junifer stores as: (1, combined_epochs, channels, times) or (combined_epochs, channels, times)
         # Note: Junifer concatenates epochs from BOTH conditions (A and B) and stores ALL 256 channels
         # ROI filtering (scalp/mmn/p3a/p3b) is applied during reduce_to_scalar, not at storage
-        # Reshape to (combined_epochs, 256, times) → avg time → apply reduce_to_scalar with ROI filtering
+        # Average across time → apply reduce_to_scalar with ROI filtering
         
         # Get epoch counts per condition for contrasts
         epochs_obj = markers_data['epoch_info']
@@ -459,22 +492,18 @@ class ICMPredictor:
         
         for contrast_key, (contrast_name, n_epochs_contrast) in contrast_mapping.items():
             if contrast_key in markers_data:
-                contrast_data = np.array(markers_data[contrast_key]).flatten()
+                # Convert to numpy array (junifer data comes in correct shape)
+                contrast_data = np.array(markers_data[contrast_key])
                 
-                # All contrasts stored with full 256 channels
-                expected_base = n_epochs_contrast * n_channels
+                # Squeeze leading dimension if present: (1, epochs, channels, times) -> (epochs, channels, times)
+                if contrast_data.ndim == 4 and contrast_data.shape[0] == 1:
+                    contrast_data = contrast_data.squeeze(0)
                 
-                # Check if we can reshape
-                if len(contrast_data) % expected_base == 0:
-                    n_times = len(contrast_data) // expected_base
+                if contrast_data.ndim == 3 and contrast_data.shape[1] == n_channels:
+                    # Data is (combined_epochs, channels, times) - average across time
+                    contrast_time_avg = np.mean(contrast_data, axis=2)  # -> (combined_epochs, channels)
                     
-                    # Reshape to (combined_epochs, 256 channels, times)
-                    contrast_reshaped = contrast_data.reshape(n_epochs_contrast, n_channels, n_times)
-                    
-                    # Average across time dimension → (combined_epochs, 256 channels)
-                    contrast_time_avg = np.mean(contrast_reshaped, axis=2)
-                    
-                    # Now apply standard reduction pipeline for each reduction type
+                    # Apply standard reduction pipeline for each reduction type
                     # reduce_to_scalar will apply ROI filtering based on marker_type
                     for reduction_type in reduction_types:
                         try:
@@ -492,7 +521,7 @@ class ICMPredictor:
                         except Exception as e:
                             logger.warning(f"Failed TimeLockedContrast/{contrast_name}/{reduction_type}: {e}")
                 else:
-                    logger.warning(f"Cannot reshape {contrast_key}: {len(contrast_data)} elements ({len(contrast_data):,}) not divisible by {expected_base} ({n_epochs_contrast} epochs × {n_channels} channels)")
+                    logger.warning(f"Unexpected shape for {contrast_key}: {contrast_data.shape}, expected (epochs, {n_channels}, times)")
         
         # WindowDecoding (local, global)
         # Already a scalar (cross-validated accuracy) - use same value for all 4 reductions
@@ -543,25 +572,34 @@ class ICMPredictor:
         """
         # For single subject, we have feature values but need to match training format
         # Training format: marker_name_reduction (e.g., "nice/marker/PermutationEntropy/default_icm/lg/egi256/trim_mean80")
-        # Subject format: marker names directly
+        # Subject format: same as training (marker_name_reduction)
+        
+        # Create mapping from subject features to indices for fast lookup
+        subject_feature_map = {name: idx for idx, name in enumerate(subject_feature_names)}
         
         # Create aligned feature vector
         X_subject = np.zeros((1, len(training_feature_cols)))
         
         matched_features = 0
+        unmatched_features = []
+        
         for train_idx, train_col in enumerate(training_feature_cols):
-            # Try to find matching subject feature
-            # The training column format is "marker_reduction"
-            # We need to match this with subject features
-            for subj_idx, subj_name in enumerate(subject_feature_names):
-                # Simple matching: if subject feature is in training column name
-                if subj_name in train_col or train_col.split('_')[0] in subj_name:
-                    X_subject[0, train_idx] = subject_features_df.iloc[0, subj_idx]
-                    matched_features += 1
-                    break
+            # Try exact match first
+            if train_col in subject_feature_map:
+                subj_idx = subject_feature_map[train_col]
+                X_subject[0, train_idx] = subject_features_df.iloc[0, subj_idx]
+                matched_features += 1
+            else:
+                unmatched_features.append(train_col)
         
         if matched_features < len(training_feature_cols) * 0.5:
             logger.warning(f"Only matched {matched_features}/{len(training_feature_cols)} features between subject and training data")
+            if len(unmatched_features) <= 10:
+                logger.warning(f"Unmatched training features: {unmatched_features}")
+            else:
+                logger.warning(f"Unmatched training features (first 10): {unmatched_features[:10]}")
+            # Log first few subject features for debugging
+            logger.warning(f"Subject feature examples (first 5): {subject_feature_names[:5]}")
         else:
             logger.info(f"Matched {matched_features}/{len(training_feature_cols)} features")
         
@@ -693,9 +731,11 @@ class ICMPredictor:
             logger.warning(f"Failed to extract feature importance for {clf_name}: {e}")
             return None
     
-    def _univariate_prediction_simple(self, X_subject, feature_cols):
+    def _univariate_prediction_pretrained(self, X_subject, feature_cols):
         """
-        Simplified univariate prediction (no retraining, just normalize feature values).
+        Univariate prediction using pretrained logistic regression models.
+        
+        This matches the NICE framework approach - each feature gets its own trained model.
         
         Parameters
         ----------
@@ -709,32 +749,47 @@ class ICMPredictor:
         pd.DataFrame
             Univariate prediction results per marker
         """
-        logger.info("Performing simplified univariate analysis...")
+        logger.info("Performing univariate analysis with pretrained models...")
         
         univariate_results = []
         
         for idx, feature_col in enumerate(feature_cols):
             try:
-                # Extract single feature value
+                # Get feature value
                 feature_value = X_subject[0, idx]
                 
-                # Skip if feature is missing or zero
-                if np.isnan(feature_value) or feature_value == 0:
+                # Skip if feature is missing
+                if np.isnan(feature_value):
+                    logger.debug(f"Skipping {feature_col}: NaN value")
                     continue
                 
-                # Simple normalization to [0, 1] range for visualization
-                # Use sigmoid-like transformation centered at 0
-                normalized_value = 1 / (1 + np.exp(-feature_value * 100))
+                # Get pretrained univariate model for this feature
+                if feature_col not in self.univariate_models:
+                    logger.debug(f"No univariate model for {feature_col}")
+                    continue
                 
-                # Convert to class probabilities (symmetric around 0.5)
-                prob_class1 = normalized_value
-                prob_class0 = 1 - prob_class1
+                clf = self.univariate_models[feature_col]
+                
+                # Predict probabilities using trained model
+                X_feature = np.array([[feature_value]])
+                probas = clf.predict_proba(X_feature)
+                score = clf.score(X_feature, [1])  # Dummy score, just for structure
                 
                 # Parse marker and reduction from column name
+                # Format: nice/marker/MarkerName/subtype_icm/lg/egi256/reduction
+                # We want to extract: Marker=nice/marker/MarkerName/subtype, Reduction=icm/lg/egi256/reduction
                 parts = feature_col.split('_')
                 if len(parts) >= 2:
-                    marker = '_'.join(parts[:-1])
-                    reduction = parts[-1]
+                    # Find the last underscore that separates marker from reduction
+                    # The reduction part starts with "icm/"
+                    for i in range(len(parts) - 1, -1, -1):
+                        if parts[i].startswith('icm/') or (i > 0 and parts[i-1].endswith('/lg') or parts[i-1].endswith('/rs')):
+                            marker = '_'.join(parts[:i])
+                            reduction = '_'.join(parts[i:])
+                            break
+                    else:
+                        marker = '_'.join(parts[:-1])
+                        reduction = parts[-1]
                 else:
                     marker = feature_col
                     reduction = 'unknown'
@@ -742,8 +797,9 @@ class ICMPredictor:
                 univariate_results.append({
                     'Marker': marker,
                     'Reduction': reduction,
-                    self.ml_classes[0]: float(prob_class0),
-                    self.ml_classes[1]: float(prob_class1),
+                    'Score': float(score),
+                    self.ml_classes[0]: float(probas[0, 0]),
+                    self.ml_classes[1]: float(probas[0, 1]),
                     'Feature_Value': float(feature_value)
                 })
                 
@@ -757,6 +813,72 @@ class ICMPredictor:
         else:
             univariate_df = pd.DataFrame()
             logger.warning("No univariate predictions generated")
+        
+        return univariate_df
+    
+    def _univariate_prediction_simple(self, X_subject, feature_cols):
+        """
+        Simplified univariate prediction (fallback if no pretrained models).
+        
+        Parameters
+        ----------
+        X_subject : np.ndarray
+            Subject feature vector (1 × n_features)
+        feature_cols : list
+            List of feature column names
+            
+        Returns
+        -------
+        pd.DataFrame
+            Univariate prediction results per marker
+        """
+        logger.warning("Using simplified univariate analysis (no pretrained models)")
+        logger.warning("Results may not be accurate - retrain models with univariate support")
+        
+        univariate_results = []
+        
+        for idx, feature_col in enumerate(feature_cols):
+            try:
+                # Extract single feature value
+                feature_value = X_subject[0, idx]
+                
+                # Skip if feature is missing
+                if np.isnan(feature_value):
+                    continue
+                
+                # Parse marker and reduction
+                parts = feature_col.split('_')
+                if len(parts) >= 2:
+                    for i in range(len(parts) - 1, -1, -1):
+                        if parts[i].startswith('icm/') or (i > 0 and parts[i-1].endswith('/lg') or parts[i-1].endswith('/rs')):
+                            marker = '_'.join(parts[:i])
+                            reduction = '_'.join(parts[i:])
+                            break
+                    else:
+                        marker = '_'.join(parts[:-1])
+                        reduction = parts[-1]
+                else:
+                    marker = feature_col
+                    reduction = 'unknown'
+                
+                # Dummy prediction - not meaningful without trained models
+                univariate_results.append({
+                    'Marker': marker,
+                    'Reduction': reduction,
+                    'Score': 0.5,
+                    self.ml_classes[0]: 0.5,
+                    self.ml_classes[1]: 0.5,
+                    'Feature_Value': float(feature_value)
+                })
+                
+            except Exception as e:
+                logger.debug(f"Skipped univariate analysis for {feature_col}: {e}")
+                continue
+        
+        if univariate_results:
+            univariate_df = pd.DataFrame(univariate_results)
+        else:
+            univariate_df = pd.DataFrame()
         
         return univariate_df
     
@@ -937,43 +1059,38 @@ def compute_prediction_data(report_data, task='lg', output_dir="./tmp_computed_d
     """
     logger.info(f"Computing prediction data for {task.upper()} paradigm...")
     
-    try:
-        # Run predictions using the ICM predictor with pretrained models
-        if task == 'lg':
-            prediction_results = predict_icm_lg(
-                markers_data=report_data,
-                summary=None,  # Not needed with pretrained models
-                config_params={
-                    'ml_classes': ['VS/UWS', 'MCS'],
-                    'target': 'Label',  # Column name in training CSV
-                    'clf_type': ['gssvm', 'et-reduced']
-                }
-            )
-        else:  # rs
-            prediction_results = predict_icm_rs(
-                markers_data=report_data,
-                summary=None,  # Not needed with pretrained models
-                config_params={
-                    'ml_classes': ['VS/UWS', 'MCS'],
-                    'target': 'Label',  # Column name in training CSV
-                    'clf_type': ['gssvm', 'et-reduced']
-                }
-            )
-        
-        # Add task information to results
-        if prediction_results:
-            prediction_results['summary']['task'] = task.upper()
-        
-        if prediction_results:
-            # Save prediction results to pkl
-            output_path = Path(output_dir) / "prediction_results.pkl"
-            with open(output_path, 'wb') as f:
-                pickle.dump(prediction_results, f)
-            logger.info(f"✅ Prediction results saved to {output_path}")
-        else:
-            logger.warning("No prediction results generated")
-            
-    except Exception as e:
-        logger.error(f"Failed to compute predictions: {e}")
-        import traceback
-        logger.error(f"Error details: {traceback.format_exc()}")
+    # Run predictions using the ICM predictor with pretrained models
+    # Errors will propagate and break the pipeline if models/data are missing
+    if task == 'lg':
+        prediction_results = predict_icm_lg(
+            markers_data=report_data,
+            summary=None,  # Not needed with pretrained models
+            config_params={
+                'ml_classes': ['VS/UWS', 'MCS'],
+                'target': 'Label',  # Column name in training CSV
+                'clf_type': ['gssvm', 'et-reduced']
+            }
+        )
+    else:  # rs
+        prediction_results = predict_icm_rs(
+            markers_data=report_data,
+            summary=None,  # Not needed with pretrained models
+            config_params={
+                'ml_classes': ['VS/UWS', 'MCS'],
+                'target': 'Label',  # Column name in training CSV
+                'clf_type': ['gssvm', 'et-reduced']
+            }
+        )
+    
+    # Add task information to results
+    if prediction_results:
+        prediction_results['summary']['task'] = task.upper()
+    
+    if not prediction_results:
+        raise ValueError("No prediction results generated - prediction failed")
+    
+    # Save prediction results to pkl
+    output_path = Path(output_dir) / "prediction_results.pkl"
+    with open(output_path, 'wb') as f:
+        pickle.dump(prediction_results, f)
+    logger.info(f"✅ Prediction results saved to {output_path}")

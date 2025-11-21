@@ -4,33 +4,35 @@
 #
 # IMPORTANT: Install in two steps due to nice package dependency on numpy:
 # (1) pip install -r requirements.txt
-# (2) pip install -e git+https://github.com/nice-tools/nice@e54fe9eda1318e3612b9a9e87a8e5d85c4b9f589#egg=nice
 
 # Core scientific computing (install first)
-numpy==2.0.1
-scipy==1.13.1
-pandas==2.3.1
+numpy>=1.26.0,<3.0.0
+scipy>=1.13.1
+pandas>=2.0.0
 
 # Machine learning
-scikit-learn==1.6.1
-joblib==1.5.1
+scikit-learn>=1.6.0
+joblib>=1.5.0
 
 # EEG analysis and signal processing  
-mne==1.2.3
+mne>=1.6.0
+mne-connectivity==0.7.0
 # Note: nice package requires numpy to be pre-installed
 # Install separately: pip install -e git+https://github.com/nice-tools/nice@e54fe9eda1318e3612b9a9e87a8e5d85c4b9f589#egg=nice
 
+# Junifer for marker computation
+junifer
+# Note: junifer_eeg is a local package
+# Install separately: pip install -e /data/project/eeg_foundation/src/gio/junifer-for-picnic/
+
 # File I/O and data formats
-h5py==3.14.0
-h5io==0.2.5
+h5py>=3.0.0
+h5io>=0.2.0
 
 # Plotting and visualization
-matplotlib==3.8.4
-seaborn==0.13.2
-contourpy==1.3.0
-cycler==0.12.1
-fonttools==4.59.0
-kiwisolver==1.4.7
-pillow==11.3.0
-pyparsing==3.2.3
+matplotlib>=3.8.0
+seaborn>=0.13.0
 
+# Additional dependencies for junifer_eeg
+numba>=0.59.0
+antropy>=0.1.6

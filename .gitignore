@@ -4,6 +4,7 @@ results/
 cookbooks/old_scripts/
 cookbooks/cleanup_hdf5_markers.py
 
+src/old_version/
 src/extra_tools/
 src/decoder/doc_benchmark
 src/decoder/results
@@ -12,18 +13,21 @@ src/train_extratrees.py
 src/analysis/__init__.py
 src/analysis/ntbk.ipynb
 src/decoder/res
+src/decoder/analysis/peak_analysis.py
 src/model/multiple_seeds_analysis.py
 src/model/seed_differences_analysis.py
+src/model/extratrees.py
 src/analysis/results
 src/ground_truth/
 src/markers_old/
+src/markers/report_modules_old/
 
 .ruff_cache/
 .vscode/
 .DS_Store
 *__pycache__*
 .venv/
-.venv_new/
+.venv_n/
 
 
 

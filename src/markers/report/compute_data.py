@@ -145,7 +145,11 @@ def main():
         gc.collect()
 
         logger.info("Computing predictions...")
-        compute_prediction_data(report_data, task=args.task, output_dir=str(computed_data_path))
+        try:
+            compute_prediction_data(report_data, task=args.task, output_dir=str(computed_data_path))
+        except FileNotFoundError as e:
+            logger.warning(f"⚠️  Skipping predictions: {e}")
+            logger.warning("⚠️  Trained models not found - predictions will be skipped")
         gc.collect()
 
         logger.info("="*60)

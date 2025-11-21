@@ -1,8 +1,26 @@
 #!/usr/bin/env python3
 """
-Script to decode original vs reconstructed EEG data from .fif files.
+Unified script to decode original vs reconstructed EEG data from .fif files.
 Original files (-original.fif) are labeled as class 0.
 Reconstructed files (-recon.fif) are labeled as class 1.
+
+Supports two modes:
+- 'patient' mode: Overall decoding + optional trial-type decomposition with patient state grouping
+- 'control' mode: Overall decoding + optional trial-type decomposition (disabled for resting state data)
+
+Examples:
+
+# Patient mode (default)
+python decoder.py --main_path /data/patients --patient-labels labels.csv
+
+# Control mode  
+python decoder.py --mode control --main_path /data/controls
+
+# Control mode with filtering (task-based data)
+python decoder.py --mode control --filter_trial_types LSGS LSGD LDGD LDGS
+
+# Control mode with resting state (no trial decomposition)
+python decoder.py --mode control --main_path /data/controls_rest
 """
 
 import argparse
@@ -98,6 +116,20 @@ def parse_arguments():
         default=None,
         help="Path to patient labels CSV file for subject-type aggregation"
     )
+    parser.add_argument(
+        "--mode",
+        type=str,
+        choices=['patient', 'control'],
+        default='patient',
+        help="Analysis mode: 'patient' for patient data with state grouping, 'control' for simplified control analysis"
+    )
+    parser.add_argument(
+        "--filter_trial_types",
+        type=str,
+        nargs="+",
+        choices=['HSTD', 'HDVT', 'LSGS', 'LSGD', 'LDGD', 'LDGS'],
+        help="Optional: Filter to include only specific trial types (typically used in control mode)"
+    )
     
     return parser.parse_args()
 
@@ -128,9 +160,16 @@ def find_subjects_sessions(main_path):
     
     return subjects, sessions
 
-def load_epochs_single_subject_session(main_path, subject_id, session_id, verbose=False):
+def load_epochs_single_subject_session(main_path, subject_id, session_id, filter_trial_types=None, verbose=False):
     """
     Load epochs from .fif files for a single subject and session.
+    
+    Parameters:
+        main_path: str, path to main data directory
+        subject_id: str, subject identifier
+        session_id: str, session identifier
+        filter_trial_types: list of str or None, trial types to include (e.g., ['LSGS', 'LSGD'])
+        verbose: bool, print verbose output
     
     Returns:
         X: epochs data (n_epochs, n_channels, n_timepoints)
@@ -154,6 +193,14 @@ def load_epochs_single_subject_session(main_path, subject_id, session_id, verbos
         print(f"Subject {subject_id}, Session {session_id}:")
         print(f"  Original files: {len(original_files)}")
         print(f"  Reconstructed files: {len(recon_files)}")
+        if filter_trial_types:
+            print(f"  Filtering to trial types: {filter_trial_types}")
+    
+    # Get event IDs for filtering if specified
+    filter_event_ids = None
+    if filter_trial_types:
+        filter_event_ids = [event_id for event_id, name in event_id_mapping.items() 
+                           if name in filter_trial_types]
     
     all_epochs = []
     all_labels = []
@@ -167,16 +214,23 @@ def load_epochs_single_subject_session(main_path, subject_id, session_id, verbos
             data = epochs.get_data().astype(np.float32)
             events = epochs.events[:, 2]
             
-            n_epochs = data.shape[0]
-            all_epochs.append(data)
-            all_labels.extend([0] * n_epochs)
-            all_events.extend(events)
+            # Apply trial type filtering if specified
+            if filter_event_ids is not None:
+                mask = np.isin(events, filter_event_ids)
+                data = data[mask]
+                events = events[mask]
             
-            if times is None:
-                times = epochs.times
-            
-            if verbose:
-                print(f"    Loaded {fif_file.name}: {data.shape[0]} epochs, {data.shape[2]} timepoints")
+            if len(data) > 0:
+                n_epochs = data.shape[0]
+                all_epochs.append(data)
+                all_labels.extend([0] * n_epochs)
+                all_events.extend(events)
+                
+                if times is None:
+                    times = epochs.times
+                
+                if verbose:
+                    print(f"    Loaded {fif_file.name}: {data.shape[0]} epochs")
                 
         except Exception as e:
             print(f"    Error loading {fif_file}: {e}")
@@ -188,16 +242,23 @@ def load_epochs_single_subject_session(main_path, subject_id, session_id, verbos
             data = epochs.get_data().astype(np.float32)
             events = epochs.events[:, 2]
             
-            n_epochs = data.shape[0]
-            all_epochs.append(data)
-            all_labels.extend([1] * n_epochs)
-            all_events.extend(events)
+            # Apply trial type filtering if specified
+            if filter_event_ids is not None:
+                mask = np.isin(events, filter_event_ids)
+                data = data[mask]
+                events = events[mask]
             
-            if times is None:
-                times = epochs.times
-            
-            if verbose:
-                print(f"    Loaded {fif_file.name}: {data.shape[0]} epochs, {data.shape[2]} timepoints")
+            if len(data) > 0:
+                n_epochs = data.shape[0]
+                all_epochs.append(data)
+                all_labels.extend([1] * n_epochs)
+                all_events.extend(events)
+                
+                if times is None:
+                    times = epochs.times
+                
+                if verbose:
+                    print(f"    Loaded {fif_file.name}: {data.shape[0]} epochs")
                 
         except Exception as e:
             print(f"    Error loading {fif_file}: {e}")
@@ -219,9 +280,19 @@ def load_epochs_single_subject_session(main_path, subject_id, session_id, verbos
     return X, y, events, times
 
 
-def decode_single_subject_session(X, y, events, times, cv=10, n_jobs=None, verbose=False):
+def decode_single_subject_session(X, y, events, times, cv=10, n_jobs=None, mode='patient', verbose=False):
     """
     Perform all decoding analyses for a single subject/session.
+    
+    Parameters:
+        X: array, epochs data (n_epochs, n_channels, n_timepoints)
+        y: array, labels (0=original, 1=reconstructed)
+        events: array, event IDs
+        times: array, time points
+        cv: int, number of cross-validation folds
+        n_jobs: int or None, number of parallel jobs
+        mode: str, 'patient' or 'control' - determines whether to run local/global analysis
+        verbose: bool, print verbose output
     
     Returns:
         results: dict containing all analysis results
@@ -238,9 +309,9 @@ def decode_single_subject_session(X, y, events, times, cv=10, n_jobs=None, verbo
     
     # Overall classification
     print("  Performing overall classification...")
-    time_decod = SlidingEstimator(clf, n_jobs=1, scoring="roc_auc", verbose=False)
+    time_decod = SlidingEstimator(clf, n_jobs=1, scoring="roc_auc", verbose=True)
     try:
-        scores = cross_val_multiscore(time_decod, X, y, cv=cv, n_jobs=1)
+        scores = cross_val_multiscore(time_decod, X, y, cv=cv, n_jobs=n_jobs, verbose=1)
         if scores.ndim == 2:
             mean_scores_time = np.mean(scores, axis=0)
         else:
@@ -257,121 +328,51 @@ def decode_single_subject_session(X, y, events, times, cv=10, n_jobs=None, verbo
         print(f"    Error in overall classification: {e}")
         return None
     
-    # Trial-type-specific classification
-    print("  Performing trial-type classification...")
-    target_trial_types = ['LSGS', 'LSGD', 'LDGD', 'LDGS']
-    target_event_ids = [30, 40, 50, 60]
+    # Trial-type-specific classification (optional - depends on data type)
+    # Check if data has task-specific events (local/global paradigm) or is resting state
+    task_event_ids = [30, 40, 50, 60]  # LSGS, LSGD, LDGD, LDGS
+    has_task_events = np.any(np.isin(events, task_event_ids))
     
     results['trial_types'] = {}
-    for trial_type, event_id in zip(target_trial_types, target_event_ids):
-        trial_mask = events == event_id
-        if np.sum(trial_mask) == 0:
-            continue
-        
-        X_trial = X[trial_mask]
-        y_trial = y[trial_mask]
-        
-        if X_trial.shape[0] < cv or len(np.unique(y_trial)) < 2:
-            continue
-        
-        try:
-            time_decod = SlidingEstimator(clf, n_jobs=1, scoring="roc_auc", verbose=False)
-            scores = cross_val_multiscore(time_decod, X_trial, y_trial, cv=cv, n_jobs=1)
-            
-            if scores.ndim == 2:
-                mean_scores_time = np.mean(scores, axis=0)
-            else:
-                mean_scores_time = scores
-            
-            results['trial_types'][trial_type] = {
-                'scores': scores,
-                'mean_scores_time': mean_scores_time,
-                'mean_auc': np.mean(mean_scores_time),
-                'std_auc': np.std(mean_scores_time),
-                'n_trials': X_trial.shape[0]
-            }
-            print(f"    {trial_type} AUC: {results['trial_types'][trial_type]['mean_auc']:.3f}")
-        except Exception as e:
-            print(f"    Error in {trial_type} classification: {e}")
+    results['has_task_events'] = has_task_events
     
-    # Local/Global effects
-    print("  Performing local/global analysis...")
-    local_standard_events = [30, 40]  # LSGS, LSGD
-    local_deviant_events = [50, 60]   # LDGD, LDGS
-    global_standard_events = [30, 60] # LSGS, LDGS
-    global_deviant_events = [40, 50]  # LSGD, LDGD
-    
-    results['local_global'] = {}
-    
-    # Filter for relevant events
-    relevant_mask = np.isin(events, [30, 40, 50, 60])
-    X_relevant = X[relevant_mask]
-    y_relevant = y[relevant_mask]
-    events_relevant = events[relevant_mask]
-    
-    # For each data type (original=0, reconstructed=1)
-    for data_type in [0, 1]:
-        data_name = 'original' if data_type == 0 else 'reconstructed'
-        data_mask = y_relevant == data_type
-        X_data = X_relevant[data_mask]
-        events_data = events_relevant[data_mask]
+    if has_task_events:
+        print("  Performing trial-type classification...")
+        target_trial_types = ['LSGS', 'LSGD', 'LDGD', 'LDGS']
+        target_event_ids = [30, 40, 50, 60]
         
-        if X_data.shape[0] == 0:
-            continue
-        
-        # Local effect analysis
-        local_mask = np.isin(events_data, local_standard_events + local_deviant_events)
-        if np.sum(local_mask) > 0:
-            X_local = X_data[local_mask]
-            events_local = events_data[local_mask]
-            y_local = np.isin(events_local, local_deviant_events).astype(int)
+        for trial_type, event_id in zip(target_trial_types, target_event_ids):
+            trial_mask = events == event_id
+            if np.sum(trial_mask) == 0:
+                continue
             
-            if len(np.unique(y_local)) == 2 and X_local.shape[0] >= cv:
-                try:
-                    time_decod = SlidingEstimator(clf, n_jobs=1, scoring="roc_auc", verbose=False)
-                    scores_local = cross_val_multiscore(time_decod, X_local, y_local, cv=cv, n_jobs=1)
-                    
-                    if scores_local.ndim == 2:
-                        mean_scores_time = np.mean(scores_local, axis=0)
-                    else:
-                        mean_scores_time = scores_local
-                    
-                    results['local_global'][f'{data_name}_local'] = {
-                        'scores': scores_local,
-                        'mean_scores_time': mean_scores_time,
-                        'mean_auc': np.mean(mean_scores_time),
-                        'std_auc': np.std(mean_scores_time)
-                    }
-                    print(f"    {data_name} local AUC: {results['local_global'][f'{data_name}_local']['mean_auc']:.3f}")
-                except Exception as e:
-                    print(f"    Error in {data_name} local analysis: {e}")
-        
-        # Global effect analysis
-        global_mask = np.isin(events_data, global_standard_events + global_deviant_events)
-        if np.sum(global_mask) > 0:
-            X_global = X_data[global_mask]
-            events_global = events_data[global_mask]
-            y_global = np.isin(events_global, global_standard_events).astype(int)
+            X_trial = X[trial_mask]
+            y_trial = y[trial_mask]
             
-            if len(np.unique(y_global)) == 2 and X_global.shape[0] >= cv:
-                try:
-                    time_decod = SlidingEstimator(clf, n_jobs=1, scoring="roc_auc", verbose=False)
-                    scores_global = cross_val_multiscore(time_decod, X_global, y_global, cv=cv, n_jobs=1)
-                    
-                    if scores_global.ndim == 2:
-                        mean_scores_time = np.mean(scores_global, axis=0)
-                    else:
-                        mean_scores_time = scores_global
-                    
-                    results['local_global'][f'{data_name}_global'] = {
-                        'scores': scores_global,
-                        'mean_scores_time': mean_scores_time,
-                        'mean_auc': np.mean(mean_scores_time),
-                        'std_auc': np.std(mean_scores_time)
-                    }
-                    print(f"    {data_name} global AUC: {results['local_global'][f'{data_name}_global']['mean_auc']:.3f}")
-                except Exception as e:
-                    print(f"    Error in {data_name} global analysis: {e}")
+            if X_trial.shape[0] < cv or len(np.unique(y_trial)) < 2:
+                continue
+            
+            try:
+                time_decod = SlidingEstimator(clf, n_jobs=1, scoring="roc_auc", verbose=True)
+                scores = cross_val_multiscore(time_decod, X_trial, y_trial, cv=cv, n_jobs=n_jobs, verbose=1)
+                
+                if scores.ndim == 2:
+                    mean_scores_time = np.mean(scores, axis=0)
+                else:
+                    mean_scores_time = scores
+                
+                results['trial_types'][trial_type] = {
+                    'scores': scores,
+                    'mean_scores_time': mean_scores_time,
+                    'mean_auc': np.mean(mean_scores_time),
+                    'std_auc': np.std(mean_scores_time),
+                    'n_trials': X_trial.shape[0]
+                }
+                print(f"    {trial_type} AUC: {results['trial_types'][trial_type]['mean_auc']:.3f}")
+            except Exception as e:
+                print(f"    Error in {trial_type} classification: {e}")
+    else:
+        print("  Skipping trial-type classification (resting state data detected)")
     
     return results
 
@@ -395,12 +396,12 @@ def save_single_subject_session_results(results, times, subject_id, session_id, 
         "subject_id": subject_id,
         "session_id": session_id,
         "analysis_date": datetime.now().isoformat(),
+        "has_task_events": bool(results.get('has_task_events', False)),
         "overall": {
             "mean_auc": float(results['overall']['mean_auc']),
             "std_auc": float(results['overall']['std_auc'])
         } if 'overall' in results else None,
-        "trial_types": {},
-        "local_global": {}
+        "trial_types": {}
     }
     
     if 'trial_types' in results:
@@ -409,13 +410,6 @@ def save_single_subject_session_results(results, times, subject_id, session_id, 
                 "mean_auc": float(trial_data['mean_auc']),
                 "std_auc": float(trial_data['std_auc']),
                 "n_trials": int(trial_data['n_trials'])
-            }
-    
-    if 'local_global' in results:
-        for effect_name, effect_data in results['local_global'].items():
-            json_results["local_global"][effect_name] = {
-                "mean_auc": float(effect_data['mean_auc']),
-                "std_auc": float(effect_data['std_auc'])
             }
     
     json_path = data_dir / "decoding_summary.json"
@@ -435,6 +429,52 @@ def add_stimulus_lines(ax, times):
         if times[0] <= stim_time <= times[-1]:  # Only plot if within time range
             label = 'Stimuli' if i == 0 else None
             ax.axvline(stim_time, color='darkgray', linestyle='--', alpha=1, linewidth=1.5, label=label)
+
+def run_wilcoxon_per_timepoint(all_scores, alternative='greater'):
+    """
+    Run Wilcoxon signed-rank test per timepoint against chance (0.5).
+    
+    For each timepoint, tests whether the distribution of AUC values across subjects
+    is significantly different from 0.5 (chance level).
+    
+    Parameters:
+        all_scores: array of shape (n_subjects, n_timepoints) containing AUC scores
+        alternative: str, 'greater', 'less', or 'two-sided'
+        
+    Returns:
+        dict containing:
+            - p_values: array of p-values per timepoint (n_timepoints,)
+            - test_statistics: array of test statistics per timepoint
+            - significant_mask: boolean array indicating p < 0.05 per timepoint
+            - n_subjects: number of subjects
+            - n_timepoints: number of timepoints
+    """
+    n_subjects, n_timepoints = all_scores.shape
+    p_values = np.zeros(n_timepoints)
+    test_statistics = np.zeros(n_timepoints)
+    
+    for t in range(n_timepoints):
+        # Get AUC values for this timepoint across all subjects
+        auc_at_t = all_scores[:, t]
+        
+        # Wilcoxon signed-rank test against 0.5
+        # Tests if the median of (auc_at_t - 0.5) is significantly different from 0
+        try:
+            statistic, p_value = stats.wilcoxon(auc_at_t - 0.5, alternative=alternative)
+            p_values[t] = p_value
+            test_statistics[t] = statistic
+        except Exception as e:
+            # If test fails (e.g., all values equal), set p-value to 1
+            p_values[t] = 1.0
+            test_statistics[t] = np.nan
+    
+    return {
+        'p_values': p_values,
+        'test_statistics': test_statistics,
+        'significant_mask': p_values < 0.05,
+        'n_subjects': int(n_subjects),
+        'n_timepoints': int(n_timepoints)
+    }
 
 def run_permutation_test(all_scores, n_permutations=1000, seed=42):
     """
@@ -525,8 +565,8 @@ def create_single_subject_plots(results, times, plots_dir, subject_id, session_i
         plt.savefig(plots_dir / "overall_classification.png", dpi=300, bbox_inches='tight')
         plt.close()
     
-    # Trial type plots
-    if 'trial_types' in results and results['trial_types']:
+    # Trial type plots (only if task events are present)
+    if 'trial_types' in results and results['trial_types'] and results.get('has_task_events', False):
         fig, axes = plt.subplots(2, 2, figsize=(15, 10))
         axes = axes.flatten()
         
@@ -553,49 +593,15 @@ def create_single_subject_plots(results, times, plots_dir, subject_id, session_i
         plt.tight_layout()
         plt.savefig(plots_dir / "trial_type_classification.png", dpi=300, bbox_inches='tight')
         plt.close()
-    
-    # Local/Global effects plots
-    if 'local_global' in results and results['local_global']:
-        fig, axes = plt.subplots(2, 2, figsize=(15, 10))
-        
-        analyses = [
-            ('original_local', 'Original - Local Effect', 0, 0),
-            ('original_global', 'Original - Global Effect', 0, 1),
-            ('reconstructed_local', 'Reconstructed - Local Effect', 1, 0),
-            ('reconstructed_global', 'Reconstructed - Global Effect', 1, 1)
-        ]
-        
-        colors = ['blue', 'red', 'green', 'orange']
-        
-        for i, (key, title, row, col) in enumerate(analyses):
-            ax = axes[row, col]
-            if key in results['local_global']:
-                mean_scores = results['local_global'][key]['mean_scores_time']
-                ax.plot(times, mean_scores, color=colors[i], linewidth=2)
-                ax.axhline(0.5, color="k", linestyle="--", alpha=0.7)
-                add_stimulus_lines(ax, times)
-                ax.set_title(title)
-                ax.set_xlabel("Time (s)")
-                ax.set_ylabel("AUC")
-                ax.grid(True, alpha=0.3)
-                ax.set_ylim([0.4, 1.0])
-            else:
-                ax.text(0.5, 0.5, f'No data for\n{title}', 
-                       ha='center', va='center', transform=ax.transAxes)
-                ax.set_title(title)
-        
-        plt.suptitle(f"Local/Global Effects - sub-{subject_id} ses-{session_id}")
-        plt.tight_layout()
-        plt.savefig(plots_dir / "local_global_effects.png", dpi=300, bbox_inches='tight')
-        plt.close()
 
-def aggregate_all_results(output_dir, patient_labels_path=None):
+def aggregate_all_results(output_dir, patient_labels_path=None, mode='patient'):
     """
     Aggregate results from all individual subject/session analyses.
     
     Parameters:
         output_dir: Path to output directory
         patient_labels_path: Optional path to patient labels CSV for subject-type aggregation
+        mode: str, 'patient' or 'control' - determines aggregation strategy
     
     Returns:
         aggregated_results: dict containing aggregated results
@@ -666,12 +672,12 @@ def aggregate_all_results(output_dir, patient_labels_path=None):
             'VS': {}
         },
         'trial_types': {},
-        'local_global': {}
+        'has_task_events': False  # Will be updated based on data
     }
     
-    # Load patient labels to filter by subject type
+    # Load patient labels to filter by subject type (only in patient mode)
     subject_state_map = {}
-    if patient_labels_path and Path(patient_labels_path).exists():
+    if mode == 'patient' and patient_labels_path and Path(patient_labels_path).exists():
         try:
             df = pd.read_csv(patient_labels_path, dtype={'session': str})
             for _, row in df.iterrows():
@@ -830,43 +836,15 @@ def aggregate_all_results(output_dir, patient_labels_path=None):
             print(f"    Cohen's d: {perm_result['cohens_d']:.4f}")
             print(f"    Significant: {perm_result['significant_ttest']}")
     
-    # Aggregate local/global effects
-    effect_types = ['original_local', 'original_global', 'reconstructed_local', 'reconstructed_global']
-    for effect_type in effect_types:
-        aggregated['local_global'][effect_type] = {
-            'all_mean_aucs': [],
-            'all_mean_scores_time': []
-        }
-        
-        for results in all_results:
-            if 'local_global' in results and effect_type in results['local_global']:
-                aggregated['local_global'][effect_type]['all_mean_aucs'].append(
-                    results['local_global'][effect_type]['mean_auc']
-                )
-                aggregated['local_global'][effect_type]['all_mean_scores_time'].append(
-                    results['local_global'][effect_type]['mean_scores_time']
-                )
-        
-        # Calculate statistics for this effect type
-        if aggregated['local_global'][effect_type]['all_mean_aucs']:
-            aggregated['local_global'][effect_type]['mean_auc'] = np.mean(
-                aggregated['local_global'][effect_type]['all_mean_aucs']
-            )
-            aggregated['local_global'][effect_type]['std_auc'] = np.std(
-                aggregated['local_global'][effect_type]['all_mean_aucs']
-            )
-            
-            # Point-by-point statistics
-            all_timeseries = np.array(aggregated['local_global'][effect_type]['all_mean_scores_time'])
-            aggregated['local_global'][effect_type]['mean_scores_time'] = np.mean(all_timeseries, axis=0)
-            # Calculate std per timepoint (axis=0 gives std across subjects at each time)
-            aggregated['local_global'][effect_type]['std_scores_time'] = np.std(aggregated['local_global'][effect_type]['all_mean_scores_time'], axis=0)
-            aggregated['local_global'][effect_type]['sem_scores_time'] = aggregated['local_global'][effect_type]['std_scores_time'] / np.sqrt(len(all_timeseries))
-            aggregated['local_global'][effect_type]['n_subjects_sessions'] = len(all_timeseries)
+    # Check if any subject has task events
+    for i, results in enumerate(all_results):
+        if results.get('has_task_events', False):
+            aggregated['has_task_events'] = True
+            break
     
-    # Aggregate by subject type if patient labels provided
+    # Aggregate by subject type if patient labels provided (only in patient mode)
     aggregated['by_subject_type'] = {}
-    if patient_labels_path and Path(patient_labels_path).exists():
+    if mode == 'patient' and patient_labels_path and Path(patient_labels_path).exists():
         try:
             df = pd.read_csv(patient_labels_path, dtype={'session': str})
             # Create mapping of subject to state with grouping
@@ -942,12 +920,18 @@ def aggregate_all_results(output_dir, patient_labels_path=None):
     
     return aggregated, times, subjects_sessions
 
-def save_aggregated_results(aggregated_results, times, subjects_sessions, output_dir):
+def save_aggregated_results(aggregated_results, times, subjects_sessions, output_dir, mode='patient'):
     """Save aggregated results to decoding-global-{date} directory."""
     
     # Create global results directory with timestamp
+    # Save in the same parent directory as output_dir (e.g., if output_dir is .../DECODER, save in .../DECODER/)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    global_dir = Path(output_dir).parent / f"decoding-global-{timestamp}"
+    output_path = Path(output_dir)
+    
+    if mode == 'control':
+        global_dir = output_path / f"decoding-control-global-{timestamp}"
+    else:
+        global_dir = output_path / f"decoding-global-{timestamp}"
     plots_dir = global_dir / "plots"
     data_dir = global_dir / "data"
     
@@ -1004,6 +988,9 @@ def save_aggregated_results(aggregated_results, times, subjects_sessions, output
     with open(data_dir / "aggregated_results.pkl", 'wb') as f:
         pickle.dump(aggregated_results, f)
     
+    # Save times array for analysis scripts
+    np.save(data_dir / "times.npy", times)
+    
     # Save permutation test results separately
     permutation_results = {}
     for trial_type in ['LSGS', 'LSGD', 'LDGD', 'LDGS']:
@@ -1035,6 +1022,7 @@ def save_aggregated_results(aggregated_results, times, subjects_sessions, output
     json_results = {
         "analysis_date": datetime.now().isoformat(),
         "analysis_type": "aggregated_sequential_decoding",
+        "mode": mode,
         "n_subjects_sessions": len(subjects_sessions),
         "subjects_sessions": [{"subject_id": sub, "session_id": ses} for sub, ses in subjects_sessions],
         "model_info": {
@@ -1046,7 +1034,7 @@ def save_aggregated_results(aggregated_results, times, subjects_sessions, output
         },
         "overall_classification": {},
         "trial_type_classification": {},
-        "local_global_effects": {}
+        "has_task_events": aggregated_results.get('has_task_events', False)
     }
     
     # Add overall results
@@ -1097,16 +1085,6 @@ def save_aggregated_results(aggregated_results, times, subjects_sessions, output
                     "significant_ttest": bool(perm['significant_ttest'])
                 }
     
-    # Add local/global effects
-    for effect_type in ['original_local', 'original_global', 'reconstructed_local', 'reconstructed_global']:
-        if (effect_type in aggregated_results['local_global'] and 
-            'mean_auc' in aggregated_results['local_global'][effect_type]):
-            json_results["local_global_effects"][effect_type] = {
-                "mean_auc": float(aggregated_results['local_global'][effect_type]['mean_auc']),
-                "std_auc": float(aggregated_results['local_global'][effect_type]['std_auc']),
-                "n_subjects_sessions": int(aggregated_results['local_global'][effect_type]['n_subjects_sessions'])
-            }
-    
     # Save JSON
     with open(data_dir / "aggregated_summary.json", 'w') as f:
         json.dump(json_results, f, indent=2)
@@ -1135,7 +1113,7 @@ def create_aggregated_plots(aggregated_results, times, plots_dir):
         # Plot mean with SD error band (variability per time point)
         ax.plot(times, mean_scores, 'b-', linewidth=3, label=f'Mean AUC (n={n_sessions} subjects)')
         ax.fill_between(times, mean_scores - std_scores, mean_scores + std_scores,
-                       alpha=0.3, color='blue', label='$\sigma$')
+                       alpha=0.3, color='blue', label=r'$\sigma$')
         
         # Reference lines
         add_stimulus_lines(ax, times)
@@ -1260,49 +1238,6 @@ def create_aggregated_plots(aggregated_results, times, plots_dir):
     plt.savefig(plots_dir / "aggregated_trial_type_classification_small.png", dpi=300, bbox_inches='tight')
     plt.close()
     
-    # Local/Global effects plots
-    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
-    
-    analyses = [
-        ('original_local', 'Original - Local Effect', 0, 0),
-        ('original_global', 'Original - Global Effect', 0, 1),
-        ('reconstructed_local', 'Reconstructed - Local Effect', 1, 0),
-        ('reconstructed_global', 'Reconstructed - Global Effect', 1, 1)
-    ]
-    
-    colors = ['blue', 'red', 'green', 'orange']
-    
-    for i, (key, title, row, col) in enumerate(analyses):
-        ax = axes[row, col]
-        if (key in aggregated_results['local_global'] and 
-            'mean_scores_time' in aggregated_results['local_global'][key]):
-            
-            data = aggregated_results['local_global'][key]
-            mean_scores = data['mean_scores_time']
-            std_scores = data['std_scores_time']
-            n_sessions = data['n_subjects_sessions']
-            
-            ax.plot(times, mean_scores, color=colors[i], linewidth=2, label=f'Mean AUC (n={n_sessions})')
-            ax.fill_between(times, mean_scores - std_scores, mean_scores + std_scores,
-                           alpha=0.3, color=colors[i], label='$\sigma$')
-            ax.axhline(0.5, color="k", linestyle="--", alpha=0.7)
-            add_stimulus_lines(ax, times)
-            ax.set_title(f"{title}\nMean AUC: {data['mean_auc']:.3f} ± {data['std_auc']:.3f}", fontsize = 24)
-            ax.set_xlabel("Time (s)", fontsize=22)
-            ax.set_ylabel("AUC", fontsize=22)
-            ax.legend(fontsize=16)
-            ax.grid(True, alpha=0.3)
-            ax.set_ylim([0.4, 1.0])
-        else:
-            ax.text(0.5, 0.5, f'No data for\n{title}', 
-                   ha='center', va='center', transform=ax.transAxes)
-            ax.set_title(title)
-    
-    plt.suptitle("Aggregated Local/Global Effects", fontsize=22)
-    plt.tight_layout()
-    plt.savefig(plots_dir / "aggregated_local_global_effects.png", dpi=300, bbox_inches='tight')
-    plt.close()
-    
     # Subject-type aggregated plots (COMA, UWS, MCS)
     if 'by_subject_type' in aggregated_results and aggregated_results['by_subject_type']:
         print("Creating subject-type aggregated plots...")
@@ -1334,9 +1269,9 @@ def create_aggregated_plots(aggregated_results, times, plots_dir):
                 color = colors_map.get(subject_type, 'gray')
                 
                 # Plot with only SD (no SEM)
-                ax.plot(times, mean_scores, color=color, linewidth=3, label=f'Mean (n={n_subjects})')
+                ax.plot(times, mean_scores, color=color, linewidth=2, label=f'Mean AUC (n={n_subjects})')
                 ax.fill_between(times, mean_scores - std_scores, mean_scores + std_scores,
-                               alpha=0.3, color=color, label='±1 SD')
+                               alpha=0.3, color=color, label=r'$\sigma$')
                 
                 ax.axhline(0.5, color="k", linestyle="--", alpha=0.7, label="Chance")
                 add_stimulus_lines(ax, times)
@@ -1421,39 +1356,38 @@ def save_text_summary(aggregated_results, subjects_sessions, data_dir):
                 f.write(f"  Mean AUC: {data['mean_auc']:.6f}\n")
                 f.write(f"  Std AUC: {data['std_auc']:.6f}\n")
                 f.write(f"  N Sessions: {data['n_subjects_sessions']}\n\n")
-        
-        # Local/Global effects
-        f.write("LOCAL/GLOBAL EFFECTS RESULTS\n")
-        f.write("-" * 30 + "\n")
-        for effect_type in ['original_local', 'original_global', 'reconstructed_local', 'reconstructed_global']:
-            if (effect_type in aggregated_results['local_global'] and 
-                'mean_auc' in aggregated_results['local_global'][effect_type]):
-                data = aggregated_results['local_global'][effect_type]
-                f.write(f"{effect_type}:\n")
-                f.write(f"  Mean AUC: {data['mean_auc']:.6f}\n")
-                f.write(f"  Std AUC: {data['std_auc']:.6f}\n")
-                f.write(f"  N Sessions: {data['n_subjects_sessions']}\n\n")
 
 def main():
     """Main function - Sequential processing approach."""
     args = parse_arguments()
     
-    print("EEG Original vs Reconstructed Decoder - Sequential Processing")
+    # Adjust output directory based on mode if using default
+    if args.output_dir == "./doc_benchmark/results/DECODER" and args.mode == 'control':
+        args.output_dir = "./doc_benchmark/results/DECODER_CONTROL"
+    
+    mode_label = "Control" if args.mode == 'control' else "Patient"
+    print(f"EEG Original vs Reconstructed Decoder - {mode_label} Mode")
     print("=" * 60)
+    print(f"Mode: {args.mode}")
+    print(f"Output directory: {args.output_dir}")
+    if args.filter_trial_types:
+        print(f"Trial type filtering: {args.filter_trial_types}")
+    if args.mode == 'patient' and args.patient_labels:
+        print(f"Patient labels: {args.patient_labels}")
     
     # If aggregate-only mode, skip subject processing and go straight to aggregation
     if args.aggregate_only:
         print("AGGREGATE-ONLY MODE: Aggregating existing results...")
         print(f"Looking for results in: {args.output_dir}")
         
-        aggregated_results, times, subjects_sessions = aggregate_all_results(args.output_dir, args.patient_labels)
+        aggregated_results, times, subjects_sessions = aggregate_all_results(args.output_dir, args.patient_labels, args.mode)
         
         if aggregated_results is None:
             print("ERROR: Failed to aggregate results! No completed subjects found.")
             return
         
         # Save aggregated results to global directory
-        global_dir = save_aggregated_results(aggregated_results, times, subjects_sessions, args.output_dir)
+        global_dir = save_aggregated_results(aggregated_results, times, subjects_sessions, args.output_dir, args.mode)
         
         print(f"\n{'='*60}")
         print(f"AGGREGATION COMPLETED!")
@@ -1472,13 +1406,6 @@ def main():
                     if trial_type in aggregated_results['trial_types'] and 'mean_auc' in aggregated_results['trial_types'][trial_type]:
                         data = aggregated_results['trial_types'][trial_type]
                         print(f"    {trial_type}: {data['mean_auc']:.3f} ± {data['std_auc']:.3f} (n={data['n_subjects_sessions']})")
-            
-            if aggregated_results['local_global']:
-                print(f"  Local/Global Effects:")
-                for effect in ['original_local', 'original_global', 'reconstructed_local', 'reconstructed_global']:
-                    if effect in aggregated_results['local_global'] and 'mean_auc' in aggregated_results['local_global'][effect]:
-                        data = aggregated_results['local_global'][effect]
-                        print(f"    {effect}: {data['mean_auc']:.3f} ± {data['std_auc']:.3f} (n={data['n_subjects_sessions']})")
             
             print(f"\nTotal subjects-sessions analyzed: {len(subjects_sessions)}")
             print(f"Subject-session combinations: {[f'sub-{s} ses-{ses}' for s, ses in subjects_sessions]}")
@@ -1524,7 +1451,9 @@ def main():
             
             # Load data for this specific subject-session
             X, y, events, times = load_epochs_single_subject_session(
-                args.main_path, subject_id, session_id, args.verbose
+                args.main_path, subject_id, session_id, 
+                filter_trial_types=args.filter_trial_types,
+                verbose=args.verbose
             )
             
             if X is None:
@@ -1534,7 +1463,8 @@ def main():
             
             # Perform all decoding analyses for this subject-session
             results = decode_single_subject_session(
-                X, y, events, times, cv=args.cv, n_jobs=args.n_jobs, verbose=args.verbose
+                X, y, events, times, cv=args.cv, n_jobs=args.n_jobs, 
+                mode=args.mode, verbose=args.verbose
             )
             
             if results is None:
@@ -1569,14 +1499,14 @@ def main():
     
     # Aggregate all individual results
     print(f"\nAggregating results from {processed_count} subject-sessions...")
-    aggregated_results, times, subjects_sessions = aggregate_all_results(args.output_dir, args.patient_labels)
+    aggregated_results, times, subjects_sessions = aggregate_all_results(args.output_dir, args.patient_labels, args.mode)
     
     if aggregated_results is None:
         print("ERROR: Failed to aggregate results!")
         return
     
     # Save aggregated results to global directory
-    global_dir = save_aggregated_results(aggregated_results, times, subjects_sessions, args.output_dir)
+    global_dir = save_aggregated_results(aggregated_results, times, subjects_sessions, args.output_dir, args.mode)
     
     print(f"\n{'='*60}")
     print(f"ANALYSIS COMPLETED!")
@@ -1595,13 +1525,6 @@ def main():
                 if trial_type in aggregated_results['trial_types'] and 'mean_auc' in aggregated_results['trial_types'][trial_type]:
                     data = aggregated_results['trial_types'][trial_type]
                     print(f"    {trial_type}: {data['mean_auc']:.3f} ± {data['std_auc']:.3f} (n={data['n_subjects_sessions']})")
-        
-        if aggregated_results['local_global']:
-            print(f"  Local/Global Effects:")
-            for effect in ['original_local', 'original_global', 'reconstructed_local', 'reconstructed_global']:
-                if effect in aggregated_results['local_global'] and 'mean_auc' in aggregated_results['local_global'][effect]:
-                    data = aggregated_results['local_global'][effect]
-                    print(f"    {effect}: {data['mean_auc']:.3f} ± {data['std_auc']:.3f} (n={data['n_subjects_sessions']})")
         
         print(f"\nTotal subjects-sessions analyzed: {len(subjects_sessions)}")
         print(f"Subject-session combinations: {[f'sub-{s} ses-{ses}' for s, ses in subjects_sessions]}")
