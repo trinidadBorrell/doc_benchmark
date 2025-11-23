@@ -21,6 +21,7 @@ src/analysis/results
 src/ground_truth/
 src/markers_old/
 src/markers/report_modules_old/
+src/markers/batch_jobs/
 
 .ruff_cache/
 .vscode/

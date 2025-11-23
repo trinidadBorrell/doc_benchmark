@@ -322,14 +322,14 @@ class StatisticalAnalyzer:
     
     def load_topographic_data(self):
         """
-        Load topographic data for all subjects.
+        Load topographic data for all subjects from new NPZ structure.
         
         Returns
         -------
         dict
             Dictionary with 'original' and 'reconstructed' topographic data
         """
-        print("\n📊 Loading topographic data...")
+        print("\n📊 Loading topographic data from new NPZ structure...")
         
         topos_orig_list = []
         topos_recon_list = []
@@ -337,19 +337,49 @@ class StatisticalAnalyzer:
         skipped_subjects = []
         expected_shape = None
         
-        # Find all subject directories
-        subject_dirs = sorted(glob.glob(op.join(self.results_dir, 'sub-*')))
+        # New base directory for NPZ files
+        base_npz_dir = "/data/project/eeg_foundation/src/doc_benchmark/results/new_results/MARKERS"
+        
+        # Find all subject directories in the new structure
+        subject_dirs = sorted(glob.glob(op.join(base_npz_dir, 'sub-*')))
         
         # First pass: determine the most common shape
         all_shapes = []
         for subject_dir in subject_dirs:
+            subject_id = op.basename(subject_dir).replace('sub-', '')
+            
+            # Find session directories
             session_dirs = sorted(glob.glob(op.join(subject_dir, 'ses-*')))
+            
             for session_dir in session_dirs:
-                features_dir = op.join(session_dir, 'features_variable')
-                topo_orig_file = op.join(features_dir, 'topos_original.npy')
+                session_id = op.basename(session_dir).replace('ses-', '')
+                
+                # Construct paths for orig and recon topo files
+                orig_dir = op.join(subject_dir, session_id, 'orig')
+                recon_dir = op.join(subject_dir, session_id, 'recon')
+                
+                topo_orig_file = op.join(orig_dir, f"topod_{subject_id}_ses-{session_id}_orig.npz")
+                
                 if op.exists(topo_orig_file):
-                    shape = np.load(topo_orig_file).shape
-                    all_shapes.append(shape)
+                    try:
+                        topo_data = np.load(topo_orig_file)
+                        # Extract the array from NPZ
+                        if isinstance(topo_data, dict):
+                            if 'data' in topo_data:
+                                shape = topo_data['data'].shape
+                            elif 'topos' in topo_data:
+                                shape = topo_data['topos'].shape
+                            elif len(topo_data) > 0:
+                                first_key = list(topo_data.keys())[0]
+                                shape = topo_data[first_key].shape
+                            else:
+                                continue
+                        else:
+                            shape = topo_data.shape
+                        all_shapes.append(shape)
+                        topo_data.close()
+                    except Exception as e:
+                        print(f"    Warning: Could not read {topo_orig_file}: {e}")
         
         if all_shapes:
             # Find most common shape
@@ -366,33 +396,73 @@ class StatisticalAnalyzer:
             session_dirs = sorted(glob.glob(op.join(subject_dir, 'ses-*')))
             
             for session_dir in session_dirs:
-                features_dir = op.join(session_dir, 'features_variable')
+                session_id = op.basename(session_dir).replace('ses-', '')
                 
-                topo_orig_file = op.join(features_dir, 'topos_original.npy')
-                topo_recon_file = op.join(features_dir, 'topos_reconstructed.npy')
+                # Construct paths for orig and recon topo files
+                orig_dir = op.join(subject_dir, session_id, 'orig')
+                recon_dir = op.join(subject_dir, session_id, 'recon')
+                
+                topo_orig_file = op.join(orig_dir, f"topod_{subject_id}_ses-{session_id}_orig.npz")
+                topo_recon_file = op.join(recon_dir, f"topod_{subject_id}_ses-{session_id}_recon.npz")
                 
                 if op.exists(topo_orig_file) and op.exists(topo_recon_file):
-                    topos_orig = np.load(topo_orig_file)
-                    topos_recon = np.load(topo_recon_file)
-                    
-                    # Skip if shape doesn't match expected shape
-                    if expected_shape is not None and topos_orig.shape != expected_shape:
-                        print(f"  ⚠️  Skipped {subject_id}: shape {topos_orig.shape} != expected {expected_shape}")
-                        skipped_subjects.append((subject_id, topos_orig.shape))
-                        continue
-                    
-                    topos_orig_list.append(topos_orig)
-                    topos_recon_list.append(topos_recon)
-                    subject_ids.append(subject_id)
-                    
-                    print(f"  ✓ Loaded {subject_id}: {topos_orig.shape}")
+                    try:
+                        # Load NPZ files
+                        topo_orig_data = np.load(topo_orig_file)
+                        topo_recon_data = np.load(topo_recon_file)
+                        
+                        # Extract arrays from NPZ files
+                        def extract_array(npz_data, expected_type):
+                            """Extract the main array from NPZ data, trying common key names."""
+                            if isinstance(npz_data, dict):
+                                # Try common key names
+                                common_keys = ['data', 'features', 'markers', 'arr_0', expected_type]
+                                for key in common_keys:
+                                    if key in npz_data:
+                                        return npz_data[key]
+                                # If no common key found, use the first array
+                                if len(npz_data) > 0:
+                                    first_key = list(npz_data.keys())[0]
+                                    return npz_data[first_key]
+                            else:
+                                return npz_data
+                            raise ValueError(f"Could not extract array from {expected_type} NPZ data")
+                        
+                        topos_orig = extract_array(topo_orig_data, 'topos')
+                        topos_recon = extract_array(topo_recon_data, 'topos')
+                        
+                        # Close the NPZ files
+                        topo_orig_data.close()
+                        topo_recon_data.close()
+                        
+                        # Skip if shape doesn't match expected shape
+                        if expected_shape is not None and topos_orig.shape != expected_shape:
+                            print(f"  ⚠️  Skipped {subject_id}: shape {topos_orig.shape} != expected {expected_shape}")
+                            skipped_subjects.append((subject_id, topos_orig.shape))
+                            continue
+                        
+                        topos_orig_list.append(topos_orig)
+                        topos_recon_list.append(topos_recon)
+                        subject_ids.append(subject_id)
+                        
+                        print(f"  ✓ Loaded {subject_id}: {topos_orig.shape}")
+                        
+                    except Exception as e:
+                        print(f"  ⚠️  Error loading {subject_id}/{session_id}: {e}")
+                        skipped_subjects.append((subject_id, str(e)))
         
         if skipped_subjects:
-            print(f"\n⚠️  Skipped {len(skipped_subjects)} samples due to shape mismatch:")
-            for subj_id, shape in skipped_subjects:
-                print(f"    - {subj_id}: {shape}")
+            print(f"\n⚠️  Skipped {len(skipped_subjects)} samples due to errors:")
+            for subj_id, reason in skipped_subjects:
+                if isinstance(reason, tuple):
+                    print(f"    - {subj_id}: shape {reason}")
+                else:
+                    print(f"    - {subj_id}: {reason}")
         
         print(f"\n✅ Loaded data for {len(subject_ids)} subjects")
+        
+        if not topos_orig_list:
+            raise ValueError("No valid topographic data could be loaded from the new NPZ structure")
         
         topos_orig_all = np.array(topos_orig_list)
         topos_recon_all = np.array(topos_recon_list)

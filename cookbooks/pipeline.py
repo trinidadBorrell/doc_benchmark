@@ -200,7 +200,7 @@ class Pipeline:
             "decoder/decoder.py",
             "decoder/analysis/analysis.py",
             "decoder/analysis/viz.py",
-            "markers/compute_markers_with_junifer.py",
+            "markers/compute_markers_batch_htcondor.py",
             "markers/report/compute_data.py",
             "markers/report/generate_plots.py",
             "markers/compute_scalars.py",
@@ -593,15 +593,12 @@ class Pipeline:
     
     def run_markers_phase_for_all_subjects(self, subjects: List[Tuple[str, str]]) -> bool:
         """
-        Run markers phase for all subjects (both orig and recon files).
+        Run markers phase for all subjects using BATCH HTCondor processing.
         
-        NEW WORKFLOW: Process each subject/session completely before moving to next:
-        1. Run markers for orig
-        2. Run markers for recon
-        3. Generate report (requires both orig and recon H5 files)
-        4. Verify all outputs
-        5. Delete H5 files (only if not keeping them)
-        6. Move to next subject/session
+        NEW BATCH WORKFLOW:
+        1. Run compute_markers_batch_htcondor.py ONCE for ALL subject/sessions (generates all H5 files)
+        2. For each subject/session: compute_data → compute_scalars → compute_topographies → report
+        3. After EVERYTHING is done: cleanup H5 files (if not keeping them)
         
         Parameters
         ----------
@@ -615,21 +612,52 @@ class Pipeline:
         """
         try:
             self.logger.info("=" * 60)
-            self.logger.info("PHASE B: MARKERS")
+            self.logger.info("PHASE B: MARKERS (BATCH HTCondor)")
             self.logger.info("=" * 60)
-            self.logger.info("Processing workflow: markers (orig) → markers (recon) → report → cleanup")
+            self.logger.info("Batch workflow: batch markers → compute_data → compute_scalars → compute_topographies → reports → cleanup")
+            self.logger.info("=" * 60)
+            
+            markers_dir = self.results_dir / "new_results" / "MARKERS"
+            markers_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Step 1: Run batch HTCondor processing for ALL subjects (generates ALL H5 files)
+            self.logger.info("")
+            self.logger.info("=" * 60)
+            self.logger.info("STEP 1: BATCH MARKER COMPUTATION (HTCondor)")
+            self.logger.info("=" * 60)
+            self.logger.info(f"Processing {len(subjects)} subject/session pairs in batch...")
+            
+            cmd = [
+                "python", str(self.src_dir / "markers" / "compute_markers_batch_htcondor.py"),
+                "--fif_folder", str(self.main_path),
+                "--results-dir", str(markers_dir),
+                "--task", self.task,
+                "--batch-size", "40",  # Process 40 jobs in parallel on HTCondor
+                "--keep-h5"  # ALWAYS keep H5 until after all processing
+            ]
+            
+            if self.markers_skip_clustering:
+                cmd.append("--skip-clustering")
+            
+            if not self._run_command(cmd):
+                self.logger.error("Batch marker computation failed")
+                return False
+            
+            self.logger.info("✓ Batch marker computation completed")
+            
+            # Step 2: Process each subject/session (compute_data, compute_scalars, compute_topographies, reports)
+            self.logger.info("")
+            self.logger.info("=" * 60)
+            self.logger.info("STEP 2: PROCESSING MARKER RESULTS")
             self.logger.info("=" * 60)
             
             success_count = 0
             failed_subjects = []
             
             for subject_id, session in subjects:
-                self.logger.info("")
-                self.logger.info("=" * 60)
-                self.logger.info(f"Processing subject: {subject_id}, session: {session}")
-                self.logger.info("=" * 60)
+                self.logger.info(f"\nProcessing results for {subject_id}/ses-{session}...")
                 
-                # Check if this subject/session is already completely processed
+                # Check if already complete
                 if self._is_subject_complete(subject_id, session):
                     self.logger.info(f"⏭️  Skipping {subject_id}/ses-{session} - all outputs already exist")
                     success_count += 1
@@ -637,39 +665,34 @@ class Pipeline:
                 
                 subject_success = True
                 
-                # Step 1: Process orig file
-                self.logger.info(f"[1/4] Processing orig data for {subject_id}/ses-{session}...")
-                if not self.run_markers_phase_for_subject(subject_id, session, "orig"):
-                    self.logger.error(f"Failed to process orig data for {subject_id}/ses-{session}")
-                    subject_success = False
-                    failed_subjects.append((subject_id, session, "orig"))
+                # Process both orig and recon
+                for file_type in ["original", "recon"]:
+                    self.logger.info(f"  Processing {file_type} data...")
+                    if not self._process_markers_for_file_type(subject_id, session, file_type):
+                        self.logger.error(f"Failed to process {file_type} data for {subject_id}/ses-{session}")
+                        subject_success = False
+                        failed_subjects.append((subject_id, session, file_type))
                 
-                # Step 2: Process recon file
-                self.logger.info(f"[2/4] Processing recon data for {subject_id}/ses-{session}...")
-                if not self.run_markers_phase_for_subject(subject_id, session, "recon"):
-                    self.logger.error(f"Failed to process recon data for {subject_id}/ses-{session}")
-                    subject_success = False
-                    failed_subjects.append((subject_id, session, "recon"))
-                
-                # Step 3: Generate report (only if both orig and recon succeeded)
+                # Generate report if both succeeded
                 if subject_success:
-                    self.logger.info(f"[3/4] Generating report for {subject_id}/ses-{session}...")
-                    report_success = self._generate_report_for_subject(subject_id, session)
-                    
-                    if not report_success:
+                    self.logger.info(f"  Generating report...")
+                    if not self._generate_report_for_subject(subject_id, session):
                         self.logger.warning(f"Report generation failed for {subject_id}/ses-{session} (continuing anyway)")
                     
-                    # Step 4: Cleanup H5 files (only if not keeping them)
-                    if not self.markers_keep_h5:
-                        self.logger.info(f"[4/4] Cleaning up H5 files for {subject_id}/ses-{session}...")
-                        self._cleanup_h5_files(subject_id, session)
-                    else:
-                        self.logger.info(f"[4/4] Keeping H5 files for {subject_id}/ses-{session} (--keep-h5 flag set)")
-                    
                     success_count += 1
-                    self.logger.info(f"✓ Completed processing for {subject_id}/ses-{session}")
+                    self.logger.info(f"✓ Completed {subject_id}/ses-{session}")
                 else:
-                    self.logger.error(f"✗ Skipping report and cleanup for {subject_id}/ses-{session} due to marker failures")
+                    self.logger.error(f"✗ Skipping report for {subject_id}/ses-{session} due to processing failures")
+            
+            # Step 3: Cleanup ALL H5 files (only if not keeping them)
+            if not self.markers_keep_h5:
+                self.logger.info("")
+                self.logger.info("=" * 60)
+                self.logger.info("STEP 3: CLEANING UP H5 FILES")
+                self.logger.info("=" * 60)
+                self._cleanup_all_h5_files(markers_dir)
+            else:
+                self.logger.info("\nKeeping H5 files (--keep-h5 flag set)")
             
             # Summary
             self.logger.info("")
@@ -716,13 +739,13 @@ class Pipeline:
         try:
             subject_dir = self.results_dir / "new_results" / "MARKERS" / f"sub-{subject_id}"
             session_dir_out = subject_dir / f"ses-{session}"
-            orig_dir = session_dir_out / "orig"
+            original_dir = session_dir_out / "original"
             recon_dir = session_dir_out / "recon"
             reports_dir = session_dir_out / "reports"
             
-            # Check orig outputs
-            orig_scalars = orig_dir / f"scalars_{subject_id}_ses-{session}_orig.npz"
-            orig_topos = orig_dir / f"topos_{subject_id}_ses-{session}_orig.npz"
+            # Check original outputs
+            original_scalars = original_dir / f"scalars_{subject_id}_ses-{session}_original.npz"
+            original_topos = original_dir / f"topos_{subject_id}_ses-{session}_original.npz"
             
             # Check recon outputs
             recon_scalars = recon_dir / f"scalars_{subject_id}_ses-{session}_recon.npz"
@@ -732,20 +755,20 @@ class Pipeline:
             report_file = reports_dir / f"sub-{subject_id}_ses-{session}_report_comparison.html"
             
             # Check for at least some pkl files (from compute_data.py)
-            orig_pkl_files = list(orig_dir.glob("*.pkl"))
-            recon_pkl_files = list(recon_dir.glob("*.pkl"))
+            original_pkl_files = list(original_dir.glob("*.pkl")) if original_dir.exists() else []
+            recon_pkl_files = list(recon_dir.glob("*.pkl")) if recon_dir.exists() else []
             
             # All required files must exist
             required_files = [
-                orig_scalars,
-                orig_topos,
+                original_scalars,
+                original_topos,
                 recon_scalars,
                 recon_topos,
                 report_file
             ]
             
             all_exist = all(f.exists() for f in required_files)
-            has_pkl_files = len(orig_pkl_files) > 0 and len(recon_pkl_files) > 0
+            has_pkl_files = len(original_pkl_files) > 0 and len(recon_pkl_files) > 0
             
             if all_exist and has_pkl_files:
                 self.logger.debug(f"All outputs verified for {subject_id}/ses-{session}")
@@ -753,18 +776,18 @@ class Pipeline:
             else:
                 # Log what's missing for debugging
                 missing = []
-                if not orig_scalars.exists():
-                    missing.append("orig scalars")
-                if not orig_topos.exists():
-                    missing.append("orig topos")
+                if not original_scalars.exists():
+                    missing.append("original scalars")
+                if not original_topos.exists():
+                    missing.append("original topos")
                 if not recon_scalars.exists():
                     missing.append("recon scalars")
                 if not recon_topos.exists():
                     missing.append("recon topos")
                 if not report_file.exists():
                     missing.append("HTML report")
-                if len(orig_pkl_files) == 0:
-                    missing.append("orig pkl files")
+                if len(original_pkl_files) == 0:
+                    missing.append("original pkl files")
                 if len(recon_pkl_files) == 0:
                     missing.append("recon pkl files")
                 
@@ -796,7 +819,7 @@ class Pipeline:
         try:
             subject_dir = self.results_dir / "new_results" / "MARKERS" / f"sub-{subject_id}"
             session_dir_out = subject_dir / f"ses-{session}"
-            orig_dir = session_dir_out / "orig"
+            original_dir = session_dir_out / "original"
             recon_dir = session_dir_out / "recon"
             
             # Find FIF files - support both structures
@@ -823,18 +846,19 @@ class Pipeline:
                 self.logger.error(f"Missing FIF files for {subject_id}/ses-{session}")
                 return False
             
-            if not (orig_dir.exists() and recon_dir.exists()):
+            if not (original_dir.exists() and recon_dir.exists()):
                 self.logger.error(f"Missing marker directories for {subject_id}/ses-{session}")
                 return False
             
-            # Find H5 files
-            orig_h5 = orig_dir / "icm_complete_features.h5"
-            recon_h5 = recon_dir / "icm_complete_features.h5"
+            # Find H5 files (from batch processing location)
+            markers_dir = self.results_dir / "new_results" / "MARKERS"
+            orig_h5 = markers_dir / "h5_files" / f"sub-{subject_id}" / f"ses-{session}" / "original.h5"
+            recon_h5 = markers_dir / "h5_files" / f"sub-{subject_id}" / f"ses-{session}" / "recon.h5"
             
             if not (orig_h5.exists() and recon_h5.exists()):
                 self.logger.error(f"Missing H5 files for {subject_id}/ses-{session}")
-                self.logger.error(f"  orig H5: {orig_h5.exists()}")
-                self.logger.error(f"  recon H5: {recon_h5.exists()}")
+                self.logger.error(f"  orig H5: {orig_h5} - exists: {orig_h5.exists()}")
+                self.logger.error(f"  recon H5: {recon_h5} - exists: {recon_h5.exists()}")
                 return False
             
             # Reports go in MARKERS/sub-{ID}/ses-{num}/reports/
@@ -847,7 +871,7 @@ class Pipeline:
                 "--session", session,
                 "--h5_file", str(orig_h5),  # Can use either, script needs both via data_dir
                 "--fif_file", str(orig_fif),
-                "--data_dir_original", str(orig_dir),
+                "--data_dir_original", str(original_dir),
                 "--data_dir_recon", str(recon_dir),
                 "--output_dir", str(output_dir)
             ]
@@ -905,6 +929,169 @@ class Pipeline:
                         
         except Exception as e:
             self.logger.warning(f"Exception during H5 cleanup for {subject_id}/ses-{session}: {e}")
+    
+    def _cleanup_all_h5_files(self, markers_dir: Path) -> None:
+        """
+        Delete ALL H5 files in the markers directory after all processing is complete.
+        
+        Parameters
+        ----------
+        markers_dir : Path
+            Path to MARKERS directory
+        """
+        try:
+            h5_files = list(markers_dir.glob("h5_files/**/*.h5"))
+            
+            deleted_count = 0
+            for h5_file in h5_files:
+                try:
+                    h5_file.unlink()
+                    deleted_count += 1
+                    self.logger.debug(f"  Deleted: {h5_file}")
+                except Exception as e:
+                    self.logger.warning(f"  Could not delete {h5_file}: {e}")
+            
+            self.logger.info(f"✓ Deleted {deleted_count} H5 files")
+            
+            # Remove empty h5_files directory
+            h5_dir = markers_dir / "h5_files"
+            if h5_dir.exists():
+                try:
+                    import shutil
+                    shutil.rmtree(h5_dir)
+                    self.logger.info(f"✓ Removed h5_files directory")
+                except Exception as e:
+                    self.logger.warning(f"Could not remove h5_files directory: {e}")
+                    
+        except Exception as e:
+            self.logger.warning(f"Exception during H5 cleanup: {e}")
+    
+    def _process_markers_for_file_type(self, subject_id: str, session: str, file_type: str) -> bool:
+        """
+        Process markers for a single subject/session/file_type.
+        Runs: compute_data → compute_scalars → compute_topographies
+        
+        Parameters
+        ----------
+        subject_id : str
+            Subject identifier
+        session : str
+            Session identifier
+        file_type : str
+            'original' or 'recon'
+            
+        Returns
+        -------
+        bool
+            True if successful, False otherwise
+        """
+        try:
+            markers_dir = self.results_dir / "new_results" / "MARKERS"
+            
+            # H5 file location (from batch processing)
+            h5_file = markers_dir / "h5_files" / f"sub-{subject_id}" / f"ses-{session}" / f"{file_type}.h5"
+            
+            if not h5_file.exists():
+                self.logger.error(f"H5 file not found: {h5_file}")
+                return False
+            
+            # Output directory
+            subject_dir = markers_dir / f"sub-{subject_id}"
+            session_dir_out = subject_dir / f"ses-{session}"
+            output_dir = session_dir_out / file_type
+            output_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Find FIF file
+            session_dir = self.main_path / f"sub-{subject_id}" / f"ses-{session}"
+            
+            # Try different file structures
+            if file_type == "original":
+                fif_folder = session_dir / "orig"
+                if not fif_folder.exists():
+                    # Try _original suffix
+                    fif_files = list(session_dir.glob("*_original.fif"))
+                    if fif_files:
+                        fif_file = fif_files[0]
+                    else:
+                        self.logger.error(f"No original FIF file found for {subject_id}/ses-{session}")
+                        return False
+                else:
+                    fif_files = list(fif_folder.glob("*.fif"))
+                    if not fif_files:
+                        self.logger.error(f"No FIF files in {fif_folder}")
+                        return False
+                    fif_file = fif_files[0]
+            else:  # recon
+                fif_folder = session_dir / "recon"
+                if not fif_folder.exists():
+                    # Try _recon suffix
+                    fif_files = list(session_dir.glob("*_recon.fif"))
+                    if fif_files:
+                        fif_file = fif_files[0]
+                    else:
+                        self.logger.error(f"No recon FIF file found for {subject_id}/ses-{session}")
+                        return False
+                else:
+                    fif_files = list(fif_folder.glob("*.fif"))
+                    if not fif_files:
+                        self.logger.error(f"No FIF files in {fif_folder}")
+                        return False
+                    fif_file = fif_files[0]
+            
+            # Step 1: compute_data.py
+            self.logger.debug(f"    Running compute_data.py...")
+            cmd = [
+                "python", str(self.src_dir / "markers" / "report" / "compute_data.py"),
+                "--subject_id", subject_id,
+                "--h5_file", str(h5_file),
+                "--fif_file", str(fif_file),
+                "--output_dir", str(output_dir),
+                "--task", self.task
+            ]
+            
+            if self.markers_skip_clustering:
+                cmd.append("--skip-clustering")
+            
+            if not self._run_command(cmd):
+                self.logger.error("compute_data.py failed")
+                return False
+            
+            # Step 2: compute_scalars.py
+            self.logger.debug(f"    Running compute_scalars.py...")
+            scalars_file = output_dir / f"scalars_{subject_id}_ses-{session}_{file_type}.npz"
+            cmd = [
+                "python", str(self.src_dir / "markers" / "compute_scalars.py"),
+                "--h5_file", str(h5_file),
+                "--output_file", str(scalars_file)
+            ]
+            
+            if not self._run_command(cmd):
+                self.logger.error("compute_scalars.py failed")
+                return False
+            
+            # Step 3: compute_topographies.py
+            self.logger.debug(f"    Running compute_topographies.py...")
+            topos_file = output_dir / f"topos_{subject_id}_ses-{session}_{file_type}.npz"
+            cmd = [
+                "python", str(self.src_dir / "markers" / "compute_topographies.py"),
+                "--h5_file", str(h5_file),
+                "--output_file", str(topos_file)
+            ]
+            
+            if not self._run_command(cmd):
+                self.logger.error("compute_topographies.py failed")
+                return False
+            
+            # Verify outputs
+            if not scalars_file.exists() or not topos_file.exists():
+                self.logger.error(f"Missing output files for {subject_id}/ses-{session}/{file_type}")
+                return False
+            
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Error processing markers for {subject_id}/ses-{session}/{file_type}: {e}")
+            return False
     
     def run_model_phase(self) -> bool:
         """

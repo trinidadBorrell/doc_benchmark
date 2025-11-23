@@ -2418,7 +2418,6 @@ class GlobalAnalyzer:
         # Check if analysis summary exists
         # Updated path: individual_analysis instead of compare_markers
         summary_file = op.join(session_dir, 'individual_analysis', 'analysis_summary.json')
-        features_dir = op.join(session_dir, 'features_variable')
         
         # Create unique identifier for subject/session
         subject_session_id = f"{subject_id}_{session_id}"
@@ -2434,11 +2433,6 @@ class GlobalAnalyzer:
             print(f"     ❌ Skipping {subject_id}/{session_id}: no analysis summary found")
             subjects_skipped.append((subject_session_id, "no analysis summary"))
             return
-            
-        if not op.exists(features_dir):
-            print(f"     ❌ Skipping {subject_id}/{session_id}: no features directory found")
-            subjects_skipped.append((subject_session_id, "no features directory"))
-            return
         
         try:
             # Load subject analysis summary
@@ -2446,21 +2440,71 @@ class GlobalAnalyzer:
             with open(summary_file, 'r') as f:
                 summary = json.load(f)
             
-            # Load feature data
-            print("     📊 Loading feature data...")
-            feature_files = ['scalars_original.npy', 'scalars_reconstructed.npy',
-                           'topos_original.npy', 'topos_reconstructed.npy']
+            # Load feature data from new NPZ structure
+            print("     📊 Loading feature data from new NPZ structure...")
             
-            for fname in feature_files:
-                fpath = op.join(features_dir, fname)
-                if not op.exists(fpath):
+            # New base directory for NPZ files
+            base_npz_dir = "/data/project/eeg_foundation/src/doc_benchmark/results/new_results/MARKERS"
+            
+            # Construct paths for orig and recon data
+            # Note: session_id already contains the 'ses-' prefix (e.g., 'ses-01')
+            orig_dir = op.join(base_npz_dir, f"sub-{subject_id}", session_id, "orig")
+            recon_dir = op.join(base_npz_dir, f"sub-{subject_id}", session_id, "recon")
+            
+            # File paths for the new NPZ structure
+            scalars_orig_file = op.join(orig_dir, f"scalars_{subject_id}_{session_id}_orig.npz")
+            scalars_recon_file = op.join(recon_dir, f"scalars_{subject_id}_{session_id}_recon.npz")
+            topos_orig_file = op.join(orig_dir, f"topos_{subject_id}_{session_id}_orig.npz")
+            topos_recon_file = op.join(recon_dir, f"topos_{subject_id}_{session_id}_recon.npz")
+            
+            # Check if all required NPZ files exist
+            required_files = [scalars_orig_file, scalars_recon_file, topos_orig_file, topos_recon_file]
+            for fname in required_files:
+                if not op.exists(fname):
                     raise FileNotFoundError(f"Missing {fname}")
-                print(f"        ✓ Found {fname}")
+                print(f"        ✓ Found {op.basename(fname)}")
             
-            scalars_orig = np.load(op.join(features_dir, 'scalars_original.npy'))
-            scalars_recon = np.load(op.join(features_dir, 'scalars_reconstructed.npy'))
-            topos_orig = np.load(op.join(features_dir, 'topos_original.npy'))
-            topos_recon = np.load(op.join(features_dir, 'topos_reconstructed.npy'))
+            # Load data from NPZ files
+            print("     📂 Loading NPZ files...")
+            scalars_orig_data = np.load(scalars_orig_file)
+            scalars_recon_data = np.load(scalars_recon_file)
+            topos_orig_data = np.load(topos_orig_file)
+            topos_recon_data = np.load(topos_recon_file)
+            
+            # Extract data arrays from NPZ files using the same method as individual_analysis.py
+            # Each key in the NPZ file is a different marker, we need to stack them
+            def extract_markers_array(npz_data, expected_type):
+                """Extract and stack all marker arrays from NPZ data."""
+                if not hasattr(npz_data, 'files'):
+                    raise ValueError(f"Invalid NPZ data format for {expected_type}")
+                
+                if len(npz_data.files) == 0:
+                    raise ValueError(f"No markers found in {expected_type} NPZ data")
+                
+                # Get all marker names and load their data
+                marker_names = sorted(npz_data.files)
+                marker_arrays = []
+                
+                print(f"        Found {len(marker_names)} {expected_type} markers: {marker_names[:3]}{'...' if len(marker_names) > 3 else ''}")
+                
+                for marker_name in marker_names:
+                    marker_data = npz_data[marker_name]
+                    marker_arrays.append(marker_data)
+                
+                # Stack all markers into a single array
+                if expected_type == 'scalars':
+                    # For scalars: stack into 1D array (n_markers,)
+                    return np.array(marker_arrays), marker_names
+                elif expected_type == 'topos':
+                    # For topos: stack into 2D array (n_markers, n_channels)
+                    return np.array(marker_arrays), marker_names
+                else:
+                    raise ValueError(f"Unknown expected_type: {expected_type}")
+            
+            scalars_orig, scalar_marker_names = extract_markers_array(scalars_orig_data, 'scalars')
+            scalars_recon, _ = extract_markers_array(scalars_recon_data, 'scalars')
+            topos_orig, topo_marker_names = extract_markers_array(topos_orig_data, 'topos')
+            topos_recon, _ = extract_markers_array(topos_recon_data, 'topos')
             
             # Validate data shapes
             print("     🔍 Validating data shapes...")
@@ -2471,8 +2515,8 @@ class GlobalAnalyzer:
                 raise ValueError(f"Scalar shape mismatch: {scalars_orig.shape} vs {scalars_recon.shape}")
             if topos_orig.shape != topos_recon.shape:
                 raise ValueError(f"Topo shape mismatch: {topos_orig.shape} vs {topos_recon.shape}")
-            if len(scalars_orig) != topos_orig.shape[0]:
-                raise ValueError(f"Marker count mismatch: scalars {len(scalars_orig)} vs topos {topos_orig.shape[0]}")
+            # Note: Scalar and topo marker counts can differ - not all markers have both versions
+            print(f"        ✓ Loaded {len(scalars_orig)} scalar markers and {topos_orig.shape[0]} topographic markers")
             
             # Extract key metrics from summary
             scalar_corr = summary['scalar_metrics']['overall']['correlation']
@@ -5926,11 +5970,12 @@ def run_state_based_analysis(results_dir, base_output_dir, patient_labels_file, 
 def main():
     """Main function."""
     parser = argparse.ArgumentParser(description='Global analysis across subjects')
-    parser.add_argument('--results-dir', default='/Users/trinidad.borrell/Documents/Work/PhD/Proyects/nice/benchmark/results',
+    parser.add_argument('--results-dir', default='/data/project/eeg_foundation/src/doc_benchmark/results/new_results/MARKERS',
                        help='Results directory containing subject folders')
-    parser.add_argument('--output-dir', help='Output directory for global analysis')
+    parser.add_argument('--output-dir', default='/data/project/eeg_foundation/src/doc_benchmark/results/new_results/GLOBAL/global',
+                       help='Output directory for global analysis')
     parser.add_argument('--patient-labels', 
-                       default='/Users/trinidad.borrell/Documents/Work/PhD/Proyects/nice/benchmark/py/metadata/patient_labels_with_controls.csv',
+                       default='/data/project/eeg_foundation/data/metadata/patient_labels_with_controls.csv',
                        help='CSV file with patient labels and states')
     parser.add_argument('--data-dir', help='Data directory containing raw .fif files (for Global Field Power analysis)')
     parser.add_argument('--skip-gfp', action='store_true',
@@ -5952,7 +5997,8 @@ def main():
         if args.output_dir:
             output_dir = args.output_dir
         else:
-            output_dir = op.join(args.results_dir, 'global', f'global_results_{timestamp}')
+            # Use GLOBAL directory structure
+            output_dir = f"/data/project/eeg_foundation/src/doc_benchmark/results/new_results/GLOBAL/global_results_{timestamp}"
         
         print(f"Starting global analysis at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print(f"Results will be saved with timestamp: {timestamp}")
