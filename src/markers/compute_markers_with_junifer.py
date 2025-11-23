@@ -307,13 +307,23 @@ def main():
         action="store_true",
         help="Stop after successfully processing one file (for testing)"
     )
+
+    parser.add_argument(
+        '--template-yaml',
+        default="input/icm_complete_individual_markers_local_global_small.yaml",
+        help="Path to the template YAML file (default: input/icm_complete_individual_markers_local_global.yaml)"
+    )
     args = parser.parse_args()
     
     logger = setup_logging()
     
     # Determine paths
     script_dir = Path(__file__).parent
-    template_yaml = script_dir / "input/icm_non-aggregated_full_markers.yaml"
+    template_yaml = script_dir / args.template_yaml
+
+    if not template_yaml.exists():
+        logger.error(f"Template YAML file not found: {template_yaml}")
+        sys.exit(1)
     
     # Direct output mode (for pipeline integration)
     use_direct_output = args.output_dir is not None

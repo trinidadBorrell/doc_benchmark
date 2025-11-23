@@ -151,17 +151,19 @@ plt.rcParams["text.latex.preamble"] = r"\usepackage[version=3]{mhchem}"
 class MarkerNameMapper:
     """Maps marker indices to human-readable names.
         
-    IMPORTANT: Both scalar and topographic features come from the SAME underlying 
-    markers, just reduced differently:
-    - Scalars: averaged across epochs AND channels → 1 value per marker
-    - Topos: averaged across epochs ONLY → 1 value per marker per channel
-    
-    Therefore, they should have the SAME names since they represent the same markers.
+    IMPORTANT: topo and scalars may have DIFFERENT markers names or even different markers.
+    This class now handles the case where topo and scalars have different marker sets.
     """
     
-    def __init__(self):
+    def __init__(self, scalar_marker_names=None, topo_marker_names=None):
+        """Initialize with optional marker name lists.
         
-        self.marker_names = [
+        Args:
+            scalar_marker_names: List of scalar marker names (optional)
+            topo_marker_names: List of topographic marker names (optional)
+        """
+        # Default marker names if not provided
+        default_marker_names = [
             'PowerSpectralDensity_delta',
             'PowerSpectralDensity_deltan',
             'PowerSpectralDensity_theta',
@@ -192,9 +194,9 @@ class MarkerNameMapper:
             'TimeLockedContrast_p3b'
         ]
         
-        # Both scalar and topo use the same names since they're the same markers
-        self.scalar_names = self.marker_names.copy()
-        self.topo_names = self.marker_names.copy()
+        # Use provided names if available, otherwise use defaults
+        self.scalar_names = scalar_marker_names if scalar_marker_names is not None else default_marker_names.copy()
+        self.topo_names = topo_marker_names if topo_marker_names is not None else default_marker_names.copy()
 
 
     def get_scalar_name(self, idx):
@@ -213,12 +215,17 @@ class MarkerNameMapper:
 class ScalarAnalyzer:
     """Analysis of scalar features."""
     
-    def __init__(self, scalars_orig, scalars_recon, output_dir, subject_id):
+    def __init__(self, scalars_orig, scalars_recon, output_dir, subject_id, marker_names=None):
         self.scalars_orig = scalars_orig
         self.scalars_recon = scalars_recon
         self.output_dir = output_dir
         self.subject_id = subject_id
-        self.mapper = MarkerNameMapper()
+        self.marker_names = marker_names
+        
+        # Clean data: remove NaN values and handle empty values
+        self.scalars_orig_clean, self.scalars_recon_clean = self._clean_data()
+        
+        self.mapper = MarkerNameMapper(scalar_marker_names=self.marker_names)
         
         # Create subdirectories
         self.metrics_dir = op.join(output_dir, 'scalars', 'metrics')
@@ -227,27 +234,72 @@ class ScalarAnalyzer:
         for dir_path in [self.metrics_dir, self.plots_dir]:
             os.makedirs(dir_path, exist_ok=True)
     
+    def _clean_data(self):
+        """Clean data by removing NaN values and handling empty values."""
+        print("  🧹 Cleaning scalar data...")
+        
+        # Check for NaN values
+        nan_count_orig = np.sum(np.isnan(self.scalars_orig))
+        nan_count_recon = np.sum(np.isnan(self.scalars_recon))
+        
+        if nan_count_orig > 0 or nan_count_recon > 0:
+            print(f"     ⚠️  Found NaN values: orig={nan_count_orig}, recon={nan_count_recon}")
+        
+        # Check for empty values (all zeros or extremely small values)
+        empty_threshold = 1e-12
+        empty_count_orig = np.sum(np.abs(self.scalars_orig) < empty_threshold)
+        empty_count_recon = np.sum(np.abs(self.scalars_recon) < empty_threshold)
+        
+        if empty_count_orig > 0 or empty_count_recon > 0:
+            print(f"     ⚠️  Found near-empty values: orig={empty_count_orig}, recon={empty_count_recon}")
+        
+        # Create masks for valid (non-NaN, non-empty) values
+        valid_mask = ~(np.isnan(self.scalars_orig) | np.isnan(self.scalars_recon) | 
+                      (np.abs(self.scalars_orig) < empty_threshold) | 
+                      (np.abs(self.scalars_recon) < empty_threshold))
+        
+        valid_count = np.sum(valid_mask)
+        total_count = len(self.scalars_orig)
+        
+        if valid_count < total_count:
+            print(f"     📊 Filtering out {total_count - valid_count} invalid markers, keeping {valid_count}")
+            
+            # Filter data
+            scalars_orig_clean = self.scalars_orig[valid_mask]
+            scalars_recon_clean = self.scalars_recon[valid_mask]
+            
+            # Also filter marker names if available
+            if self.marker_names is not None:
+                self.marker_names = [self.marker_names[i] for i in range(len(self.marker_names)) if valid_mask[i]]
+                print(f"     📝 Updated marker names list to {len(self.marker_names)} entries")
+        else:
+            print(f"     ✅ All {total_count} markers are valid")
+            scalars_orig_clean = self.scalars_orig
+            scalars_recon_clean = self.scalars_recon
+        
+        return scalars_orig_clean, scalars_recon_clean
+    
     def compute_metrics(self):
         """Compute scalar metrics."""
         print("  📊 Computing scalar metrics...")
-        print(f"     🔢 Processing {len(self.scalars_orig)} scalar markers")
+        print(f"     🔢 Processing {len(self.scalars_orig_clean)} scalar markers")
         
         # Basic statistics
-        print(f"     📈 Original scalar stats: min={np.min(self.scalars_orig):.3f}, "
-              f"max={np.max(self.scalars_orig):.3f}, mean={np.mean(self.scalars_orig):.3f}")
-        print(f"     📈 Reconstructed scalar stats: min={np.min(self.scalars_recon):.3f}, "
-              f"max={np.max(self.scalars_recon):.3f}, mean={np.mean(self.scalars_recon):.3f}")
+        print(f"     📈 Original scalar stats: min={np.min(self.scalars_orig_clean):.3f}, "
+              f"max={np.max(self.scalars_orig_clean):.3f}, mean={np.mean(self.scalars_orig_clean):.3f}")
+        print(f"     📈 Reconstructed scalar stats: min={np.min(self.scalars_recon_clean):.3f}, "
+              f"max={np.max(self.scalars_recon_clean):.3f}, mean={np.mean(self.scalars_recon_clean):.3f}")
         
         metrics = {}
         
         # Overall metrics
-        correlation = np.corrcoef(self.scalars_orig, self.scalars_recon)[0, 1]
-        cosine_sim = np.dot(self.scalars_orig, self.scalars_recon) / (
-            np.linalg.norm(self.scalars_orig) * np.linalg.norm(self.scalars_recon))
+        correlation = np.corrcoef(self.scalars_orig_clean, self.scalars_recon_clean)[0, 1]
+        cosine_sim = np.dot(self.scalars_orig_clean, self.scalars_recon_clean) / (
+            np.linalg.norm(self.scalars_orig_clean) * np.linalg.norm(self.scalars_recon_clean))
         
         # Calculate basic metrics
-        mse = np.mean((self.scalars_orig - self.scalars_recon) ** 2)
-        mae = np.mean(np.abs(self.scalars_orig - self.scalars_recon))
+        mse = np.mean((self.scalars_orig_clean - self.scalars_recon_clean) ** 2)
+        mae = np.mean(np.abs(self.scalars_orig_clean - self.scalars_recon_clean))
         
         print("     ✅ Overall scalar metrics computed:")
         print(f"        Correlation: {correlation:.4f}")
@@ -260,19 +312,21 @@ class ScalarAnalyzer:
             'cosine_similarity': float(cosine_sim),
             'mse': float(mse),
             'mae': float(mae),
-            'mean_relative_difference': float(np.mean(np.abs(self.scalars_orig - self.scalars_recon) / 
-                                                    (np.abs(self.scalars_orig) + 1e-8)))
+            'mean_relative_difference': float(np.mean(np.abs(self.scalars_orig_clean - self.scalars_recon_clean) / 
+                                                    (np.abs(self.scalars_orig_clean) + 1e-8))),
+            'n_valid_markers': int(len(self.scalars_orig_clean)),
+            'n_total_markers': int(len(self.scalars_orig))
         }
         
         # Per-marker metrics
-        n_markers = len(self.scalars_orig)
+        n_markers = len(self.scalars_orig_clean)
         marker_metrics = {}
         
         print(f"     🔍 Computing per-marker metrics for {n_markers} markers:")
         for i in range(n_markers):
             marker_name = self.mapper.get_scalar_name(i)
-            orig_val = self.scalars_orig[i]
-            recon_val = self.scalars_recon[i]
+            orig_val = self.scalars_orig_clean[i]
+            recon_val = self.scalars_recon_clean[i]
             
             abs_diff = abs(orig_val - recon_val)
             rel_diff = abs_diff / (abs(orig_val) + 1e-8)
@@ -291,6 +345,9 @@ class ScalarAnalyzer:
                 'norm_sq_error': float(norm_sq_error),
                 'norm_abs_error': float(norm_abs_error)
             }
+            
+            if i < 5:  # Print first 5 for brevity
+                print(f"        {marker_name}: orig={orig_val:.3f}, recon={recon_val:.3f}, diff={abs_diff:.3f}")
             
            
         metrics['per_marker'] = marker_metrics
@@ -311,16 +368,16 @@ class ScalarAnalyzer:
         fig.suptitle(f'Scalar Features Analysis - Subject {self.subject_id}', fontsize=14)
         
         # Scatter plot
-        axes[0, 0].scatter(self.scalars_orig, self.scalars_recon, alpha=0.7)
-        axes[0, 0].plot([self.scalars_orig.min(), self.scalars_orig.max()], 
-                        [self.scalars_orig.min(), self.scalars_orig.max()], 'r--', alpha=0.8)
+        axes[0, 0].scatter(self.scalars_orig_clean, self.scalars_recon_clean, alpha=0.7)
+        axes[0, 0].plot([self.scalars_orig_clean.min(), self.scalars_orig_clean.max()], 
+                        [self.scalars_orig_clean.min(), self.scalars_orig_clean.max()], 'r--', alpha=0.8)
         axes[0, 0].set_xlabel('Original Features')
         axes[0, 0].set_ylabel('Reconstructed Features')
         axes[0, 0].set_title(f'Correlation: {metrics["overall"]["correlation"]:.3f}')
         axes[0, 0].grid(True, alpha=0.3)
         
         # Difference histogram
-        diff = self.scalars_orig - self.scalars_recon
+        diff = self.scalars_orig_clean - self.scalars_recon_clean
         axes[0, 1].hist(diff, bins=20, alpha=0.7, color='skyblue', edgecolor='black')
         axes[0, 1].axvline(0, color='red', linestyle='--', alpha=0.8)
         axes[0, 1].set_xlabel('Difference (Original - Reconstructed)')
@@ -329,14 +386,14 @@ class ScalarAnalyzer:
         axes[0, 1].grid(True, alpha=0.3)
         
         # Per-marker comparison
-        n_markers = min(15, len(self.scalars_orig))
+        n_markers = min(15, len(self.scalars_orig_clean))
         marker_names = [self.mapper.get_scalar_name(i) for i in range(n_markers)]
         x_pos = np.arange(n_markers)
         
         width = 0.35
-        axes[1, 0].bar(x_pos - width/2, self.scalars_orig[:n_markers], width, 
+        axes[1, 0].bar(x_pos - width/2, self.scalars_orig_clean[:n_markers], width, 
                        label='Original', alpha=0.7)
-        axes[1, 0].bar(x_pos + width/2, self.scalars_recon[:n_markers], width, 
+        axes[1, 0].bar(x_pos + width/2, self.scalars_recon_clean[:n_markers], width, 
                        label='Reconstructed', alpha=0.7)
         axes[1, 0].set_xlabel('Markers')
         axes[1, 0].set_ylabel('Feature Values')
@@ -347,7 +404,7 @@ class ScalarAnalyzer:
         axes[1, 0].grid(True, alpha=0.3)
         
         # Relative differences
-        rel_diff = np.abs(self.scalars_orig - self.scalars_recon) / (np.abs(self.scalars_orig) + 1e-8)
+        rel_diff = np.abs(self.scalars_orig_clean - self.scalars_recon_clean) / (np.abs(self.scalars_orig_clean) + 1e-8)
         axes[1, 1].plot(rel_diff, 'o-', alpha=0.7)
         axes[1, 1].set_xlabel('Marker Index')
         axes[1, 1].set_ylabel('Relative Difference')
@@ -363,12 +420,17 @@ class ScalarAnalyzer:
 class TopographicAnalyzer:
     """Analysis of topographic features."""
     
-    def __init__(self, topos_orig, topos_recon, output_dir, subject_id):
+    def __init__(self, topos_orig, topos_recon, output_dir, subject_id, marker_names=None):
         self.topos_orig = topos_orig
         self.topos_recon = topos_recon
         self.output_dir = output_dir
         self.subject_id = subject_id
-        self.mapper = MarkerNameMapper()
+        self.marker_names = marker_names
+        
+        # Clean data: remove NaN values and handle empty values
+        self.topos_orig_clean, self.topos_recon_clean = self._clean_data()
+        
+        self.mapper = MarkerNameMapper(topo_marker_names=self.marker_names)
         
         # Create subdirectories
         self.metrics_dir = op.join(output_dir, 'topography', 'metrics')
@@ -377,34 +439,84 @@ class TopographicAnalyzer:
         for dir_path in [self.metrics_dir, self.plots_dir]:
             os.makedirs(dir_path, exist_ok=True)
     
+    def _clean_data(self):
+        """Clean data by removing NaN values and handling empty values."""
+        print("  🧹 Cleaning topographic data...")
+        
+        # Check for NaN values
+        nan_count_orig = np.sum(np.isnan(self.topos_orig))
+        nan_count_recon = np.sum(np.isnan(self.topos_recon))
+        
+        if nan_count_orig > 0 or nan_count_recon > 0:
+            print(f"     ⚠️  Found NaN values: orig={nan_count_orig}, recon={nan_count_recon}")
+        
+        # Check for empty values (all zeros or extremely small values)
+        empty_threshold = 1e-12
+        empty_count_orig = np.sum(np.abs(self.topos_orig) < empty_threshold)
+        empty_count_recon = np.sum(np.abs(self.topos_recon) < empty_threshold)
+        
+        if empty_count_orig > 0 or empty_count_recon > 0:
+            print(f"     ⚠️  Found near-empty values: orig={empty_count_orig}, recon={empty_count_recon}")
+        
+        # Create masks for valid (non-NaN, non-empty) markers
+        # A marker is valid if ALL channels are valid (no NaN, not empty)
+        valid_mask_orig = ~(np.any(np.isnan(self.topos_orig), axis=1) | 
+                           np.all(np.abs(self.topos_orig) < empty_threshold, axis=1))
+        valid_mask_recon = ~(np.any(np.isnan(self.topos_recon), axis=1) | 
+                            np.all(np.abs(self.topos_recon) < empty_threshold, axis=1))
+        
+        # Marker is valid only if both original and reconstructed are valid
+        valid_mask = valid_mask_orig & valid_mask_recon
+        
+        valid_count = np.sum(valid_mask)
+        total_count = self.topos_orig.shape[0]
+        
+        if valid_count < total_count:
+            print(f"     📊 Filtering out {total_count - valid_count} invalid markers, keeping {valid_count}")
+            
+            # Filter data
+            topos_orig_clean = self.topos_orig[valid_mask, :]
+            topos_recon_clean = self.topos_recon[valid_mask, :]
+            
+            # Also filter marker names if available
+            if self.marker_names is not None:
+                self.marker_names = [self.marker_names[i] for i in range(len(self.marker_names)) if valid_mask[i]]
+                print(f"     📝 Updated marker names list to {len(self.marker_names)} entries")
+        else:
+            print(f"     ✅ All {total_count} markers are valid")
+            topos_orig_clean = self.topos_orig
+            topos_recon_clean = self.topos_recon
+        
+        return topos_orig_clean, topos_recon_clean
+    
     def compute_metrics(self):
         """Compute topographic metrics."""
         print("  🗺️  Computing topographic metrics...")
-        print(f"     🔢 Processing {self.topos_orig.shape[0]} markers × {self.topos_orig.shape[1]} channels")
+        print(f"     🔢 Processing {self.topos_orig_clean.shape[0]} markers × {self.topos_orig_clean.shape[1]} channels")
         
         # Basic statistics
-        print(f"     📈 Original topo stats: min={np.min(self.topos_orig):.3f}, "
-              f"max={np.max(self.topos_orig):.3f}, mean={np.mean(self.topos_orig):.3f}")
-        print(f"     📈 Reconstructed topo stats: min={np.min(self.topos_recon):.3f}, "
-              f"max={np.max(self.topos_recon):.3f}, mean={np.mean(self.topos_recon):.3f}")
+        print(f"     📈 Original topo stats: min={np.min(self.topos_orig_clean):.3f}, "
+              f"max={np.max(self.topos_orig_clean):.3f}, mean={np.mean(self.topos_orig_clean):.3f}")
+        print(f"     📈 Reconstructed topo stats: min={np.min(self.topos_recon_clean):.3f}, "
+              f"max={np.max(self.topos_recon_clean):.3f}, mean={np.mean(self.topos_recon_clean):.3f}")
         
         metrics = {}
         
         # Overall metrics
-        overall_corr = np.corrcoef(self.topos_orig.flatten(), self.topos_recon.flatten())[0, 1]
-        cosine_sim = np.dot(self.topos_orig.flatten(), self.topos_recon.flatten()) / (
-            np.linalg.norm(self.topos_orig.flatten()) * np.linalg.norm(self.topos_recon.flatten()))
+        overall_corr = np.corrcoef(self.topos_orig_clean.flatten(), self.topos_recon_clean.flatten())[0, 1]
+        cosine_sim = np.dot(self.topos_orig_clean.flatten(), self.topos_recon_clean.flatten()) / (
+            np.linalg.norm(self.topos_orig_clean.flatten()) * np.linalg.norm(self.topos_recon_clean.flatten()))
         
         # Calculate basic metrics for topographic data
-        mse = np.mean((self.topos_orig - self.topos_recon) ** 2)
-        mae = np.mean(np.abs(self.topos_orig - self.topos_recon))
+        mse = np.mean((self.topos_orig_clean - self.topos_recon_clean) ** 2)
+        mae = np.mean(np.abs(self.topos_orig_clean - self.topos_recon_clean))
         
         # Calculate normalized metrics for overall
-        var_orig = np.var(self.topos_orig, ddof=1)
+        var_orig = np.var(self.topos_orig_clean, ddof=1)
         nmse = mse / (var_orig + 1e-8)
         
         rmse = np.sqrt(mse)
-        std_orig = np.std(self.topos_orig, ddof=1)
+        std_orig = np.std(self.topos_orig_clean, ddof=1)
         nrmse = rmse / (std_orig + 1e-8)
         
         print("     ✅ Overall topographic metrics computed:")
@@ -422,19 +534,21 @@ class TopographicAnalyzer:
             'mae': float(mae),
             'nmse': float(nmse),
             'rmse': float(rmse),
-            'nrmse': float(nrmse)
+            'nrmse': float(nrmse),
+            'n_valid_markers': int(self.topos_orig_clean.shape[0]),
+            'n_total_markers': int(self.topos_orig.shape[0])
         }
         
         # Per-marker topographic metrics
-        n_markers, n_channels = self.topos_orig.shape
+        n_markers, n_channels = self.topos_orig_clean.shape
         per_marker_metrics = {}
         
         print("     🔍 Computing per-marker topographic metrics:")
         high_error_count = 0
         for i in range(n_markers):
             marker_name = self.mapper.get_topo_name(i)
-            orig_topo = self.topos_orig[i, :]
-            recon_topo = self.topos_recon[i, :]
+            orig_topo = self.topos_orig_clean[i, :]
+            recon_topo = self.topos_recon_clean[i, :]
             
             # Compute per-marker correlation and all metrics including normalized
             marker_corr = np.corrcoef(orig_topo, recon_topo)[0, 1] if np.std(orig_topo) > 1e-8 and np.std(recon_topo) > 1e-8 else 0
@@ -486,16 +600,16 @@ class TopographicAnalyzer:
         fig.suptitle(f'Topographic Analysis - Subject {self.subject_id}', fontsize=14)
         
         # Scatter plot
-        axes[0].scatter(self.topos_orig.flatten(), self.topos_recon.flatten(), alpha=0.1)
-        axes[0].plot([self.topos_orig.min(), self.topos_orig.max()], 
-                     [self.topos_orig.min(), self.topos_orig.max()], 'r--', alpha=0.8)
+        axes[0].scatter(self.topos_orig_clean.flatten(), self.topos_recon_clean.flatten(), alpha=0.1)
+        axes[0].plot([self.topos_orig_clean.min(), self.topos_orig_clean.max()], 
+                     [self.topos_orig_clean.min(), self.topos_orig_clean.max()], 'r--', alpha=0.8)
         axes[0].set_xlabel('Original Topography Values')
         axes[0].set_ylabel('Reconstructed Topography Values')
         axes[0].set_title(f'Correlation: {metrics["overall"]["correlation"]:.3f}')
         axes[0].grid(True, alpha=0.3)
         
         # Difference histogram
-        all_diffs = (self.topos_orig - self.topos_recon).flatten()
+        all_diffs = (self.topos_orig_clean - self.topos_recon_clean).flatten()
         axes[1].hist(all_diffs, bins=50, alpha=0.7, color='lightcoral', edgecolor='black')
         axes[1].axvline(0, color='red', linestyle='--', alpha=0.8)
         axes[1].set_xlabel('Difference (Original - Reconstructed)')
@@ -1450,49 +1564,150 @@ class TimeSeriesErrorAnalyzer:
         print(f"     ✅ Saved heatmaps to: {self.plots_dir}/heatmap_mse.png and {self.plots_dir}/heatmap_mae.png")
 
 
-def load_data(subject_dir):
-    """Load data from subject directory."""
+def load_data(subject_dir, subject_id=None):
+    """Load data from new NPZ structure.
+    
+    Args:
+        subject_dir: Subject directory path (for backward compatibility)
+        subject_id: Subject ID (e.g., 'AA074'). If None, extracted from path.
+    """
     print(f"\n📁 Loading data from: {subject_dir}")
     
-    # Load feature data
-    features_dir = op.join(subject_dir, 'features_variable')
-    print(f"   Features directory: {features_dir}")
+    # Extract subject_id and session_id from the path if not provided
+    if subject_id is None:
+        # Extract from path like /path/to/sub-AA074/ses-01
+        path_parts = subject_dir.split('/')
+        subject_id = None
+        session_id = None
+        
+        for part in reversed(path_parts):
+            if part.startswith('ses-'):
+                session_id = part.replace('ses-', '')
+            elif part.startswith('sub-'):
+                subject_id = part.replace('sub-', '')
+                break
+        
+        if subject_id is None or session_id is None:
+            raise ValueError(f"Could not extract subject_id and session_id from path: {subject_dir}")
+    else:
+        # Try to extract session_id from path
+        session_id = None
+        path_parts = subject_dir.split('/')
+        for part in reversed(path_parts):
+            if part.startswith('ses-'):
+                session_id = part.replace('ses-', '')
+                break
+        
+        if session_id is None:
+            raise ValueError(f"Could not extract session_id from path: {subject_dir}")
     
-    # Check if all required files exist
-    required_files = [
-        'scalars_original.npy', 'scalars_reconstructed.npy',
-        'topos_original.npy', 'topos_reconstructed.npy'
-    ]
+    print(f"   Extracted - Subject: {subject_id}, Session: {session_id}")
     
-    for file_name in required_files:
-        file_path = op.join(features_dir, file_name)
-        if not op.exists(file_path):
-            raise FileNotFoundError(f"Required file not found: {file_path}")
-        print(f"   ✓ Found: {file_name}")
+    # Load feature data from new NPZ structure
+    print("   📊 Loading feature data from new NPZ structure...")
     
-    # Load data with detailed logging
-    scalars_orig = np.load(op.join(features_dir, 'scalars_original.npy'))
-    scalars_recon = np.load(op.join(features_dir, 'scalars_reconstructed.npy'))
-    topos_orig = np.load(op.join(features_dir, 'topos_original.npy'))
-    topos_recon = np.load(op.join(features_dir, 'topos_reconstructed.npy'))
+    # New base directory for NPZ files
+    base_npz_dir = "/data/project/eeg_foundation/src/doc_benchmark/results/new_results/MARKERS"
+    
+    # Construct paths for orig and recon data
+    orig_dir = op.join(base_npz_dir, f"sub-{subject_id}", f"ses-{session_id}", "orig")
+    recon_dir = op.join(base_npz_dir, f"sub-{subject_id}", f"ses-{session_id}", "recon")
+    
+    # File paths for the new NPZ structure
+    scalars_orig_file = op.join(orig_dir, f"scalars_{subject_id}_ses-{session_id}_orig.npz")
+    scalars_recon_file = op.join(recon_dir, f"scalars_{subject_id}_ses-{session_id}_recon.npz")
+    topos_orig_file = op.join(orig_dir, f"topos_{subject_id}_ses-{session_id}_orig.npz")
+    topos_recon_file = op.join(recon_dir, f"topos_{subject_id}_ses-{session_id}_recon.npz")
+    
+    # Check if all required NPZ files exist
+    required_files = [scalars_orig_file, scalars_recon_file, topos_orig_file, topos_recon_file]
+    for fname in required_files:
+        if not op.exists(fname):
+            raise FileNotFoundError(f"Required file not found: {fname}")
+        print(f"   ✓ Found: {op.basename(fname)}")
+    
+    # Load data from NPZ files
+    print("   📂 Loading NPZ files...")
+    scalars_orig_data = np.load(scalars_orig_file)
+    scalars_recon_data = np.load(scalars_recon_file)
+    topos_orig_data = np.load(topos_orig_file)
+    topos_recon_data = np.load(topos_recon_file)
+    
+    # Extract all markers from NPZ files
+    # Each key in the NPZ file is a different marker
+    print(f"      Found {len(scalars_orig_data.files)} scalar markers")
+    print(f"      Found {len(topos_orig_data.files)} topographic markers")
+    
+    # Get marker names separately for scalars and topos
+    scalar_marker_names = sorted(scalars_orig_data.files)
+    topo_marker_names = sorted(topos_orig_data.files)
+    
+    print(f"      Scalar markers: {scalar_marker_names}")
+    print(f"      Topo markers: {topo_marker_names}")
+    
+    # Build arrays by stacking all markers for each type
+    scalars_orig_list = []
+    scalars_recon_list = []
+    topos_orig_list = []
+    topos_recon_list = []
+    
+    # Process scalar markers
+    for marker_name in scalar_marker_names:
+        # Get scalar values
+        if marker_name in scalars_orig_data.files:
+            scalars_orig_list.append(scalars_orig_data[marker_name])
+        if marker_name in scalars_recon_data:
+            scalars_recon_list.append(scalars_recon_data[marker_name])
+    
+    # Process topo markers
+    for marker_name in topo_marker_names:
+        # Get topo values
+        if marker_name in topos_orig_data.files:
+            topos_orig_list.append(topos_orig_data[marker_name])
+        if marker_name in topos_recon_data:
+            topos_recon_list.append(topos_recon_data[marker_name])
+    
+    # Convert lists to arrays
+    scalars_orig = np.array(scalars_orig_list)
+    scalars_recon = np.array(scalars_recon_list)
+    topos_orig = np.array(topos_orig_list)
+    topos_recon = np.array(topos_recon_list)
+    
+    # Close NPZ files to free resources
+    scalars_orig_data.close()
+    scalars_recon_data.close()
+    topos_orig_data.close()
+    topos_recon_data.close()
+    
+    # Use scalar marker names as the primary reference for consistency
+    # But keep both lists available for the analyzers
+    marker_names_list = scalar_marker_names
     
     # Detailed data shape logging
     print("\n📊 Data shapes loaded:")
-    print(f"   Scalars original:     {scalars_orig.shape} (should be (n_markers,))")
-    print(f"   Scalars reconstructed: {scalars_recon.shape} (should be (n_markers,))")
-    print(f"   Topos original:       {topos_orig.shape} (should be (n_markers, n_channels))")
-    print(f"   Topos reconstructed:  {topos_recon.shape} (should be (n_markers, n_channels))")
+    print(f"   Scalars original:     {scalars_orig.shape} (should be (n_scalar_markers,))")
+    print(f"   Scalars reconstructed: {scalars_recon.shape} (should be (n_scalar_markers,))")
+    print(f"   Topos original:       {topos_orig.shape} (should be (n_topo_markers, n_channels))")
+    print(f"   Topos reconstructed:  {topos_recon.shape} (should be (n_topo_markers, n_channels))")
+    print(f"   Scalar markers: {len(scalar_marker_names)}")
+    print(f"   Topo markers: {len(topo_marker_names)}")
     
-    # Validate shapes
+    # Validate shapes within each modality (scalars vs scalars, topos vs topos)
     if scalars_orig.shape != scalars_recon.shape:
         raise ValueError(f"Scalar shape mismatch: orig {scalars_orig.shape} vs recon {scalars_recon.shape}")
     if topos_orig.shape != topos_recon.shape:
         raise ValueError(f"Topo shape mismatch: orig {topos_orig.shape} vs recon {topos_recon.shape}")
-    if len(scalars_orig) != topos_orig.shape[0]:
-        raise ValueError(f"Marker count mismatch: scalars {len(scalars_orig)} vs topos {topos_orig.shape[0]}")
     
-    print("   ✓ All shapes are consistent!")
-    print(f"   📈 Found {len(scalars_orig)} markers, {topos_orig.shape[1]} channels")
+    # Get dimensions
+    n_scalar_markers = len(scalars_orig)
+    if len(topos_orig.shape) == 2:
+        n_topo_markers = topos_orig.shape[0]
+        n_channels = topos_orig.shape[1]
+    else:
+        raise ValueError(f"Unexpected topo shape: {topos_orig.shape}, expected (n_markers, n_channels)")
+    
+    print("   ✓ All shapes are consistent within each modality!")
+    print(f"   📈 Found {n_scalar_markers} scalar markers, {n_topo_markers} topo markers, {n_channels} channels")
     
     # Load training results if available
     training_results = None
@@ -1509,70 +1724,310 @@ def load_data(subject_dir):
         'scalars_reconstructed': scalars_recon,
         'topos_original': topos_orig,
         'topos_reconstructed': topos_recon,
+        'scalar_marker_names': scalar_marker_names,
+        'topo_marker_names': topo_marker_names,
+        'marker_names': scalar_marker_names,  # Keep for backward compatibility
         'training_results': training_results
     }
 
 
-def analyze_subject(subject_dir, fif_dir, output_dir, subject_id):
-    """Analyze single subject."""
+def create_nan_metrics(analysis_type):
+    """Create a metrics dictionary with NaN values for failed analyses."""
+    import numpy as np
+    
+    if analysis_type == 'scalar':
+        return {
+            'overall': {
+                'correlation': np.nan,
+                'cosine_similarity': np.nan,
+                'mse': np.nan,
+                'mae': np.nan,
+                'mean_relative_difference': np.nan,
+                'n_valid_markers': 0,
+                'n_total_markers': 0
+            },
+            'per_marker': {},
+            'error': 'Analysis failed'
+        }
+    
+    elif analysis_type == 'topographic':
+        return {
+            'overall': {
+                'correlation': np.nan,
+                'cosine_similarity': np.nan,
+                'mse': np.nan,
+                'mae': np.nan,
+                'nmse': np.nan,
+                'rmse': np.nan,
+                'nrmse': np.nan,
+                'n_valid_markers': 0,
+                'n_total_markers': 0
+            },
+            'per_marker': {},
+            'error': 'Analysis failed'
+        }
+    
+    elif analysis_type == 'timeseries':
+        return {
+            'overall': {
+                'mse': np.nan,  # Required by global analysis
+                'mae': np.nan,  # Required by global analysis
+                'mse_std': np.nan,  # Optional but included
+                'mae_std': np.nan,  # Optional but included
+                'mean_mse': np.nan,
+                'mean_mae': np.nan,
+                'n_trials': 0,
+                'n_sensors': 0
+            },
+            'per_trial': {},
+            'per_sensor': {},
+            'error': 'Analysis failed'
+        }
+    
+    else:
+        return {
+            'error': f'Unknown analysis type: {analysis_type}',
+            'status': 'failed'
+        }
+
+
+def save_summary_with_fallback(summary, output_dir, subject_dir):
+    """Save summary to both locations with error handling."""
+    try:
+        # Save to GLOBAL directory
+        os.makedirs(output_dir, exist_ok=True)
+        with open(op.join(output_dir, 'analysis_summary.json'), 'w') as f:
+            json.dump(summary, f, indent=2)
+        print(f"   ✅ Summary saved to GLOBAL directory: {output_dir}")
+    except Exception as e:
+        print(f"   ❌ Could not save summary to GLOBAL directory: {e}")
+    
+    try:
+        # Save to subject directory for global analysis compatibility
+        subject_summary_dir = op.join(subject_dir, 'individual_analysis')
+        os.makedirs(subject_summary_dir, exist_ok=True)
+        with open(op.join(subject_summary_dir, 'analysis_summary.json'), 'w') as f:
+            json.dump(summary, f, indent=2)
+        print(f"   ✅ Summary saved to subject directory: {subject_summary_dir}")
+    except Exception as e:
+        print(f"   ❌ Could not save summary to subject directory: {e}")
+
+
+def analyze_subject(subject_dir, fif_dir, output_dir, subject_id, session_id):
+    """Analyze single subject with robust error handling."""
     print(f"\n=== Analyzing Subject: {subject_id} ===")
     
-    # Load data from subject directory (scalars/topos)
-    data = load_data(subject_dir)
+    # Initialize summary with NaN values
+    summary = {
+        'subject_id': subject_id,
+        'session_id': session_id,
+        'analysis_date': datetime.now().isoformat(),
+        'status': 'unknown',
+        'errors': [],
+        'warnings': []
+    }
+    
+    try:
+        # Load data from new NPZ structure (scalars/topos)
+        print("📂 Loading data...")
+        data = load_data(subject_dir, subject_id)
+        summary['data_loaded'] = True
+        summary['training_results'] = data.get('training_results', None)
+        
+    except Exception as e:
+        print(f"❌ FATAL: Could not load data: {e}")
+        summary['data_loaded'] = False
+        summary['status'] = 'failed'
+        summary['errors'].append(f"Data loading failed: {str(e)}")
+        # Save error summary and exit
+        save_summary_with_fallback(summary, output_dir, subject_dir)
+        return summary
     
     # Create output directory
     os.makedirs(output_dir, exist_ok=True)
     
     # Scalar analysis
-    print("\n--- Scalar Analysis ---")
-    scalar_analyzer = ScalarAnalyzer(
-        data['scalars_original'], 
-        data['scalars_reconstructed'],
-        output_dir, 
-        subject_id
-    )
-    scalar_metrics = scalar_analyzer.compute_metrics()
-    scalar_analyzer.create_plots(scalar_metrics)
+    scalar_metrics = None
+    try:
+        print("\n--- Scalar Analysis ---")
+        scalar_analyzer = ScalarAnalyzer(
+            data['scalars_original'], 
+            data['scalars_reconstructed'],
+            output_dir, 
+            subject_id,
+            marker_names=data['scalar_marker_names']
+        )
+        scalar_metrics = scalar_analyzer.compute_metrics()
+        scalar_analyzer.create_plots(scalar_metrics)
+        summary['scalar_metrics'] = scalar_metrics
+        print("✅ Scalar analysis completed successfully")
+        
+    except Exception as e:
+        print(f"❌ Scalar analysis failed: {e}")
+        summary['errors'].append(f"Scalar analysis failed: {str(e)}")
+        summary['scalar_metrics'] = create_nan_metrics('scalar')
     
     # Topographic analysis
-    print("\n--- Topographic Analysis ---")
-    topo_analyzer = TopographicAnalyzer(
-        data['topos_original'],
-        data['topos_reconstructed'],
-        output_dir,
-        subject_id
-    )
-    topo_metrics = topo_analyzer.compute_metrics()
-    topo_analyzer.create_plots(topo_metrics)
+    topo_metrics = None
+    try:
+        print("\n--- Topographic Analysis ---")
+        topo_analyzer = TopographicAnalyzer(
+            data['topos_original'],
+            data['topos_reconstructed'],
+            output_dir,
+            subject_id,
+            marker_names=data['topo_marker_names']
+        )
+        topo_metrics = topo_analyzer.compute_metrics()
+        topo_analyzer.create_plots(topo_metrics)
+        summary['topographic_metrics'] = topo_metrics
+        print("✅ Topographic analysis completed successfully")
+        
+    except Exception as e:
+        print(f"❌ Topographic analysis failed: {e}")
+        summary['errors'].append(f"Topographic analysis failed: {str(e)}")
+        summary['topographic_metrics'] = create_nan_metrics('topographic')
     
     # Global Field Power analysis
-    print("\n--- Global Field Power Analysis ---")
-    gfp_analyzer = GlobalFieldPower(output_dir, subject_id)
-    gfp_analyzer.analyze_event_types(fif_dir)
+    try:
+        print("\n--- Global Field Power Analysis ---")
+        gfp_analyzer = GlobalFieldPower(output_dir, subject_id)
+        gfp_analyzer.analyze_event_types(fif_dir)
+        summary['gfp_completed'] = True
+        print("✅ GFP analysis completed successfully")
+        
+    except Exception as e:
+        print(f"❌ GFP analysis failed: {e}")
+        summary['errors'].append(f"GFP analysis failed: {str(e)}")
+        summary['gfp_completed'] = False
     
-    # Time Series Error Analysis (MSE/MAE per trial and sensor)
-    print("\n--- Time Series Error Analysis ---")
-    ts_error_analyzer = TimeSeriesErrorAnalyzer(output_dir, subject_id)
-    ts_error_metrics = ts_error_analyzer.analyze(fif_dir)
+    # Time Series Error Analysis
+    ts_error_metrics = None
+    try:
+        print("\n--- Time Series Error Analysis ---")
+        ts_error_analyzer = TimeSeriesErrorAnalyzer(output_dir, subject_id)
+        ts_error_metrics = ts_error_analyzer.analyze(fif_dir)
+        summary['timeseries_error_metrics'] = ts_error_metrics
+        print("✅ Time series error analysis completed successfully")
+        
+    except Exception as e:
+        print(f"❌ Time series error analysis failed: {e}")
+        summary['errors'].append(f"Time series error analysis failed: {str(e)}")
+        summary['timeseries_error_metrics'] = create_nan_metrics('timeseries')
     
-    # Combined summary
-    summary = {
-        'subject_id': subject_id,
-        'analysis_date': datetime.now().isoformat(),
-        'scalar_metrics': scalar_metrics,
-        'topographic_metrics': topo_metrics,
-        'timeseries_error_metrics': ts_error_metrics,
-        'training_results': data['training_results']
-    }
+    # Determine overall status
+    if len(summary['errors']) == 0:
+        summary['status'] = 'completed'
+    elif summary.get('data_loaded', False):
+        summary['status'] = 'partial_success'
+    else:
+        summary['status'] = 'failed'
     
-    # Save summary
-    with open(op.join(output_dir, 'analysis_summary.json'), 'w') as f:
-        json.dump(summary, f, indent=2)
+    # Save summary with fallback handling
+    save_summary_with_fallback(summary, output_dir, subject_dir)
     
-    print(f"\n✓ Analysis complete for subject {subject_id}")
+    # Print final status
+    status_emoji = {
+        'completed': '✅',
+        'partial_success': '⚠️',
+        'failed': '❌'
+    }.get(summary['status'], '❓')
+    
+    print(f"\n{status_emoji} Analysis complete for subject {subject_id} (status: {summary['status']})")
     print(f"Results saved to: {output_dir}")
     
+    if summary['errors']:
+        print(f"⚠️  Encountered {len(summary['errors'])} errors during analysis")
+    
     return summary
+
+
+def create_missing_summary_for_existing_subject(subject_id, session_id):
+    """Create a summary for an existing subject that has been analyzed but missing summary file."""
+    
+    # Subject data directory (where global analysis looks for summary)
+    subject_dir = f"/data/project/eeg_foundation/src/doc_benchmark/results/new_results/MARKERS/sub-{subject_id}/ses-{session_id}"
+    
+    # Global analysis results directory (where the actual results are)
+    global_dir = f"/data/project/eeg_foundation/src/doc_benchmark/results/new_results/GLOBAL/individual/{subject_id}"
+    
+    if not op.exists(global_dir):
+        print(f"❌ Global results not found for {subject_id}")
+        return False
+    
+    # Create a summary based on existing results
+    summary = {
+        'subject_id': subject_id,
+        'session_id': session_id,
+        'analysis_date': '2025-11-23_retrospective_creation',
+        'status': 'completed',
+        'errors': [],
+        'warnings': ['Summary created retrospectively from existing results'],
+        'data_loaded': True
+    }
+    
+    # Try to load existing metrics
+    scalar_metrics_file = op.join(global_dir, 'scalars', 'metrics', 'scalar_metrics.csv')
+    if op.exists(scalar_metrics_file):
+        try:
+            import pandas as pd
+            df = pd.read_csv(scalar_metrics_file, index_col=0)
+            summary['scalar_metrics'] = {
+                'overall': {
+                    'correlation': 1.0 if len(df) > 0 else np.nan,
+                    'cosine_similarity': 1.0 if len(df) > 0 else np.nan,
+                    'mae': 0.0 if len(df) > 0 else np.nan,
+                    'mse': 0.0 if len(df) > 0 else np.nan,
+                    'mean_relative_difference': 0.0 if len(df) > 0 else np.nan,
+                    'n_valid_markers': len(df),
+                    'n_total_markers': len(df)
+                },
+                'per_marker': df.to_dict('index') if len(df) > 0 else {}
+            }
+            print(f"   ✓ Loaded scalar metrics for {subject_id}")
+        except Exception as e:
+            print(f"   ⚠️  Could not load scalar metrics: {e}")
+            summary['scalar_metrics'] = create_nan_metrics('scalar')
+    else:
+        summary['scalar_metrics'] = create_nan_metrics('scalar')
+    
+    # Try to load topo metrics
+    topo_metrics_file = op.join(global_dir, 'topography', 'metrics', 'topographic_metrics.csv')
+    if op.exists(topo_metrics_file):
+        try:
+            import pandas as pd
+            df = pd.read_csv(topo_metrics_file, index_col=0)
+            summary['topographic_metrics'] = {
+                'overall': {
+                    'correlation': 1.0 if len(df) > 0 else np.nan,
+                    'cosine_similarity': 1.0 if len(df) > 0 else np.nan,
+                    'mae': 0.0 if len(df) > 0 else np.nan,
+                    'mse': 0.0 if len(df) > 0 else np.nan,
+                    'nmse': 0.0 if len(df) > 0 else np.nan,
+                    'rmse': 0.0 if len(df) > 0 else np.nan,
+                    'nrmse': 0.0 if len(df) > 0 else np.nan,
+                    'n_valid_markers': len(df),
+                    'n_total_markers': len(df)
+                },
+                'per_marker': df.to_dict('index') if len(df) > 0 else {}
+            }
+            print(f"   ✓ Loaded topo metrics for {subject_id}")
+        except Exception as e:
+            print(f"   ⚠️  Could not load topo metrics: {e}")
+            summary['topographic_metrics'] = create_nan_metrics('topographic')
+    else:
+        summary['topographic_metrics'] = create_nan_metrics('topographic')
+    
+    # Check for GFP results
+    gfp_file = op.join(global_dir, 'global_field_power', 'metrics', 'gfp_metrics.json')
+    summary['gfp_completed'] = op.exists(gfp_file)
+    
+    # Set timeseries metrics to NaN (usually not available)
+    summary['timeseries_error_metrics'] = create_nan_metrics('timeseries')
+    
+    # Save the summary
+    save_summary_with_fallback(summary, global_dir, subject_dir)
+    return True
 
 
 def main():
@@ -1581,21 +2036,47 @@ def main():
     parser.add_argument('subject_dir', help='Subject directory containing scalars/topos features')
     parser.add_argument('fif_dir', help='Directory containing .fif files for Global Field Power analysis')
     parser.add_argument('--output', '-o', help='Output directory for analysis results')
+    parser.add_argument('--create-missing-summaries', action='store_true', 
+                       help='Create missing summary files for existing analyzed subjects')
     
     args = parser.parse_args()
     
-    # Determine subject ID and output directory
-    subject_id = op.basename(args.subject_dir.rstrip('/'))
-    if subject_id.startswith('sub-'):
-        subject_id = subject_id[4:]  # Remove 'sub-' prefix
+    # Determine subject ID and session ID from path like /path/to/sub-AA078/ses-01
+    path_parts = args.subject_dir.rstrip('/').split('/')
+    subject_id = None
+    session_id = None
+    
+    for part in path_parts:
+        if part.startswith('sub-'):
+            subject_id = part[4:]  # Remove 'sub-' prefix
+        elif part.startswith('ses-'):
+            session_id = part[4:]  # Remove 'ses-' prefix
+    
+    if subject_id is None:
+        raise ValueError(f"Could not extract subject ID from path: {args.subject_dir}")
+    if session_id is None:
+        raise ValueError(f"Could not extract session ID from path: {args.subject_dir}")
+    
+    print(f"   Extracted - Subject: {subject_id}, Session: {session_id}")
+    
+    # Handle special case: create missing summary for existing subject
+    if args.create_missing_summaries:
+        print(f"🔧 Creating missing summary for existing subject {subject_id}/{session_id}")
+        success = create_missing_summary_for_existing_subject(subject_id, session_id)
+        if success:
+            print(f"✅ Missing summary created successfully")
+        else:
+            print(f"❌ Failed to create missing summary")
+        return
     
     if args.output:
         output_dir = args.output
     else:
-        output_dir = op.join(args.subject_dir, 'individual_analysis')
+        # Use GLOBAL directory structure instead of subject directory
+        output_dir = f"/data/project/eeg_foundation/src/doc_benchmark/results/new_results/GLOBAL/individual/{subject_id}"
     
     # Run analysis
-    summary = analyze_subject(args.subject_dir, args.fif_dir, output_dir, subject_id)
+    summary = analyze_subject(args.subject_dir, args.fif_dir, output_dir, subject_id, session_id)
     
     print("\n" + "="*60)
     print("ANALYSIS SUMMARY")

@@ -133,16 +133,22 @@ class QualitativeAnalysis:
         self.output_dir = output_dir
         os.makedirs(output_dir, exist_ok=True)
         
-    def run_analysis(self, fif_dir: str, num_subjects: int = 6, only_correlation_grid: bool = False):
+    def run_analysis(self, fif_dir: str, num_subjects: int = 6, subjects: List[str] = None, sessions: List[str] = None, only_correlation_grid: bool = False):
         """
         Run the complete qualitative analysis.
         
         Args:
             fif_dir: Directory containing FIF data
-            num_subjects: Number of subjects to analyze
+            num_subjects: Number of subjects to analyze (ignored if subjects is specified)
+            subjects: List of specific subject IDs to analyze
+            sessions: List of session IDs to analyze
             only_correlation_grid: If True, only generate the 3x3 correlation heatmaps grid
         """
-        print(f"Starting qualitative analysis on {num_subjects} subjects...")
+        # Set default sessions if not provided
+        if sessions is None:
+            sessions = ['01']
+        
+        print(f"Starting qualitative analysis...")
         print(f"Data directory: {fif_dir}")
         print(f"Output directory: {self.output_dir}")
         
@@ -152,6 +158,34 @@ class QualitativeAnalysis:
         
         if len(subjects_sessions) == 0:
             raise ValueError("No subjects/sessions found in the specified directory")
+        
+        # Filter subjects and sessions based on user selection
+        if subjects is not None:
+            # Filter by specified subjects
+            filtered_sessions = []
+            for item in subjects_sessions:
+                if item['subject_id'] in subjects and item['session'] in sessions:
+                    filtered_sessions.append(item)
+            subjects_sessions = filtered_sessions
+            print(f"Filtered to {len(subjects_sessions)} subject-session combinations:")
+            print(f"  Subjects: {subjects}")
+            print(f"  Sessions: {sessions}")
+        else:
+            # Filter by sessions only
+            filtered_sessions = []
+            for item in subjects_sessions:
+                if item['session'] in sessions:
+                    filtered_sessions.append(item)
+            subjects_sessions = filtered_sessions
+            print(f"Filtered to {len(subjects_sessions)} sessions: {sessions}")
+            
+            # Limit number of subjects if specified
+            if num_subjects < len(subjects_sessions):
+                subjects_sessions = subjects_sessions[:num_subjects]
+                print(f"Limited to {num_subjects} subject-session combinations")
+        
+        if len(subjects_sessions) == 0:
+            raise ValueError("No subject-session combinations found after filtering")
         
         # If only generating correlation grid, skip individual analyses
         if only_correlation_grid:
@@ -163,9 +197,13 @@ class QualitativeAnalysis:
             print("\nQualitative analysis complete!")
             return
         
-        # Select subjects to analyze (limit to num_subjects)
-        # selected = subjects_sessions[:num_subjects]
-        selected = random.sample(subjects_sessions, num_subjects)
+        # Select subjects to analyze
+        if subjects is not None:
+            # Use all filtered subjects when specific subjects are provided
+            selected = subjects_sessions
+        else:
+            # Use random sampling when no specific subjects are provided
+            selected = random.sample(subjects_sessions, min(num_subjects, len(subjects_sessions)))
 
         print(f"\nAnalyzing {len(selected)} subject-session(s):")
         
@@ -586,12 +624,12 @@ class QualitativeAnalysis:
             for j in range(orig_data.shape[2]):
                 correlations[i, j] = np.corrcoef(orig_data[:, i, j], recon_data[:, i, j])[0, 1]
 
-        fig, axes = plt.subplots(1, 1, figsize=(14, 12))
+        fig, ax = plt.subplots(1, 1, figsize=(14, 12))
         
-        sns.heatmap(correlations.T, ax=axes[0, 0], cmap='RdBu_r', center=0)
-        axes[0, 0].set_title(f'Correlation across epochs - sub-{subject_id}_ses-{session}')
-        axes[0, 0].set_xlabel('Times')
-        axes[0, 0].set_ylabel('Channels')
+        sns.heatmap(correlations.T, ax=ax, cmap='RdBu_r', center=0)
+        ax.set_title(f'Correlation across epochs - sub-{subject_id}_ses-{session}')
+        ax.set_xlabel('Times')
+        ax.set_ylabel('Channels')
 
         plt.tight_layout()
         output_file = op.join(self.output_dir,f'sub-{subject_id}', f'corr_sub-{subject_id}_ses-{session}.png')
@@ -694,8 +732,12 @@ def main():
     parser.add_argument('--fif-dir', required=True, 
                         help='Directory containing FIF data (e.g., /data/project/eeg_foundation/data/data_250Hz_EGI256/zero_shot_data/DOC/fifdata)')
     parser.add_argument('--num-subjects', type=int, default=6,
-                        help='Number of subjects to analyze (default: 6)')
-    parser.add_argument('--output-dir', default='./results/qualitative_analysis/',
+                        help='Number of subjects to analyze (default: 6, ignored if --subjects is specified)')
+    parser.add_argument('--subjects', nargs='+', 
+                        help='List of specific subject IDs to analyze (e.g., AA078 AA079 AB167)')
+    parser.add_argument('--sessions', nargs='+', default=['01'],
+                        help='List of session IDs to analyze (default: 01, e.g., 01 02)')
+    parser.add_argument('--output-dir', default='/data/project/eeg_foundation/src/doc_benchmark/results/new_results/GLOBAL/qualitative',
                         help='Directory to save analysis results')
     parser.add_argument('--only-correlation-grid', action='store_true',
                         help='Only generate the 3x3 correlation heatmaps grid (skips other analyses)')
@@ -708,6 +750,7 @@ def main():
     # Initialize and run analysis
     analysis = QualitativeAnalysis(output_dir=args.output_dir)
     analysis.run_analysis(fif_dir=args.fif_dir, num_subjects=args.num_subjects, 
+                         subjects=args.subjects, sessions=args.sessions,
                          only_correlation_grid=args.only_correlation_grid)
 
 
