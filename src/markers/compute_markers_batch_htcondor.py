@@ -291,6 +291,7 @@ def monitor_htcondor_jobs(cluster_ids, job_names, logger, check_interval=30):
                 
                 if history_result.returncode == 0 and history_result.stdout.strip():
                     exit_code = history_result.stdout.strip()
+                    logger.debug(f"Exit code for {job_name}: '{exit_code}' (repr: {repr(exit_code)})")
                     if exit_code == "0":
                         job_status[job_name] = 'completed'
                         completed_count += 1
@@ -300,6 +301,8 @@ def monitor_htcondor_jobs(cluster_ids, job_names, logger, check_interval=30):
                         failed_count += 1
                         logger.error(f"❌ {job_name} failed with exit code {exit_code}")
                 else:
+                    # Log why we couldn't get exit code
+                    logger.warning(f"Could not get exit code for {job_name}: returncode={history_result.returncode}, stdout='{history_result.stdout}', stderr='{history_result.stderr}'")
                     job_status[job_name] = 'failed'
                     failed_count += 1
                     logger.error(f"❌ {job_name} failed")
@@ -474,8 +477,8 @@ def main():
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=40,
-        help="Number of subject-sessions to process per batch (default: 40)"
+        default=20,
+        help="Number of subject-sessions to process per batch (default: 20)"
     )
     parser.add_argument(
         "--template-yaml",
@@ -552,13 +555,40 @@ def main():
     # Find all FIF files
     try:
         all_files = find_all_fif_files(args.fif_folder)
-        logger.info(f"Found {len(all_files)} .fif files to process")
+        logger.info(f"Found {len(all_files)} .fif files")
     except Exception as e:
         logger.error(f"Error finding .fif files: {e}")
         sys.exit(1)
     
+    # Filter out files where finished.txt already exists
+    files_to_process = []
+    skipped_count = 0
+    
+    for item in all_files:
+        subject = item['subject']
+        session = item['session']
+        
+        # Check for finished.txt marker
+        finish_marker = os.path.join(h5_output_dir, subject, session, "finished.txt")
+        if os.path.exists(finish_marker):
+            logger.info(f"⏭️  Skipping {subject}/{session} - finished.txt marker found")
+            skipped_count += 1
+        else:
+            files_to_process.append(item)
+    
+    logger.info(f"Skipped {skipped_count} files with existing finished.txt markers")
+    logger.info(f"Will process {len(files_to_process)} .fif files")
+    
+    # If no files to process, exit early
+    if len(files_to_process) == 0:
+        logger.info("✅ All files already have finished.txt markers - nothing to process")
+        sys.exit(0)
+    
+    # Keep track of total for summary
+    total_files = len(all_files)
+    
     # Process in batches
-    total_batches = (len(all_files) + args.batch_size - 1) // args.batch_size
+    total_batches = (len(files_to_process) + args.batch_size - 1) // args.batch_size
     logger.info(f"Will process in {total_batches} batch(es)")
     
     success_count = 0
@@ -566,13 +596,13 @@ def main():
     
     for batch_idx in range(total_batches):
         start_idx = batch_idx * args.batch_size
-        end_idx = min(start_idx + args.batch_size, len(all_files))
-        batch_items = all_files[start_idx:end_idx]
+        end_idx = min(start_idx + args.batch_size, len(files_to_process))
+        batch_items = files_to_process[start_idx:end_idx]
         
         logger.info("")
         logger.info("="*80)
         logger.info(f"BATCH {batch_idx + 1}/{total_batches}")
-        logger.info(f"Processing items {start_idx + 1}-{end_idx} of {len(all_files)}")
+        logger.info(f"Processing items {start_idx + 1}-{end_idx} of {len(files_to_process)}")
         logger.info("="*80)
         
         # Create batch YAML directory
@@ -673,7 +703,9 @@ def main():
     logger.info("="*80)
     logger.info("PROCESSING SUMMARY")
     logger.info("="*80)
-    logger.info(f"Total files: {len(all_files)}")
+    logger.info(f"Total files found: {total_files}")
+    logger.info(f"Skipped (finished.txt exists): {skipped_count}")
+    logger.info(f"Processed: {len(files_to_process)}")
     logger.info(f"Successfully processed: {success_count}")
     logger.info(f"Failed batches: {len(failed_batches)}")
     
@@ -682,7 +714,7 @@ def main():
     
     logger.info("="*80)
     
-    if success_count == len(all_files):
+    if success_count == len(files_to_process):
         logger.info("✅ All files processed successfully!")
         sys.exit(0)
     else:

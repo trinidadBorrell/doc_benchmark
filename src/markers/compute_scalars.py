@@ -214,9 +214,10 @@ def compute_scalars_from_h5(h5_file, output_file, logger):
     candidate_n_epochs = []
     
     logger.info("Searching for n_epochs from all features...")
-    for feature_info in features.values():
+    for i, feature_info in enumerate(features.values(), 1):
         feature_name = feature_info["name"]
         display_name = feature_name.replace("EEG_", "")
+        logger.info(f"  [{i}/{len(features)}] Checking {display_name}...")
         
         try:
             fdata = storage.read(feature_name=feature_name)
