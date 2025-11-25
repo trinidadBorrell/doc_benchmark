@@ -22,6 +22,8 @@ src/ground_truth/
 src/markers_old/
 src/markers/report_modules_old/
 src/markers/batch_jobs/
+src/markers/create_finished_markers.py
+src/global_analysis/global_analysis.py
 
 .ruff_cache/
 .vscode/
