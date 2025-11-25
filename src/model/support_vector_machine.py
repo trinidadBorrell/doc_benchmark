@@ -161,57 +161,104 @@ class CrossSubjectClassifier:
         tuple
             (full_names, abbreviated_names)
         """
-        # Standard marker names in NICE collection order
+        # Updated marker names - 120 markers with A/B/C/D variants
         marker_names = [
-            'PowerSpectralDensity_delta',
-            'PowerSpectralDensity_deltan',
-            'PowerSpectralDensity_theta',
-            'PowerSpectralDensity_thetan',
-            'PowerSpectralDensity_alpha',
-            'PowerSpectralDensity_alphan',
-            'PowerSpectralDensity_beta',
-            'PowerSpectralDensity_betan',
-            'PowerSpectralDensity_gamma',
-            'PowerSpectralDensity_gamman',
-            'PowerSpectralDensity_summary_se',
-            'PowerSpectralDensitySummary_summary_msf',
-            'PowerSpectralDensitySummary_summary_sef90',
-            'PowerSpectralDensitySummary_summary_sef95',
-            'PermutationEntropy_default',
-            'SymbolicMutualInformation_weighted',
-            'KolmogorovComplexity_default',
-            'ContingentNegativeVariation_default',
-            'TimeLockedTopography_p1',
-            'TimeLockedTopography_p3a',
-            'TimeLockedTopography_p3b',
-            'TimeLockedContrast_LSGS-LDGD',
-            'TimeLockedContrast_LSGD-LDGS',
-            'TimeLockedContrast_LD-LS',
-            'TimeLockedContrast_mmn',
-            'TimeLockedContrast_p3a',
-            'TimeLockedContrast_GD-GS',
-            'TimeLockedContrast_p3b'
+            'delta_power_spectralpower_A', # 'delta_power_spectralpower_B', 'delta_power_spectralpower_C', 'delta_power_spectralpower_D',
+            'theta_power_spectralpower_A', # 'theta_power_spectralpower_B', 'theta_power_spectralpower_C', 'theta_power_spectralpower_D',
+            'alpha_power_spectralpower_A', # 'alpha_power_spectralpower_B', 'alpha_power_spectralpower_C', 'alpha_power_spectralpower_D',
+            'beta_power_spectralpower_A', # 'beta_power_spectralpower_B', 'beta_power_spectralpower_C', 'beta_power_spectralpower_D',
+            'gamma_power_spectralpower_A', # 'gamma_power_spectralpower_B', 'gamma_power_spectralpower_C', 'gamma_power_spectralpower_D',
+            'delta_relative_spectralpower_A', # 'delta_relative_spectralpower_B', 'delta_relative_spectralpower_C', 'delta_relative_spectralpower_D',
+            'theta_relative_spectralpower_A', # 'theta_relative_spectralpower_B', 'theta_relative_spectralpower_C', 'theta_relative_spectralpower_D',
+            'alpha_relative_spectralpower_A', # 'alpha_relative_spectralpower_B', 'alpha_relative_spectralpower_C', 'alpha_relative_spectralpower_D',
+            'beta_relative_spectralpower_A', # 'beta_relative_spectralpower_B', 'beta_relative_spectralpower_C', 'beta_relative_spectralpower_D',
+            'gamma_relative_spectralpower_A', # 'gamma_relative_spectralpower_B', 'gamma_relative_spectralpower_C', 'gamma_relative_spectralpower_D',
+            'spectral_entropy_spectralpower_A', # 'spectral_entropy_spectralpower_B', 'spectral_entropy_spectralpower_C', 'spectral_entropy_spectralpower_D',
+            'msf_psdsummary_A', #'msf_psdsummary_B', 'msf_psdsummary_C', 'msf_psdsummary_D',
+            'sef90_psdsummary_A', #'sef90_psdsummary_B', 'sef90_psdsummary_C', 'sef90_psdsummary_D',
+            'sef95_psdsummary_A', #'sef95_psdsummary_B', 'sef95_psdsummary_C', 'sef95_psdsummary_D',
+            'pe_theta_permutationentropy_A', #'pe_theta_permutationentropy_B', 'pe_theta_permutationentropy_C', 'pe_theta_permutationentropy_D',
+            'wsmi_theta_symbolicmutualinformation_A', #'wsmi_theta_symbolicmutualinformation_B', 'wsmi_theta_symbolicmutualinformation_C', 'wsmi_theta_symbolicmutualinformation_D',
+            'kolmogorov_complexity_kolmogorovcomplexity_A', #'kolmogorov_complexity_kolmogorovcomplexity_B', 'kolmogorov_complexity_kolmogorovcomplexity_C', 'kolmogorov_complexity_kolmogorovcomplexity_D',
+            'cnv_detailed_cnvslope_A', #'cnv_detailed_cnvslope_B', 'cnv_detailed_cnvslope_C', 'cnv_detailed_cnvslope_D',
+            'p1_topography_timelockedtopo_A', #'p1_topography_timelockedtopo_B', 'p1_topography_timelockedtopo_C', 'p1_topography_timelockedtopo_D',
+            'p3a_topography_timelockedtopo_A', #'p3a_topography_timelockedtopo_B', 'p3a_topography_timelockedtopo_C', 'p3a_topography_timelockedtopo_D',
+            'p3b_topography_timelockedtopo_A', #'p3b_topography_timelockedtopo_B', 'p3b_topography_timelockedtopo_C', 'p3b_topography_timelockedtopo_D',
+            'timelockedcontrast_lsgs_ldgd_timelockedcontrast_A', #'timelockedcontrast_lsgs_ldgd_timelockedcontrast_B', 'timelockedcontrast_lsgs_ldgd_timelockedcontrast_C', 'timelockedcontrast_lsgs_ldgd_timelockedcontrast_D',
+            'timelockedcontrast_lsgd_ldgs_timelockedcontrast_A', #'timelockedcontrast_lsgd_ldgs_timelockedcontrast_B', 'timelockedcontrast_lsgd_ldgs_timelockedcontrast_C', 'timelockedcontrast_lsgd_ldgs_timelockedcontrast_D',
+            'timelockedcontrast_ld_ls_timelockedcontrast_A', #'timelockedcontrast_ld_ls_timelockedcontrast_B', 'timelockedcontrast_ld_ls_timelockedcontrast_C', 'timelockedcontrast_ld_ls_timelockedcontrast_D',
+            'timelockedcontrast_mmn_timelockedcontrast_A', #'timelockedcontrast_mmn_timelockedcontrast_B', 'timelockedcontrast_mmn_timelockedcontrast_C', 'timelockedcontrast_mmn_timelockedcontrast_D',
+            'timelockedcontrast_p3a_timelockedcontrast_A', #'timelockedcontrast_p3a_timelockedcontrast_B', 'timelockedcontrast_p3a_timelockedcontrast_C', 'timelockedcontrast_p3a_timelockedcontrast_D',
+            'timelockedcontrast_gd_gs_timelockedcontrast_A', #'timelockedcontrast_gd_gs_timelockedcontrast_B', 'timelockedcontrast_gd_gs_timelockedcontrast_C', 'timelockedcontrast_gd_gs_timelockedcontrast_D',
+            'timelockedcontrast_p3b_timelockedcontrast_A', #'timelockedcontrast_p3b_timelockedcontrast_B', 'timelockedcontrast_p3b_timelockedcontrast_C', 'timelockedcontrast_p3b_timelockedcontrast_D',
+            'window_decoding_local_windowdecoding_A', #'window_decoding_local_windowdecoding_B', 'window_decoding_local_windowdecoding_C', 'window_decoding_local_windowdecoding_D',
+            'window_decoding_global_windowdecoding_A' #'window_decoding_global_windowdecoding_B', 'window_decoding_global_windowdecoding_C', 'window_decoding_global_windowdecoding_D'
         ]
         
-        # Create abbreviations
+        # Create abbreviations for new 120 markers
         abbreviated_names = []
         for name in marker_names:
-            if name.startswith('PowerSpectralDensity_'):
-                abbrev = name.replace('PowerSpectralDensity_', 'PSD_')
-            elif name.startswith('PowerSpectralDensitySummary_'):
-                abbrev = name.replace('PowerSpectralDensitySummary_', 'PSD_Sum_')
-            elif name.startswith('TimeLockedContrast_'):
-                abbrev = name.replace('TimeLockedContrast_', 'TLC_')
-            elif name.startswith('TimeLockedTopography_'):
-                abbrev = name.replace('TimeLockedTopography_', 'TLT_')
-            elif name.startswith('ContingentNegativeVariation'):
-                abbrev = 'CNV'
-            elif name.startswith('PermutationEntropy'):
-                abbrev = 'PE'
-            elif name.startswith('SymbolicMutualInformation'):
-                abbrev = 'SMI'
-            elif name.startswith('KolmogorovComplexity'):
-                abbrev = 'KC'
+            # Create abbreviations for the new marker structure
+            if name.startswith('delta_power_spectralpower_'):
+                abbrev = name.replace('delta_power_spectralpower_', 'δPSD_')
+            elif name.startswith('theta_power_spectralpower_'):
+                abbrev = name.replace('theta_power_spectralpower_', 'θPSD_')
+            elif name.startswith('alpha_power_spectralpower_'):
+                abbrev = name.replace('alpha_power_spectralpower_', 'αPSD_')
+            elif name.startswith('beta_power_spectralpower_'):
+                abbrev = name.replace('beta_power_spectralpower_', 'βPSD_')
+            elif name.startswith('gamma_power_spectralpower_'):
+                abbrev = name.replace('gamma_power_spectralpower_', 'γPSD_')
+            elif name.startswith('delta_relative_spectralpower_'):
+                abbrev = name.replace('delta_relative_spectralpower_', 'δRelPSD_')
+            elif name.startswith('theta_relative_spectralpower_'):
+                abbrev = name.replace('theta_relative_spectralpower_', 'θRelPSD_')
+            elif name.startswith('alpha_relative_spectralpower_'):
+                abbrev = name.replace('alpha_relative_spectralpower_', 'αRelPSD_')
+            elif name.startswith('beta_relative_spectralpower_'):
+                abbrev = name.replace('beta_relative_spectralpower_', 'βRelPSD_')
+            elif name.startswith('gamma_relative_spectralpower_'):
+                abbrev = name.replace('gamma_relative_spectralpower_', 'γRelPSD_')
+            elif name.startswith('spectral_entropy_spectralpower_'):
+                abbrev = name.replace('spectral_entropy_spectralpower_', 'SEnt_')
+            elif name.startswith('msf_psdsummary_'):
+                abbrev = name.replace('msf_psdsummary_', 'MSF_')
+            elif name.startswith('sef90_psdsummary_'):
+                abbrev = name.replace('sef90_psdsummary_', 'SEF90_')
+            elif name.startswith('sef95_psdsummary_'):
+                abbrev = name.replace('sef95_psdsummary_', 'SEF95_')
+            elif name.startswith('pe_theta_permutationentropy_'):
+                abbrev = name.replace('pe_theta_permutationentropy_', 'PEθ_')
+            elif name.startswith('wsmi_theta_symbolicmutualinformation_'):
+                abbrev = name.replace('wsmi_theta_symbolicmutualinformation_', 'WSMIθ_')
+            elif name.startswith('kolmogorov_complexity_kolmogorovcomplexity_'):
+                abbrev = name.replace('kolmogorov_complexity_kolmogorovcomplexity_', 'KC_')
+            elif name.startswith('cnv_detailed_cnvslope_'):
+                abbrev = name.replace('cnv_detailed_cnvslope_', 'CNV_')
+            elif name.startswith('p1_topography_timelockedtopo_'):
+                abbrev = name.replace('p1_topography_timelockedtopo_', 'P1_')
+            elif name.startswith('p3a_topography_timelockedtopo_'):
+                abbrev = name.replace('p3a_topography_timelockedtopo_', 'P3a_')
+            elif name.startswith('p3b_topography_timelockedtopo_'):
+                abbrev = name.replace('p3b_topography_timelockedtopo_', 'P3b_')
+            elif name.startswith('timelockedcontrast_lsgs_ldgd_timelockedcontrast_'):
+                abbrev = name.replace('timelockedcontrast_lsgs_ldgd_timelockedcontrast_', 'TLC_LSGS_LDGD_')
+            elif name.startswith('timelockedcontrast_lsgd_ldgs_timelockedcontrast_'):
+                abbrev = name.replace('timelockedcontrast_lsgd_ldgs_timelockedcontrast_', 'TLC_LSGD_LDGS_')
+            elif name.startswith('timelockedcontrast_ld_ls_timelockedcontrast_'):
+                abbrev = name.replace('timelockedcontrast_ld_ls_timelockedcontrast_', 'TLC_LD_LS_')
+            elif name.startswith('timelockedcontrast_mmn_timelockedcontrast_'):
+                abbrev = name.replace('timelockedcontrast_mmn_timelockedcontrast_', 'TLC_MMN_')
+            elif name.startswith('timelockedcontrast_p3a_timelockedcontrast_'):
+                abbrev = name.replace('timelockedcontrast_p3a_timelockedcontrast_', 'TLC_P3a_')
+            elif name.startswith('timelockedcontrast_gd_gs_timelockedcontrast_'):
+                abbrev = name.replace('timelockedcontrast_gd_gs_timelockedcontrast_', 'TLC_GD_GS_')
+            elif name.startswith('timelockedcontrast_p3b_timelockedcontrast_'):
+                abbrev = name.replace('timelockedcontrast_p3b_timelockedcontrast_', 'TLC_P3b_')
+            elif name.startswith('window_decoding_local_windowdecoding_'):
+                abbrev = name.replace('window_decoding_local_windowdecoding_', 'WinDecLoc_')
+            elif name.startswith('window_decoding_global_windowdecoding_'):
+                abbrev = name.replace('window_decoding_global_windowdecoding_', 'WinDecGlob_')
             else:
                 abbrev = name
             abbreviated_names.append(abbrev)
@@ -474,6 +521,7 @@ class CrossSubjectClassifier:
         
         subjects_processed = 0
         subjects_skipped = 0
+        discarded_subjects = []  # Track subjects discarded due to missing markers
         
         for subject_dir in sorted(subject_dirs):
             subject_path = op.join(self.data_dir, subject_dir)
@@ -499,7 +547,7 @@ class CrossSubjectClassifier:
                 
                 # Look for .npz file directly in this directory
                 # The file might be named with the numeric ID
-                npz_filename = f"scalars_{subject_id_raw}_{parts[1]}.npz"
+                npz_filename = f"scalars_sub-{subject_id_raw}_ses-{parts[1]}.npz"
                 npz_path = op.join(subject_path, npz_filename)
                 
                 # For label lookup, we need to match the subject ID format in patient_labels.csv
@@ -510,6 +558,7 @@ class CrossSubjectClassifier:
                 # Check if we have labels for this subject
                 if subject_session_key not in labels_dict:
                     print(f"    Skipping {subject_session_key}: no label found")
+                    print(f'npz_filename {npz_filename} and npz_path {npz_path}')
                     subjects_skipped += 1
                     continue
                 
@@ -1531,57 +1580,104 @@ class CrossDataClassifier:
         tuple
             (full_names, abbreviated_names)
         """
-        # Standard marker names in NICE collection order
+        # Updated marker names - 120 markers with A/B/C/D variants
         marker_names = [
-            'PowerSpectralDensity_delta',
-            'PowerSpectralDensity_deltan',
-            'PowerSpectralDensity_theta',
-            'PowerSpectralDensity_thetan',
-            'PowerSpectralDensity_alpha',
-            'PowerSpectralDensity_alphan',
-            'PowerSpectralDensity_beta',
-            'PowerSpectralDensity_betan',
-            'PowerSpectralDensity_gamma',
-            'PowerSpectralDensity_gamman',
-            'PowerSpectralDensity_summary_se',
-            'PowerSpectralDensitySummary_summary_msf',
-            'PowerSpectralDensitySummary_summary_sef90',
-            'PowerSpectralDensitySummary_summary_sef95',
-            'PermutationEntropy_default',
-            'SymbolicMutualInformation_weighted',
-            'KolmogorovComplexity_default',
-            'ContingentNegativeVariation_default',
-            'TimeLockedTopography_p1',
-            'TimeLockedTopography_p3a',
-            'TimeLockedTopography_p3b',
-            'TimeLockedContrast_LSGS-LDGD',
-            'TimeLockedContrast_LSGD-LDGS',
-            'TimeLockedContrast_LD-LS',
-            'TimeLockedContrast_mmn',
-            'TimeLockedContrast_p3a',
-            'TimeLockedContrast_GD-GS',
-            'TimeLockedContrast_p3b'
+            'delta_power_spectralpower_A', # 'delta_power_spectralpower_B', 'delta_power_spectralpower_C', 'delta_power_spectralpower_D',
+            'theta_power_spectralpower_A', # 'theta_power_spectralpower_B', 'theta_power_spectralpower_C', 'theta_power_spectralpower_D',
+            'alpha_power_spectralpower_A', # 'alpha_power_spectralpower_B', 'alpha_power_spectralpower_C', 'alpha_power_spectralpower_D',
+            'beta_power_spectralpower_A', # 'beta_power_spectralpower_B', 'beta_power_spectralpower_C', 'beta_power_spectralpower_D',
+            'gamma_power_spectralpower_A', # 'gamma_power_spectralpower_B', 'gamma_power_spectralpower_C', 'gamma_power_spectralpower_D',
+            'delta_relative_spectralpower_A', # 'delta_relative_spectralpower_B', 'delta_relative_spectralpower_C', 'delta_relative_spectralpower_D',
+            'theta_relative_spectralpower_A', # 'theta_relative_spectralpower_B', 'theta_relative_spectralpower_C', 'theta_relative_spectralpower_D',
+            'alpha_relative_spectralpower_A', # 'alpha_relative_spectralpower_B', 'alpha_relative_spectralpower_C', 'alpha_relative_spectralpower_D',
+            'beta_relative_spectralpower_A', # 'beta_relative_spectralpower_B', 'beta_relative_spectralpower_C', 'beta_relative_spectralpower_D',
+            'gamma_relative_spectralpower_A', # 'gamma_relative_spectralpower_B', 'gamma_relative_spectralpower_C', 'gamma_relative_spectralpower_D',
+            'spectral_entropy_spectralpower_A', # 'spectral_entropy_spectralpower_B', 'spectral_entropy_spectralpower_C', 'spectral_entropy_spectralpower_D',
+            'msf_psdsummary_A', # 'msf_psdsummary_B', 'msf_psdsummary_C', 'msf_psdsummary_D',
+            'sef90_psdsummary_A', # 'sef90_psdsummary_B', 'sef90_psdsummary_C', 'sef90_psdsummary_D',
+            'sef95_psdsummary_A', # 'sef95_psdsummary_B', 'sef95_psdsummary_C', 'sef95_psdsummary_D',
+            'pe_theta_permutationentropy_A', # 'pe_theta_permutationentropy_B', 'pe_theta_permutationentropy_C', 'pe_theta_permutationentropy_D',
+            'wsmi_theta_symbolicmutualinformation_A', # 'wsmi_theta_symbolicmutualinformation_B', 'wsmi_theta_symbolicmutualinformation_C', 'wsmi_theta_symbolicmutualinformation_D',
+            'kolmogorov_complexity_kolmogorovcomplexity_A', # 'kolmogorov_complexity_kolmogorovcomplexity_B', 'kolmogorov_complexity_kolmogorovcomplexity_C', 'kolmogorov_complexity_kolmogorovcomplexity_D',
+            'cnv_detailed_cnvslope_A', # 'cnv_detailed_cnvslope_B', 'cnv_detailed_cnvslope_C', 'cnv_detailed_cnvslope_D',
+            'p1_topography_timelockedtopo_A', # 'p1_topography_timelockedtopo_B', 'p1_topography_timelockedtopo_C', 'p1_topography_timelockedtopo_D',
+            'p3a_topography_timelockedtopo_A', # 'p3a_topography_timelockedtopo_B', 'p3a_topography_timelockedtopo_C', 'p3a_topography_timelockedtopo_D',
+            'p3b_topography_timelockedtopo_A', # 'p3b_topography_timelockedtopo_B', 'p3b_topography_timelockedtopo_C', 'p3b_topography_timelockedtopo_D',
+            'timelockedcontrast_lsgs_ldgd_timelockedcontrast_A', # 'timelockedcontrast_lsgs_ldgd_timelockedcontrast_B', 'timelockedcontrast_lsgs_ldgd_timelockedcontrast_C', 'timelockedcontrast_lsgs_ldgd_timelockedcontrast_D',
+            'timelockedcontrast_lsgd_ldgs_timelockedcontrast_A', # 'timelockedcontrast_lsgd_ldgs_timelockedcontrast_B', 'timelockedcontrast_lsgd_ldgs_timelockedcontrast_C', 'timelockedcontrast_lsgd_ldgs_timelockedcontrast_D',
+            'timelockedcontrast_ld_ls_timelockedcontrast_A', # 'timelockedcontrast_ld_ls_timelockedcontrast_B', 'timelockedcontrast_ld_ls_timelockedcontrast_C', 'timelockedcontrast_ld_ls_timelockedcontrast_D',
+            'timelockedcontrast_mmn_timelockedcontrast_A', # 'timelockedcontrast_mmn_timelockedcontrast_B', 'timelockedcontrast_mmn_timelockedcontrast_C', 'timelockedcontrast_mmn_timelockedcontrast_D',
+            'timelockedcontrast_p3a_timelockedcontrast_A', # 'timelockedcontrast_p3a_timelockedcontrast_B', 'timelockedcontrast_p3a_timelockedcontrast_C', 'timelockedcontrast_p3a_timelockedcontrast_D',
+            'timelockedcontrast_gd_gs_timelockedcontrast_A', # 'timelockedcontrast_gd_gs_timelockedcontrast_B', 'timelockedcontrast_gd_gs_timelockedcontrast_C', 'timelockedcontrast_gd_gs_timelockedcontrast_D',
+            'timelockedcontrast_p3b_timelockedcontrast_A', # 'timelockedcontrast_p3b_timelockedcontrast_B', 'timelockedcontrast_p3b_timelockedcontrast_C', 'timelockedcontrast_p3b_timelockedcontrast_D',
+            'window_decoding_local_windowdecoding_A', # 'window_decoding_local_windowdecoding_B', 'window_decoding_local_windowdecoding_C', 'window_decoding_local_windowdecoding_D',
+            'window_decoding_global_windowdecoding_A' # 'window_decoding_global_windowdecoding_B', 'window_decoding_global_windowdecoding_C', 'window_decoding_global_windowdecoding_D'
         ]
         
-        # Create abbreviations
+        # Create abbreviations for new 120 markers
         abbreviated_names = []
         for name in marker_names:
-            if name.startswith('PowerSpectralDensity_'):
-                abbrev = name.replace('PowerSpectralDensity_', 'PSD_')
-            elif name.startswith('PowerSpectralDensitySummary_'):
-                abbrev = name.replace('PowerSpectralDensitySummary_', 'PSD_Sum_')
-            elif name.startswith('TimeLockedContrast_'):
-                abbrev = name.replace('TimeLockedContrast_', 'TLC_')
-            elif name.startswith('TimeLockedTopography_'):
-                abbrev = name.replace('TimeLockedTopography_', 'TLT_')
-            elif name.startswith('ContingentNegativeVariation'):
-                abbrev = 'CNV'
-            elif name.startswith('PermutationEntropy'):
-                abbrev = 'PE'
-            elif name.startswith('SymbolicMutualInformation'):
-                abbrev = 'SMI'
-            elif name.startswith('KolmogorovComplexity'):
-                abbrev = 'KC'
+            # Create abbreviations for the new marker structure
+            if name.startswith('delta_power_spectralpower_'):
+                abbrev = name.replace('delta_power_spectralpower_', 'δPSD_')
+            elif name.startswith('theta_power_spectralpower_'):
+                abbrev = name.replace('theta_power_spectralpower_', 'θPSD_')
+            elif name.startswith('alpha_power_spectralpower_'):
+                abbrev = name.replace('alpha_power_spectralpower_', 'αPSD_')
+            elif name.startswith('beta_power_spectralpower_'):
+                abbrev = name.replace('beta_power_spectralpower_', 'βPSD_')
+            elif name.startswith('gamma_power_spectralpower_'):
+                abbrev = name.replace('gamma_power_spectralpower_', 'γPSD_')
+            elif name.startswith('delta_relative_spectralpower_'):
+                abbrev = name.replace('delta_relative_spectralpower_', 'δRelPSD_')
+            elif name.startswith('theta_relative_spectralpower_'):
+                abbrev = name.replace('theta_relative_spectralpower_', 'θRelPSD_')
+            elif name.startswith('alpha_relative_spectralpower_'):
+                abbrev = name.replace('alpha_relative_spectralpower_', 'αRelPSD_')
+            elif name.startswith('beta_relative_spectralpower_'):
+                abbrev = name.replace('beta_relative_spectralpower_', 'βRelPSD_')
+            elif name.startswith('gamma_relative_spectralpower_'):
+                abbrev = name.replace('gamma_relative_spectralpower_', 'γRelPSD_')
+            elif name.startswith('spectral_entropy_spectralpower_'):
+                abbrev = name.replace('spectral_entropy_spectralpower_', 'SEnt_')
+            elif name.startswith('msf_psdsummary_'):
+                abbrev = name.replace('msf_psdsummary_', 'MSF_')
+            elif name.startswith('sef90_psdsummary_'):
+                abbrev = name.replace('sef90_psdsummary_', 'SEF90_')
+            elif name.startswith('sef95_psdsummary_'):
+                abbrev = name.replace('sef95_psdsummary_', 'SEF95_')
+            elif name.startswith('pe_theta_permutationentropy_'):
+                abbrev = name.replace('pe_theta_permutationentropy_', 'PEθ_')
+            elif name.startswith('wsmi_theta_symbolicmutualinformation_'):
+                abbrev = name.replace('wsmi_theta_symbolicmutualinformation_', 'WSMIθ_')
+            elif name.startswith('kolmogorov_complexity_kolmogorovcomplexity_'):
+                abbrev = name.replace('kolmogorov_complexity_kolmogorovcomplexity_', 'KC_')
+            elif name.startswith('cnv_detailed_cnvslope_'):
+                abbrev = name.replace('cnv_detailed_cnvslope_', 'CNV_')
+            elif name.startswith('p1_topography_timelockedtopo_'):
+                abbrev = name.replace('p1_topography_timelockedtopo_', 'P1_')
+            elif name.startswith('p3a_topography_timelockedtopo_'):
+                abbrev = name.replace('p3a_topography_timelockedtopo_', 'P3a_')
+            elif name.startswith('p3b_topography_timelockedtopo_'):
+                abbrev = name.replace('p3b_topography_timelockedtopo_', 'P3b_')
+            elif name.startswith('timelockedcontrast_lsgs_ldgd_timelockedcontrast_'):
+                abbrev = name.replace('timelockedcontrast_lsgs_ldgd_timelockedcontrast_', 'TLC_LSGS_LDGD_')
+            elif name.startswith('timelockedcontrast_lsgd_ldgs_timelockedcontrast_'):
+                abbrev = name.replace('timelockedcontrast_lsgd_ldgs_timelockedcontrast_', 'TLC_LSGD_LDGS_')
+            elif name.startswith('timelockedcontrast_ld_ls_timelockedcontrast_'):
+                abbrev = name.replace('timelockedcontrast_ld_ls_timelockedcontrast_', 'TLC_LD_LS_')
+            elif name.startswith('timelockedcontrast_mmn_timelockedcontrast_'):
+                abbrev = name.replace('timelockedcontrast_mmn_timelockedcontrast_', 'TLC_MMN_')
+            elif name.startswith('timelockedcontrast_p3a_timelockedcontrast_'):
+                abbrev = name.replace('timelockedcontrast_p3a_timelockedcontrast_', 'TLC_P3a_')
+            elif name.startswith('timelockedcontrast_gd_gs_timelockedcontrast_'):
+                abbrev = name.replace('timelockedcontrast_gd_gs_timelockedcontrast_', 'TLC_GD_GS_')
+            elif name.startswith('timelockedcontrast_p3b_timelockedcontrast_'):
+                abbrev = name.replace('timelockedcontrast_p3b_timelockedcontrast_', 'TLC_P3b_')
+            elif name.startswith('window_decoding_local_windowdecoding_'):
+                abbrev = name.replace('window_decoding_local_windowdecoding_', 'WinDecLoc_')
+            elif name.startswith('window_decoding_global_windowdecoding_'):
+                abbrev = name.replace('window_decoding_global_windowdecoding_', 'WinDecGlob_')
             else:
                 abbrev = name
             abbreviated_names.append(abbrev)
@@ -1739,13 +1835,17 @@ class CrossDataClassifier:
             print(f"   ✓ Using {len(marker_names)} standard topo marker names (will be expanded per channel)")
             return marker_names, abbreviated_names
     
-    def load_subject_data_both(self, subject_session_path):
+    def load_subject_data_both(self, subject_session_path, orig_filepath=None, recon_filepath=None):
         """Load both original and reconstructed marker data for a single subject/session.
         
         Parameters
         ----------
         subject_session_path : str
             Path to subject/session directory
+        orig_filepath : str, optional
+            Explicit path to original data file (for new directory structure)
+        recon_filepath : str, optional
+            Explicit path to reconstructed data file (for new directory structure)
             
         Returns
         -------
@@ -1753,6 +1853,84 @@ class CrossDataClassifier:
             (original_data, reconstructed_data) or (None, None) if loading failed
         """
         
+        # If explicit file paths are provided (new directory structure), use them directly
+        if orig_filepath is not None and recon_filepath is not None:
+            # Check if both files exist
+            if not op.exists(orig_filepath):
+                print(f"    Missing original file: {orig_filepath}")
+                return None, None
+            
+            if not op.exists(recon_filepath):
+                print(f"    Missing reconstructed file: {recon_filepath}")
+                return None, None
+            
+            try:
+                # Get marker names to filter
+                marker_names, _ = self.get_marker_names()
+                
+                # Load data from explicit file paths with filtering
+                def _load_array_filtered(path, marker_names):
+                    if path.endswith('.npz'):
+                        data_dict = np.load(path)
+                        keys = list(data_dict.keys())
+                        if not keys:
+                            raise ValueError(f"No arrays stored in {path}")
+                        
+                        # If a single array is stored, we can't filter individual markers
+                        # This might be pre-flattened data - warn and return as-is
+                        if len(keys) == 1:
+                            print(f"    Warning: Single array found in {path}, cannot filter individual markers")
+                            return data_dict[keys[0]], None, []  # Return 3-tuple for consistency
+                        
+                        # Filter and order data according to marker_names
+                        filtered_values = []
+                        missing_markers = []
+                        
+                        for marker_name in marker_names:
+                            if marker_name in data_dict:
+                                filtered_values.append(float(data_dict[marker_name]))
+                            else:
+                                missing_markers.append(marker_name)
+                        
+                        # Skip subject if any markers are missing
+                        if missing_markers:
+                            print(f"    Skipping {path}: missing {len(missing_markers)} markers: {missing_markers[:5]}{'...' if len(missing_markers) > 5 else ''}")
+                            return None, None, missing_markers  # Return missing markers for logging
+                        
+                        return np.array(filtered_values), None, []  # Return data, None for missing, empty missing list
+                    else:
+                        return np.load(path), None, []  # Return 3-tuple for consistency
+
+                data_orig_result = _load_array_filtered(orig_filepath, marker_names)
+                data_recon_result = _load_array_filtered(recon_filepath, marker_names)
+                
+                # Check if either file had missing markers
+                if data_orig_result[0] is None or data_recon_result[0] is None:
+                    missing_orig = data_orig_result[2] if len(data_orig_result) > 2 else []
+                    missing_recon = data_recon_result[2] if len(data_recon_result) > 2 else []
+                    all_missing = list(set(missing_orig + missing_recon))
+                    return None, None, all_missing
+                
+                data_orig = data_orig_result[0]
+                data_recon = data_recon_result[0]
+
+                # Flatten data based on marker type
+                if self.marker_type == 'scalar':
+                    # Scalar data: (n_markers,) -> flatten to 1D
+                    data_orig = data_orig.flatten()
+                    data_recon = data_recon.flatten()
+                elif self.marker_type == 'topo':
+                    # Topographic data: (n_markers, n_channels) -> flatten to 1D
+                    data_orig = data_orig.flatten()
+                    data_recon = data_recon.flatten()
+
+                return data_orig, data_recon, []  # Return 3-tuple for consistency (no missing markers)
+
+            except Exception as e:
+                print(f"   Error loading data from explicit paths: {e}")
+                return None, None, []  # Return 3-tuple for consistency
+        
+        # Original logic for backward compatibility (when explicit paths not provided)
         # Extract subject and session identifiers from path
         subject_dir = op.basename(op.dirname(subject_session_path))  # e.g. "sub-001"
         session_dir = op.basename(subject_session_path)              # e.g. "ses-01"
@@ -1806,23 +1984,54 @@ class CrossDataClassifier:
             return None, None
 
         try:
-            # Load original and reconstructed data (.npz or .npy)
-            def _load_array(path):
+            # Get marker names to filter for consistency
+            marker_names, _ = self.get_marker_names()
+            
+            # Load original and reconstructed data (.npz or .npy) with filtering
+            def _load_array_filtered(path, marker_names):
                 if path.endswith('.npz'):
                     data_dict = np.load(path)
                     keys = list(data_dict.keys())
                     if not keys:
                         raise ValueError(f"No arrays stored in {path}")
-                    # If a single array is stored, use it; otherwise
-                    # collect all scalar values into a single vector
+                    
+                    # If a single array is stored, we can't filter individual markers
+                    # This might be pre-flattened data - warn and return as-is
                     if len(keys) == 1:
+                        print(f"    Warning: Single array found in {path}, cannot filter individual markers")
                         return data_dict[keys[0]]
-                    return np.array([float(data_dict[k]) for k in keys])
+                    
+                    # Filter and order data according to marker_names
+                    filtered_values = []
+                    missing_markers = []
+                    
+                    for marker_name in marker_names:
+                        if marker_name in data_dict:
+                            filtered_values.append(float(data_dict[marker_name]))
+                        else:
+                            missing_markers.append(marker_name)
+                    
+                    # Skip subject if any markers are missing
+                    if missing_markers:
+                        print(f"    Skipping {path}: missing {len(missing_markers)} markers: {missing_markers[:5]}{'...' if len(missing_markers) > 5 else ''}")
+                        return None, None, missing_markers  # Return missing markers for logging
+                    
+                    return np.array(filtered_values), None, []  # Return data, None for missing, empty missing list
                 else:
                     return np.load(path)
 
-            data_orig = _load_array(filepath_orig)
-            data_recon = _load_array(filepath_recon)
+            data_orig_result = _load_array_filtered(filepath_orig, marker_names)
+            data_recon_result = _load_array_filtered(filepath_recon, marker_names)
+            
+            # Check if either file had missing markers
+            if data_orig_result[0] is None or data_recon_result[0] is None:
+                missing_orig = data_orig_result[2] if len(data_orig_result) > 2 else []
+                missing_recon = data_recon_result[2] if len(data_recon_result) > 2 else []
+                all_missing = list(set(missing_orig + missing_recon))
+                return None, None, all_missing
+            
+            data_orig = data_orig_result[0]
+            data_recon = data_recon_result[0]
 
             # Flatten data based on marker type
             if self.marker_type == 'scalar':
@@ -1834,11 +2043,11 @@ class CrossDataClassifier:
                 data_orig = data_orig.flatten()
                 data_recon = data_recon.flatten()
 
-            return data_orig, data_recon
+            return data_orig, data_recon, []  # Return 3-tuple for consistency (no missing markers)
 
         except Exception as e:
             print(f"   Error loading data from {subject_session_path}: {e}")
-            return None, None
+            return None, None, []  # Return 3-tuple for consistency
     
     def collect_data(self):
         """Collect both original and reconstructed data from all available subjects."""
@@ -1870,6 +2079,7 @@ class CrossDataClassifier:
         
         subjects_processed = 0
         subjects_skipped = 0
+        discarded_subjects = []  # Track subjects discarded due to missing markers
         
         for subject_dir in sorted(subject_dirs):
             subject_path = op.join(self.data_dir, subject_dir)
@@ -1877,64 +2087,92 @@ class CrossDataClassifier:
             if not op.isdir(subject_path):
                 continue
             
-            # NEW: Check if this is the new structure (sub-XXX_original or sub-XXX_recon)
-            # Format: sub-001_original or sub-001_recon
-            if '_' in subject_dir and (subject_dir.endswith('_original') or subject_dir.endswith('_recon')):
-                # New structure: data is directly in this directory
-                parts = subject_dir.rsplit('_', 1)
-                subject_id_raw = parts[0].replace('sub-', '')  # e.g., "001"
-                data_type = parts[1]  # 'original' or 'recon'
+            # NEW: Handle the new directory structure (sub-{ID}/ses-{NUM}/orig/ and sub-{ID}/ses-{NUM}/recon/)
+            # Format: sub-001/ses-01/orig/scalars_sub-001_ses-01.npz and sub-001/ses-01/recon/scalars_sub-001_ses-01.npz
+            if subject_dir.startswith('sub-') and '_' not in subject_dir:
+                # New structure: need to navigate through session directories
+                subject_id_raw = subject_dir.replace('sub-', '')  # e.g., "001"
                 
-                # Only process if data_type matches our data_origin
-                # Map 'recon' to 'reconstructed' for compatibility
-                if data_type == 'recon':
-                    data_type = 'reconstructed'
-                
-                if data_type != self.data_origin:
+                # Look for session directories
+                try:
+                    session_dirs = [d for d in os.listdir(subject_path) if d.startswith('ses-')]
+                except PermissionError:
+                    print(f"   Permission denied accessing {subject_path}")
                     continue
                 
-                # Look for .npz file directly in this directory
-                # The file might be named with the numeric ID
-                npz_filename = f"scalars_{subject_id_raw}_{parts[1]}.npz"
-                npz_path = op.join(subject_path, npz_filename)
-                
-                # For label lookup, we need to match the subject ID format in patient_labels.csv
-                # The numeric ID might map to a different format (e.g., "001" -> "AA048")
-                # Try both numeric format and with ses-01
-                subject_session_key = f"{subject_id_raw}_ses-01"
-                
-                # Check if we have labels for this subject
-                if subject_session_key not in labels_dict:
-                    print(f"    Skipping {subject_session_key}: no label found")
-                    subjects_skipped += 1
-                    continue
-                
-                # Load marker data from .npz file
-                if not op.exists(npz_path):
-                    print(f"    Missing {npz_filename} in {subject_path}")
-                    subjects_skipped += 1
-                    continue
-                
-                marker_data = self.load_subject_data(npz_path)
-                
-                if marker_data is None:
-                    print(f"   ⏭️  Skipping {subject_session_key}: failed to load data")
-                    subjects_skipped += 1
-                    continue
-                
-                # For CrossDataClassifier, we need both original and reconstructed data
-                # This new structure separates them, so we need to handle this differently
-                # For now, store the data and we'll pair them later
-                if not hasattr(self, '_temp_data_storage'):
-                    self._temp_data_storage = {}
-                
-                self._temp_data_storage[subject_session_key] = {
-                    'data': marker_data,
-                    'data_type': data_type
-                }
-                
-                print(f"   ✓ Loaded {subject_session_key}: {marker_data.shape} features ({data_type}), state={labels_dict[subject_session_key]}")
-                subjects_processed += 1
+                for session_dir in sorted(session_dirs):
+                    session_path = op.join(subject_path, session_dir)
+                    
+                    if not op.isdir(session_path):
+                        continue
+                    
+                    # Build paths for both orig and recon .npz files
+                    orig_dir = op.join(session_path, 'orig')
+                    recon_dir = op.join(session_path, 'recon')
+                    
+                    # Check if both orig and recon directories exist
+                    if not op.isdir(orig_dir) or not op.isdir(recon_dir):
+                        continue
+                    
+                    # Build .npz file paths
+                    orig_filename = f"scalars_sub-{subject_id_raw}_{session_dir}.npz"
+                    recon_filename = f"scalars_sub-{subject_id_raw}_{session_dir}.npz"
+                    
+                    orig_filepath = op.join(orig_dir, orig_filename)
+                    recon_filepath = op.join(recon_dir, recon_filename)
+                    
+                    # Check if both .npz files exist (handle empty folders gracefully)
+                    if not op.exists(orig_filepath):
+                        print(f"    Missing {orig_filename} in {orig_dir}")
+                        continue
+                    
+                    if not op.exists(recon_filepath):
+                        print(f"    Missing {recon_filename} in {recon_dir}")
+                        continue
+                    
+                    # For label lookup, use subject_session format
+                    subject_session_key = f"{subject_id_raw}_{session_dir}"
+                    
+                    # Check if we have labels for this subject/session
+                    if subject_session_key not in labels_dict:
+                        print(f"    Skipping {subject_session_key}: no label found")
+                        subjects_skipped += 1
+                        continue
+                    
+                    # Load both original and reconstructed marker data
+                    marker_data_orig, marker_data_recon, missing_markers = self.load_subject_data_both(session_path, orig_filepath, recon_filepath)
+                    
+                    if marker_data_orig is None or marker_data_recon is None:
+                        print(f"   ⏭️  Skipping {subject_session_key}: failed to load both data types")
+                        discarded_subjects.append(subject_session_key)
+                        subjects_skipped += 1
+                        continue
+                    
+                    # Validate shape consistency
+                    if len(subject_data_orig) > 0:
+                        expected_shape_orig = subject_data_orig[0].shape
+                        expected_shape_recon = subject_data_recon[0].shape
+                        
+                        if marker_data_orig.shape != expected_shape_orig:
+                            print(f"   ⚠️  Skipping {subject_session_key}: shape mismatch")
+                            print(f"       Expected orig: {expected_shape_orig}, got: {marker_data_orig.shape}")
+                            subjects_skipped += 1
+                            continue
+                        
+                        if marker_data_recon.shape != expected_shape_recon:
+                            print(f"   ⚠️  Skipping {subject_session_key}: shape mismatch")
+                            print(f"       Expected recon: {expected_shape_recon}, got: {marker_data_recon.shape}")
+                            subjects_skipped += 1
+                            continue
+                    
+                    # Store data
+                    subject_data_orig.append(marker_data_orig)
+                    subject_data_recon.append(marker_data_recon)
+                    subject_labels.append(labels_dict[subject_session_key])
+                    collected_subjects.append(subject_session_key)
+                    subjects_processed += 1
+                    
+                    print(f"   ✓ Loaded {subject_session_key}: orig={marker_data_orig.shape}, recon={marker_data_recon.shape}, state={labels_dict[subject_session_key]}")
                 
             else:
                 # OLD structure: sub-XXX/ses-YY/orig/recon
@@ -1962,10 +2200,11 @@ class CrossDataClassifier:
                         continue
                     
                     # Load both original and reconstructed marker data
-                    marker_data_orig, marker_data_recon = self.load_subject_data_both(session_path)
+                    marker_data_orig, marker_data_recon, missing_markers = self.load_subject_data_both(session_path)
                     
                     if marker_data_orig is None or marker_data_recon is None:
                         print(f"   ⏭️  Skipping {subject_session_key}: failed to load both data types")
+                        discarded_subjects.append(subject_session_key)
                         subjects_skipped += 1
                         continue
                     
@@ -2047,6 +2286,12 @@ class CrossDataClassifier:
             
             # Clean up temporary storage
             delattr(self, '_temp_data_storage')
+        
+        # Print discarded subjects if any
+        if discarded_subjects:
+            print(f"\n⚠️  Discarded {len(discarded_subjects)} subjects due to missing markers:")
+            for subject in discarded_subjects:
+                print(f"    - {subject}")
         
         print("\n📊 DATA COLLECTION SUMMARY:")
         print(f"    Successfully loaded: {subjects_processed} subject/sessions")
@@ -3799,23 +4044,23 @@ def main():
     parser = argparse.ArgumentParser(
         description='Cross-subject binary SVM classification for VS vs MCS consciousness states'
     )
-    parser.add_argument('--data-dir', required=True,
+    parser.add_argument('--data-dir', default = '/data/project/eeg_foundation/src/doc_benchmark/results/new_results/MARKERS/computed_data',
                        help='Path to results directory containing subject data')
-    parser.add_argument('--patient-labels', required=True,
+    parser.add_argument('--patient-labels', default = '/data/project/eeg_foundation/data/metadata/patient_labels_with_controls.csv',
                        help='Path to CSV file with patient labels')
     parser.add_argument('--marker-type', choices=['scalar', 'topo'], default='scalar',
                        help='Type of markers to use (scalar or topo)')
-    parser.add_argument('--output-dir', 
+    parser.add_argument('--output-dir', default = '/data/project/eeg_foundation/src/doc_benchmark/results/new_results/MODEL/svm',
                        help='Output directory for results (default: results/svm/{marker_type})')
     parser.add_argument('--cv-strategy', choices=['stratified', 'loo'], default='stratified',
                        help='Cross-validation strategy')
-    parser.add_argument('--n-splits', type=int, default=2,
+    parser.add_argument('--n-splits', type=int, default=6,
                        help='Number of CV splits (ignored for LOO)')
     parser.add_argument('--random-state', type=int, default=42,
                        help='Random state for reproducibility')
     parser.add_argument('--test-size', type=float, default=0.2,
                        help='Fraction of data to hold out for testing (default: 0.2)')
-    parser.add_argument('--cross-data', action='store_true',
+    parser.add_argument('--cross-data', action='store_true', default=True, 
                        help='Run cross-data classification (train on both original and reconstructed, test on both)')
     
     args = parser.parse_args()
