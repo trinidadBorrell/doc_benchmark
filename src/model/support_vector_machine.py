@@ -16,7 +16,7 @@ Key features:
 - Support for scalar or topographic markers
 - Support for original or reconstructed data
 - State prediction from patient_labels_with_controls.csv
-- Comprehensive evaluation with proper cross-validation using GroupKFold
+- Comprehensive evaluation with proper cross-validation using StratifiedGroupKFold
 
 Based on the DOC-Forest recipe from:
 [1] Engemann D.A.`*, Raimondo F.`*, King JR., Rohaut B., Louppe G.,
@@ -43,7 +43,7 @@ warnings.filterwarnings('ignore')
 from sklearn.preprocessing import RobustScaler, StandardScaler, LabelEncoder
 from sklearn.model_selection import (cross_val_score, GridSearchCV,
                                    StratifiedKFold, LeaveOneOut, train_test_split,
-                                   GroupShuffleSplit, GroupKFold)
+                                   GroupShuffleSplit, GroupKFold, StratifiedGroupKFold)
 from sklearn.svm import SVC
 from sklearn.pipeline import make_pipeline
 from sklearn.metrics import (classification_report, confusion_matrix, 
@@ -122,7 +122,7 @@ class CrossSubjectClassifier:
             for _, row in df.iterrows():
                 subject = row['subject']
                 session = f"ses-{row['session']:02d}"
-                state = row['state']
+                state = row['diagnostic_crs_final']
                 
                 # Skip subjects with missing state
                 if pd.isna(state) or state == 'n/a':
@@ -741,7 +741,7 @@ class CrossSubjectClassifier:
         )
         return pipeline
     
-    def evaluate_model(self, pipeline, cv_strategy='stratified', n_splits=5, test_size=0.2):
+    def evaluate_model(self, pipeline, cv_strategy='stratified', n_splits=4, test_size=0.2):
         """Evaluate model with proper train/test split and cross-validation.
         
         Parameters
@@ -770,9 +770,21 @@ class CrossSubjectClassifier:
         print(f"    🔒 GROUP-BASED SPLITTING: Ensuring all sessions from same subject stay together")
         print(f"    Found {len(np.unique(subject_groups))} unique subjects across {len(self.subjects)} sessions")
         
-        # Use GroupShuffleSplit to ensure all sessions from same subject go to same fold
-        gss = GroupShuffleSplit(n_splits=1, test_size=test_size, random_state=self.random_state)
-        train_idx, test_idx = next(gss.split(self.X, self.y_encoded, groups=subject_groups))
+        # Use StratifiedGroupKFold to ensure class balance while keeping subject groups together
+        # Calculate n_splits from test_size to respect user parameter
+        n_splits = max(2, round(1 / test_size))
+        
+        try:
+            sgkf = StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=self.random_state)
+            splits = list(sgkf.split(self.X, self.y_encoded, groups=subject_groups))
+            train_idx, test_idx = splits[0]  # Take first fold
+            print(f"   ✓ Using StratifiedGroupKFold with {n_splits} splits (maintains class balance)")
+        except (ImportError, ValueError, AttributeError) as e:
+            print(f"   ⚠️  StratifiedGroupKFold failed ({e}), falling back to GroupShuffleSplit")
+            print(f"   ⚠️  Note: Class balance may not be preserved in train/test split")
+            # Fallback to original GroupShuffleSplit
+            gss = GroupShuffleSplit(n_splits=1, test_size=test_size, random_state=self.random_state)
+            train_idx, test_idx = next(gss.split(self.X, self.y_encoded, groups=subject_groups))
         
         X_train = self.X[train_idx]
         X_test = self.X[test_idx]
@@ -807,7 +819,7 @@ class CrossSubjectClassifier:
             print(f"      {self.class_names[class_idx]}: {count} subjects")
         
         # Choose cross-validation strategy for training set
-        # IMPORTANT: Use GroupKFold to prevent session leakage within CV folds
+        # IMPORTANT: Use StratifiedGroupKFold to prevent session leakage within CV folds while maintaining class balance
         n_train_samples = X_train.shape[0]
         n_unique_train_subjects = len(unique_train_subjects)
         
@@ -816,7 +828,7 @@ class CrossSubjectClassifier:
             print(f"   Using Leave-One-Out CV on training set ({n_train_samples} folds)")
             print(f"   ⚠️  WARNING: LOO doesn't respect subject groups - sessions from same subject may be in different folds")
         elif cv_strategy == 'stratified':
-            # Use GroupKFold to ensure sessions from same subject stay in same fold during CV
+            # Use StratifiedGroupKFold to ensure class balance while keeping subject groups together during CV
             # Determine maximum possible folds based on number of unique subjects
             max_possible_splits = min(n_splits, n_unique_train_subjects)
             
@@ -826,14 +838,20 @@ class CrossSubjectClassifier:
                 print(f"   Falling back to Leave-One-Out CV on training set ({n_train_samples} folds)")
             else:
                 effective_n_splits = max_possible_splits
-                cv = GroupKFold(n_splits=effective_n_splits)
-                print(f"   🔒 Using GroupKFold with {effective_n_splits} splits (respects subject groups)")
-                print(f"   This ensures sessions from same subject stay in same CV fold")
+                try:
+                    cv = StratifiedGroupKFold(n_splits=effective_n_splits, shuffle=True, random_state=self.random_state)
+                    print(f"   🔒 Using StratifiedGroupKFold with {effective_n_splits} splits (respects subject groups + class balance)")
+                    print(f"   This ensures sessions from same subject stay in same CV fold with balanced class distribution")
+                except (ImportError, ValueError, AttributeError) as e:
+                    print(f"   ⚠️  StratifiedGroupKFold failed ({e}), falling back to GroupKFold for CV")
+                    print(f"   ⚠️  Note: Class balance may not be preserved in cross-validation folds")
+                    cv = GroupKFold(n_splits=effective_n_splits)
+                    print(f"   🔒 Using GroupKFold with {effective_n_splits} splits (respects subject groups only)")
         else:
             raise ValueError(f"Unknown cv_strategy: {cv_strategy}")
         
         # Cross-validation scores on training set only
-        # Pass groups parameter for GroupKFold
+        # Pass groups parameter for GroupKFold and StratifiedGroupKFold
         cv_params = {
             'estimator': pipeline,
             'X': X_train,
@@ -843,8 +861,8 @@ class CrossSubjectClassifier:
             'n_jobs': -1
         }
         
-        # Add groups parameter for GroupKFold
-        if isinstance(cv, GroupKFold):
+        # Add groups parameter for GroupKFold and StratifiedGroupKFold
+        if isinstance(cv, (GroupKFold, StratifiedGroupKFold)):
             cv_params['groups'] = groups_train
         
         cv_scores = cross_val_score(**cv_params)
@@ -860,7 +878,7 @@ class CrossSubjectClassifier:
                 'scoring': 'roc_auc',
                 'n_jobs': -1
             }
-            if isinstance(cv, GroupKFold):
+            if isinstance(cv, (GroupKFold, StratifiedGroupKFold)):
                 cv_auc_params['groups'] = groups_train
             
             cv_auc_scores = cross_val_score(**cv_auc_params)
@@ -1383,7 +1401,7 @@ class CrossSubjectClassifier:
         
         return json_results
     
-    def run_classification(self, n_estimators=500, max_depth=4, cv_strategy='stratified', n_splits=5, test_size=0.2):
+    def run_classification(self, n_estimators=500, max_depth=4, cv_strategy='stratified', n_splits=4, test_size=0.2):
         """Run the complete classification pipeline.
         
         Parameters
@@ -1541,7 +1559,7 @@ class CrossDataClassifier:
             for _, row in df.iterrows():
                 subject = row['subject']
                 session = f"ses-{row['session']:02d}"
-                state = row['state']
+                state = row['diagnostic_crs_final']
                 
                 # Skip subjects with missing state
                 if pd.isna(state) or state == 'n/a':
@@ -2422,7 +2440,7 @@ class CrossDataClassifier:
         print(f"\n      ✓ Best parameters: kernel={best_params['kernel']}, C={best_params['C']}, Score={best_params['score']:.3f}")
         return best_params
     
-    def run_cross_data_classification(self, cv_strategy='stratified', n_splits=5, test_size=0.2):
+    def run_cross_data_classification(self, cv_strategy='stratified', n_splits=4, test_size=0.2):
         """
         Run cross-data classification with rigorous controls for subject bias and data leakage.
         
@@ -2503,9 +2521,21 @@ class CrossDataClassifier:
             print(f"\n    🔒 GROUP-BASED SPLITTING: Ensuring all sessions from same subject stay together")
             print(f"    Found {len(np.unique(subject_groups))} unique subjects across {len(subjects)} sessions")
             
-            # Use GroupShuffleSplit to ensure all sessions from same subject go to same fold
-            gss = GroupShuffleSplit(n_splits=1, test_size=test_size, random_state=self.random_state)
-            train_idx, test_idx = next(gss.split(X_orig, y_encoded, groups=subject_groups))
+            # Use StratifiedGroupKFold to ensure class balance while keeping subject groups together
+            # Calculate n_splits from test_size to respect user parameter
+            n_splits = max(2, round(1 / test_size))
+            
+            try:
+                sgkf = StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=self.random_state)
+                splits = list(sgkf.split(X_orig, y_encoded, groups=subject_groups))
+                train_idx, test_idx = splits[0]  # Take first fold
+                print(f"   ✓ Using StratifiedGroupKFold with {n_splits} splits (maintains class balance)")
+            except (ImportError, ValueError, AttributeError) as e:
+                print(f"   ⚠️  StratifiedGroupKFold failed ({e}), falling back to GroupShuffleSplit")
+                print(f"   ⚠️  Note: Class balance may not be preserved in train/test split")
+                # Fallback to original GroupShuffleSplit
+                gss = GroupShuffleSplit(n_splits=1, test_size=test_size, random_state=self.random_state)
+                train_idx, test_idx = next(gss.split(X_orig, y_encoded, groups=subject_groups))
             
             X_orig_train = X_orig[train_idx]
             X_orig_test = X_orig[test_idx]
@@ -2611,8 +2641,8 @@ class CrossDataClassifier:
             y_proba_A_on_recon = pipeline_A.predict_proba(X_recon_test)
             y_pred_A_on_orig = np.argmax(y_proba_A_on_orig, axis=1)  # Use argmax for consistency
             y_pred_A_on_recon = np.argmax(y_proba_A_on_recon, axis=1)
-            print(f"      ✓ Tested on original test set: accuracy = {accuracy_score(y_test, y_pred_A_on_orig):.3f}")
-            print(f"      ✓ Tested on reconstructed test set: accuracy = {accuracy_score(y_test, y_pred_A_on_recon):.3f}")
+            print(f"      ✓ Tested on original test set: accuracy = {accuracy_score(y_test, y_pred_A_on_orig):.3f}, balanced_accuracy = {balanced_accuracy_score(y_test, y_pred_A_on_orig):.3f}")
+            print(f"      ✓ Tested on reconstructed test set: accuracy = {accuracy_score(y_test, y_pred_A_on_recon):.3f}, balanced_accuracy = {balanced_accuracy_score(y_test, y_pred_A_on_recon):.3f}")
             
             # DEBUG: Analyze probability distributions
             mcs_idx = np.where(self.class_names == 'MCS')[0][0]
@@ -2644,8 +2674,8 @@ class CrossDataClassifier:
             y_proba_B_on_recon = pipeline_B.predict_proba(X_recon_test)
             y_pred_B_on_orig = np.argmax(y_proba_B_on_orig, axis=1)
             y_pred_B_on_recon = np.argmax(y_proba_B_on_recon, axis=1)
-            print(f"      ✓ Tested on original test set: accuracy = {accuracy_score(y_test, y_pred_B_on_orig):.3f}")
-            print(f"      ✓ Tested on reconstructed test set: accuracy = {accuracy_score(y_test, y_pred_B_on_recon):.3f}")
+            print(f"      ✓ Tested on original test set: accuracy = {accuracy_score(y_test, y_pred_B_on_orig):.3f}, balanced_accuracy = {balanced_accuracy_score(y_test, y_pred_B_on_orig):.3f}")
+            print(f"      ✓ Tested on reconstructed test set: accuracy = {accuracy_score(y_test, y_pred_B_on_recon):.3f}, balanced_accuracy = {balanced_accuracy_score(y_test, y_pred_B_on_recon):.3f}")
             
             # DEBUG: Analyze probability distributions for Model B
             print(f"\n   🔍 DEBUG: Probability distribution analysis for Model B:")
@@ -2721,10 +2751,10 @@ class CrossDataClassifier:
             print(f"   Model B (trained on reconstructed): {np.mean(cv_scores_B):.3f} ± {np.std(cv_scores_B):.3f}")
             
             print(f"\n🔄 Cross-Testing Results (Balanced Accuracy):")
-            print(f"   Model A (original) → Original test set:        {results['model_A_orig_test']['balanced_accuracy']:.3f}")
-            print(f"   Model A (original) → Reconstructed test set:   {results['model_A_recon_test']['balanced_accuracy']:.3f}")
-            print(f"   Model B (reconstructed) → Original test set:   {results['model_B_orig_test']['balanced_accuracy']:.3f}")
-            print(f"   Model B (reconstructed) → Reconstructed test:  {results['model_B_recon_test']['balanced_accuracy']:.3f}")
+            print(f"   Model A (original) → Original test set:        accuracy={results['model_A_orig_test']['accuracy']:.3f}, balanced_accuracy={results['model_A_orig_test']['balanced_accuracy']:.3f}")
+            print(f"   Model A (original) → Reconstructed test set:   accuracy={results['model_A_recon_test']['accuracy']:.3f}, balanced_accuracy={results['model_A_recon_test']['balanced_accuracy']:.3f}")
+            print(f"   Model B (reconstructed) → Original test set:   accuracy={results['model_B_orig_test']['accuracy']:.3f}, balanced_accuracy={results['model_B_orig_test']['balanced_accuracy']:.3f}")
+            print(f"   Model B (reconstructed) → Reconstructed test:  accuracy={results['model_B_recon_test']['accuracy']:.3f}, balanced_accuracy={results['model_B_recon_test']['balanced_accuracy']:.3f}")
             
             print(f"\n✅ Data Integrity Verification:")
             print(f"   ✓ Same {results['n_test_subjects']} test subjects used for all 4 test scenarios")
@@ -2751,8 +2781,21 @@ class CrossDataClassifier:
         """Compute classification metrics for a single test scenario."""
         print(f"   Computing metrics for {description}...")
         
+        # DEBUG: Verify data integrity before computing metrics
+        print(f"   🔍 DEBUG: Data integrity check for {description}")
+        print(f"      y_true shape: {y_true.shape}, values: {y_true}")
+        print(f"      y_pred shape: {y_pred.shape}, values: {y_pred}")
+        print(f"      Class distribution in y_true: {np.bincount(y_true)}")
+        print(f"      Class distribution in y_pred: {np.bincount(y_pred)}")
+        
+        if len(y_true) != len(y_pred):
+            print(f"   ⚠️  WARNING: Length mismatch! y_true={len(y_true)}, y_pred={len(y_pred)}")
+        
         accuracy = accuracy_score(y_true, y_pred)
         balanced_acc = balanced_accuracy_score(y_true, y_pred)
+        
+        print(f"      Computed accuracy: {accuracy:.3f}")
+        print(f"      Computed balanced_accuracy: {balanced_acc:.3f}")
         
         # AUC for binary classification
         auc_score = None
@@ -2770,6 +2813,8 @@ class CrossDataClassifier:
         
         # Confusion matrix
         conf_matrix = confusion_matrix(y_true, y_pred)
+        print(f"      Confusion matrix: {conf_matrix.tolist()}")
+        print(f"      Correct predictions: {np.trace(conf_matrix)}/{np.sum(conf_matrix)}")
         
         return {
             'description': description,
@@ -2946,6 +2991,9 @@ class CrossDataClassifier:
         
         # After saving all scenario results, create the combined 4-heatmap figure
         self._plot_combined_confusion_matrices(results)
+        
+        # Create combined ROC curves plot
+        self._plot_combined_roc_curves(results)
         
         # Create subject-level probability plots
         self._plot_subject_probabilities(results)
@@ -3613,7 +3661,7 @@ class CrossDataClassifier:
                 p_values.append(1.0)
         
         # Create figure (matching seed_differences_analysis.py style)
-        fig, ax = plt.subplots(figsize=(16, 8))
+        fig, ax = plt.subplots(figsize=(10, 12))
         
         # Create boxplots
         positions = [1, 2, 3, 4]
@@ -3651,17 +3699,17 @@ class CrossDataClassifier:
                        fontsize=24, color='red', fontweight='bold')
         
         # Formatting (matching seed_differences_analysis.py)
-        ax.set_ylabel('Δ P(MCS) - Probability difference', fontsize=24)
+        ax.set_ylabel('Δ P(MCS) - Probability difference', fontsize=30)
         ax.grid(True, alpha=0.3, axis='y')
-        ax.tick_params(axis='x', labelsize=17, rotation=0)
+        ax.tick_params(axis='x', labelsize=24, rotation=0)
         
         # Add legend
-        from matplotlib.lines import Line2D
-        legend_elements = [
-            Line2D([0], [0], color='black', linewidth=2, label='Median'),
-            Line2D([0], [0], color='gray', linewidth=2, linestyle='--', label='Mean'),
-        ]
-        ax.legend(handles=legend_elements, loc='lower right', fontsize=16)
+       # from matplotlib.lines import Line2D
+       # legend_elements = [
+       #     Line2D([0], [0], color='black', linewidth=2),
+       #     Line2D([0], [0], color='gray', linewidth=2, linestyle='--'),
+       # ]
+       # ax.legend(handles=legend_elements, loc='lower right', fontsize=16)
         
         plt.tight_layout()
         diff_boxplot_file = op.join(self.output_dir, 'difference_boxplots_with_wilcoxon.png')
@@ -3711,6 +3759,73 @@ class CrossDataClassifier:
         # Create smaller version with abbreviated labels
         self._plot_difference_boxplots_with_stats_small(results, differences, p_values, colors)
     
+    def _plot_combined_roc_curves(self, results):
+        """
+        Create a 1x4 grid of ROC curves showing all cross-data scenarios.
+        
+        Layout:
+        - 1 row, 4 columns
+        - Each subplot shows ROC curve for one test scenario
+        - Uses test data (not training data)
+        - Matches dimensions of difference_boxplots_with_wilcoxon_small.png
+        """
+        print("\n📊 Creating combined 4-ROC curve figure...")
+        
+        # Check for binary classification
+        if len(self.class_names) != 2:
+            print("   ⚠️  Skipping ROC curves: only for binary classification")
+            return
+        
+        # Create figure with 1x4 subplots (matching difference_boxplots_with_wilcoxon_small.png dimensions)
+        fig, axes = plt.subplots(1, 4, figsize=(8, 3), sharey = True)
+       # fig.suptitle(f'Cross-Data Classification: ROC Curves\n{self.marker_type.title()} Features',
+       #             fontsize=12, fontweight='bold')
+        
+        # Define the 4 scenarios (same as confusion matrices)
+        scenarios = [
+            ('model_A_orig_test', 0, 'OO:\n Original Train \n Test Original'),
+            ('model_A_recon_test', 1, 'OR:\n Original Train \n Test Reconstructed'),
+            ('model_B_orig_test', 2, 'RO:\n Reconstructed Train \n Test Original'),
+            ('model_B_recon_test', 3, 'RR:\n Reconstructed Train \n Test Reconstructed')
+        ]
+        
+        # Get shared test labels (same for all scenarios)
+        y_test = results['y_test']
+        
+        for scenario_key, col, title in scenarios:
+            ax = axes[col]
+            scenario_results = results[scenario_key]
+            y_proba = scenario_results['y_proba']
+            
+            # Compute ROC curve using test data
+            fpr, tpr, _ = roc_curve(y_test, y_proba[:, 1])  # Use probability of class 1 (VS)
+            roc_auc = auc(fpr, tpr)
+            
+            # Plot ROC curve
+            ax.plot(fpr, tpr, color='darkorange', lw=2,
+                   label=f'AUC = {roc_auc:.3f}')
+            ax.plot([0, 1], [0, 1], color='navy', lw=1, linestyle='--')
+            
+            # Formatting
+            ax.set_xlim([0.0, 1.0])
+            ax.set_ylim([0.0, 1.05])
+            ax.set_xlabel('False Positive Rate', fontsize=10)
+            if col == 0:
+                ax.set_ylabel('True Positive Rate', fontsize=10)
+            ax.set_title(title, fontsize=12)
+            ax.legend(loc="lower right", fontsize=10)
+            ax.grid(True, alpha=0.3)
+            
+            # Set tick sizes for compact layout
+            ax.tick_params(axis='both', labelsize=9)
+        
+        plt.tight_layout()
+        combined_roc_file = op.join(self.output_dir, 'combined_roc_curves.png')
+        plt.savefig(combined_roc_file, dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        print(f"   ✓ Combined ROC curves saved to: {combined_roc_file}")
+    
     def _plot_difference_boxplots_with_stats_small(self, results, differences, p_values, colors):
         """Create a smaller version of difference boxplots with abbreviated labels.
         Matches the style of seed_differences_analysis.py differences_combined_boxplot_small.png
@@ -3726,7 +3841,7 @@ class CrossDataClassifier:
         ]
         
         # Create figure (smaller size)
-        fig, ax = plt.subplots(figsize=(8, 4))
+        fig, ax = plt.subplots(figsize=(8, 3))
         
         # Create boxplots
         positions = [1, 2, 3, 4]
@@ -3757,7 +3872,7 @@ class CrossDataClassifier:
         ax.tick_params(axis='y', labelsize=14)
         
         # Set symmetric y-axis limits
-        ax.set_ylim(-0.4, 0.4)
+        ax.set_ylim(-0.5, 0.5)
         y_range = 0.8  # Total range for positioning asterisks
         
         # Add red asterisks on top of boxplots if significant
@@ -4007,9 +4122,29 @@ class CrossDataClassifier:
                            ha="center", va="center", fontsize=16, fontweight='bold',
                            color="white" if conf_matrix[i, j] > thresh else "black")
             
-            # Add balanced accuracy text
+            # Add both accuracy metrics for clarity with confusion matrix debug info
+            accuracy = scenario_results['accuracy']
             bal_acc = scenario_results['balanced_accuracy']
-            ax.text(0.98, 0.02, f"Bal. Acc: {bal_acc:.3f}",
+            conf_matrix = scenario_results['confusion_matrix']
+            
+            # Debug: Calculate accuracy from confusion matrix to verify consistency
+            n_correct = np.trace(conf_matrix)
+            n_total = np.sum(conf_matrix)
+            calculated_accuracy = n_correct / n_total if n_total > 0 else 0.0
+            
+            # Sanity check - warn if calculations don't match
+            if abs(calculated_accuracy - accuracy) > 0.001:
+                print(f"⚠️  WARNING: Accuracy mismatch! Computed {accuracy:.3f}, CM suggests {calculated_accuracy:.3f}")
+            
+            ax.text(0.98, 0.10, f"CM: {conf_matrix.tolist()}",
+                   transform=ax.transAxes, fontsize=8, fontweight='bold',
+                   verticalalignment='bottom', horizontalalignment='right',
+                   bbox=dict(boxstyle='round', facecolor='lightgray', alpha=0.8))
+            ax.text(0.98, 0.06, f"Raw Accuracy: {accuracy:.3f} ({n_correct}/{n_total})",
+                   transform=ax.transAxes, fontsize=10, fontweight='bold',
+                   verticalalignment='bottom', horizontalalignment='right',
+                   bbox=dict(boxstyle='round', facecolor='lightgreen', alpha=0.8))
+            ax.text(0.98, 0.02, f"Balanced Accuracy: {bal_acc:.3f}",
                    transform=ax.transAxes, fontsize=10, fontweight='bold',
                    verticalalignment='bottom', horizontalalignment='right',
                    bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
@@ -4044,7 +4179,7 @@ def main():
     parser = argparse.ArgumentParser(
         description='Cross-subject binary SVM classification for VS vs MCS consciousness states'
     )
-    parser.add_argument('--data-dir', default = '/data/project/eeg_foundation/src/doc_benchmark/results/new_results/MARKERS/computed_data',
+    parser.add_argument('--data-dir', default = '/data/project/eeg_foundation/src/doc_benchmark/results/new_results/MARKERS/computed_data_DoC',
                        help='Path to results directory containing subject data')
     parser.add_argument('--patient-labels', default = '/data/project/eeg_foundation/data/metadata/patient_labels_with_controls.csv',
                        help='Path to CSV file with patient labels')

@@ -444,6 +444,33 @@ def perform_spearman_fdr_test(topos_orig_all, topos_recon_all, marker_idx, marke
     return p_values_corrected
 
 
+def perform_wilcoxon_fdr_test(topos_orig_all, topos_recon_all, marker_idx, marker_name, group_name):
+    """Perform electrode-wise Wilcoxon signed-rank test with FDR correction."""
+    
+    n_channels = topos_orig_all.shape[2]
+    p_values = np.zeros(n_channels)
+    
+    for ch in range(n_channels):
+        try:
+            orig_ch = topos_orig_all[:, marker_idx, ch]  # shape: (n_subjects,)
+            recon_ch = topos_recon_all[:, marker_idx, ch]
+            stat, p = stats.wilcoxon(orig_ch, recon_ch)
+            p_values[ch] = p
+        except:
+            p_values[ch] = 1.0  # Conservative: assume no significance
+    
+    # Apply FDR correction across electrodes
+    if HAS_STATSMODELS:
+        _, p_values_corrected, _, _ = multipletests(p_values, method='fdr_bh')
+        significant_count = np.sum(p_values_corrected < 0.05)
+        print(f"  FDR: {marker_name} {group_name}: {significant_count}/{len(p_values_corrected)} significant channels")
+    else:
+        p_values_corrected = p_values
+        print("  ⚠️  statsmodels not available, using uncorrected p-values")
+    
+    return p_values_corrected
+
+
 def create_biomarker_comparison_grid(output_dir):
     """Create 9x4 grid topographic comparison plot with Spearman tests."""
     
@@ -645,22 +672,237 @@ def create_biomarker_comparison_grid(output_dir):
     return output_path
 
 
+def create_biomarker_comparison_grid_wilcoxon(output_dir):
+    """Create 9x4 grid topographic comparison plot with Wilcoxon tests."""
+    
+    print("=" * 60)
+    print("Creating Biomarker Group Comparison Grid (Wilcoxon)")
+    print("=" * 60)
+    
+    # Define data directories
+    data_dirs = {
+        'MCS': '/data/project/eeg_foundation/src/doc_benchmark/results/new_results/MARKERS/computed_data_DoC',
+        'UWS': '/data/project/eeg_foundation/src/doc_benchmark/results/new_results/MARKERS/computed_data_DoC',
+        'Control LG': '/data/project/eeg_foundation/src/doc_benchmark/results/new_results/MARKERS/computed_data_control_lg',
+        'Control RS': '/data/project/eeg_foundation/src/doc_benchmark/results/new_results/MARKERS/computed_data'
+    }
+    
+    # Load patient labels for diagnostic filtering
+    patient_labels_file = "/data/project/eeg_foundation/data/metadata/patient_labels_with_controls.csv"
+    patient_labels = load_patient_labels(patient_labels_file)
+    
+    # Define diagnostic filters
+    diagnostic_filters = {
+        'MCS': ['MCS+', 'MCS-'],
+        'UWS': ['VS', 'UWS'],
+        'Control LG': None,
+        'Control RS': None
+    }
+    
+    # Define biomarkers to plot
+    biomarker_specs = [
+        ('alpha_relative_spectralpower', 'Alpha Normalized'),
+        ('beta_relative_spectralpower', 'Beta Normalized'),
+        ('delta_relative_spectralpower', 'Delta Normalized'),
+        ('gamma_relative_spectralpower', 'Gamma Normalized'),
+        ('theta_relative_spectralpower', 'Theta Normalized'),
+        ('pe_theta_permutationentropy', 'Permutation Entropy'),
+        ('spectral_entropy_spectralpower', 'Spectral Entropy'),
+        ('kolmogorov_complexity_kolmogorovcomplexity', 'Kolmogorov Complexity'),
+        ('wsmi_theta_symbolicmutualinformation', 'Symbolic Mutual Information')
+    ]
+    
+    # Load data for all groups
+    groups_data = {}
+    for group_name, data_dir in data_dirs.items():
+        diagnostic_filter = diagnostic_filters[group_name]
+        
+        # Use heterogeneous loading for Control RS
+        allow_heterogeneous = (group_name == 'Control RS')
+        
+        result = load_group_topo_data(
+            data_dir, group_name, patient_labels, diagnostic_filter, allow_heterogeneous
+        )
+        
+        if allow_heterogeneous:
+            # Control RS: return list of dicts
+            subjects_list, subject_ids, _ = result
+            if subjects_list is not None:
+                groups_data[group_name] = {
+                    'subjects_list': subjects_list,  # List of dicts with varying shapes
+                    'subject_ids': subject_ids,
+                    'n_subjects_total': len(subjects_list)
+                }
+                print(f"   ✓ {group_name}: {len(subjects_list)} subjects loaded (heterogeneous)")
+            else:
+                print(f"   ❌ {group_name}: No data loaded")
+        else:
+            # Other groups: return numpy arrays
+            topos_orig, topos_recon, marker_names = result
+            
+            if topos_orig is not None:
+                groups_data[group_name] = {
+                    'topos_orig': topos_orig,
+                    'topos_recon': topos_recon,
+                    'marker_names': marker_names,
+                    'n_subjects': topos_orig.shape[0],
+                    'is_homogeneous': True
+                }
+                print(f"   ✓ {group_name}: {topos_orig.shape[0]} subjects loaded")
+            else:
+                print(f"   ❌ {group_name}: No data loaded")
+    
+    if not groups_data:
+        print("❌ No data loaded for any group. Exiting.")
+        return
+    
+    # Find markers available in each group (allowing missing markers per group)
+    group_markers = {}
+    for group_name, group_data in groups_data.items():
+        group_markers[group_name] = get_markers_for_group(group_data)
+    
+    # Filter biomarkers to those available in each group individually
+    available_biomarkers = []
+    for marker_name, display_name in biomarker_specs:
+        # Check if marker is available in at least one group
+        available_in_any_group = any(marker_name in markers for markers in group_markers.values())
+        if available_in_any_group:
+            available_biomarkers.append((marker_name, display_name))
+            print(f"   ✓ {display_name}: available in {[g for g, markers in group_markers.items() if marker_name in markers]}")
+        else:
+            print(f"   ❌ {display_name}: not available in any group, skipping")
+    
+    if not available_biomarkers:
+        print("❌ No biomarkers available in all groups. Exiting.")
+        return
+    
+    print(f"📊 Creating Wilcoxon grid plot with {len(available_biomarkers)} biomarkers × {len(groups_data)} groups")
+    
+    # Get reference data for montage setup
+    first_group = list(groups_data.values())[0]
+    if 'is_homogeneous' in first_group:
+        topos_orig_ref = first_group['topos_orig']
+        topos_orig_ref_mean = np.mean(first_group['topos_orig'], axis=0)
+    else:
+        # For heterogeneous data, use first subject
+        topos_orig_ref_mean = first_group['subjects_list'][0]['topos_original']
+    
+    # Set up montage and sphere
+    info, sphere, outlines = _setup_montage_and_sphere(topos_orig_ref_mean.shape[1], topos_orig_ref_mean)
+    
+    # Create figure: 9 rows × 4 columns
+    n_biomarkers = len(available_biomarkers)
+    n_groups = len(groups_data)
+    fig, axes = plt.subplots(n_biomarkers, n_groups, figsize=(20, max(16, n_biomarkers * 2)))
+    
+    # Handle single row/column cases
+    if n_biomarkers == 1:
+        axes = axes.reshape(1, -1)
+    if n_groups == 1:
+        axes = axes.reshape(-1, 1)
+    
+    # Add column titles at the top
+    group_names = list(groups_data.keys())
+    for col, title in enumerate(group_names):
+        axes[0, col].text(0.5, 1.15, title, transform=axes[0, col].transAxes,
+                         ha='center', va='bottom', fontsize=25)
+    
+    # Plot each biomarker × group combination
+    for row, (marker_name, display_name) in enumerate(available_biomarkers):
+        # Add row label
+        axes[row, 0].text(-0.3, 0.5, display_name, transform=axes[row, 0].transAxes,
+                         ha='right', va='center', fontsize=25, rotation=0)
+        
+        for col, group_name in enumerate(group_names):
+            ax = axes[row, col]
+            group_data = groups_data[group_name]
+            
+            # Get marker data (handle missing markers and heterogeneous groups)
+            marker_orig_data, marker_recon_data, n_subjects_for_marker = get_marker_data_for_group(group_data, marker_name)
+            
+            if marker_orig_data is not None:  # Marker exists in this group
+                # Perform Wilcoxon test and create p-value map
+                p_values_corrected = perform_wilcoxon_fdr_test(
+                    marker_orig_data, marker_recon_data, 0, marker_name, group_name
+                )
+                
+                # Create discrete p-value map for visualization
+                p_map = np.zeros(256)  # 256 channels
+                p_map[p_values_corrected < 0.01] = 0      # black: p < 0.01
+                p_map[(p_values_corrected >= 0.01) & (p_values_corrected < 0.05)] = 1  # gray: 0.01 ≤ p < 0.05
+                p_map[p_values_corrected >= 0.05] = 2    # white: p ≥ 0.05
+                
+                # Create custom colormap for discrete colors
+                cmap = ListedColormap(['black', 'gray', 'white'])
+                
+                # Plot p-value map
+                im, _ = mne.viz.plot_topomap(p_map, info, axes=ax,
+                                            vlim=(0, 2), cmap=cmap,
+                                            show=False, sphere=sphere, outlines=outlines,
+                                            extrapolate='local', res=256, sensors=True, contours=6)
+                ax.set_title('')
+                
+                # Add colorbar for p-values (only in rightmost column)
+                if col == n_groups - 1:
+                    cbar = plt.colorbar(im, ax=ax, shrink=0.6, aspect=20, ticks=[0, 1, 2])
+                    cbar.ax.set_yticklabels(['p<0.01', '0.01≤p<0.05', 'p≥0.05'])
+                    cbar.ax.tick_params(labelsize=20)
+            else:  # Marker not available in this group
+                # Show "N/A" text
+                ax.text(0.5, 0.5, 'N/A', transform=ax.transAxes,
+                       fontsize=20, ha='center', va='center', color='red')
+                ax.set_xlim(0, 1)
+                ax.set_ylim(0, 1)
+                ax.axis('off')
+            
+    
+    plt.subplots_adjust(wspace=0.4, hspace=0.3)
+    plt.tight_layout(pad=1.5)
+    
+    # Save plot
+    os.makedirs(output_dir, exist_ok=True)
+    output_path = op.join(output_dir, 'biomarker_group_comparison_grid_wilcoxon.png')
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    print(f"✅ Biomarker group comparison grid (Wilcoxon) saved to: {output_path}")
+    return output_path
+
+
 def main():
-    """Main function to create biomarker group comparison plot."""
+    """Main function to create both Spearman and Wilcoxon biomarker group comparison plots."""
     
     # Configuration
     output_dir = "/data/project/eeg_foundation/src/doc_benchmark/results/new_results/OHBM"
     
-    # Create the comparison plot
-    plot_path = create_biomarker_comparison_grid(output_dir)
+    print("=" * 80)
+    print("Creating Biomarker Group Comparison Plots")
+    print("=" * 80)
     
-    if plot_path:
-        print("\n" + "=" * 60)
-        print("Biomarker group comparison completed successfully!")
-        print(f"Plot saved: {plot_path}")
-        print("=" * 60)
+    # Create the Spearman comparison plot
+    print("\n1. Creating Spearman correlation test plot...")
+    spearman_plot_path = create_biomarker_comparison_grid(output_dir)
+    
+    # Create the Wilcoxon comparison plot
+    print("\n2. Creating Wilcoxon signed-rank test plot...")
+    wilcoxon_plot_path = create_biomarker_comparison_grid_wilcoxon(output_dir)
+    
+    # Summary
+    print("\n" + "=" * 80)
+    print("Biomarker group comparison completed successfully!")
+    print("=" * 80)
+    
+    if spearman_plot_path:
+        print(f"✅ Spearman plot saved: {spearman_plot_path}")
     else:
-        print("\nFailed to create biomarker group comparison plot.")
+        print("❌ Failed to create Spearman plot")
+    
+    if wilcoxon_plot_path:
+        print(f"✅ Wilcoxon plot saved: {wilcoxon_plot_path}")
+    else:
+        print("❌ Failed to create Wilcoxon plot")
+    
+    print("=" * 80)
 
 
 if __name__ == "__main__":
