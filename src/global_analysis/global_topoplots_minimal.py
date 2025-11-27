@@ -1,4 +1,4 @@
-"""Global topographic analysis - Minimal version for 10 specific plots.
+"""Global topographic analysis - Minimal version for 6 specific plots.
 
 Creates only these plots:
 1. custom_biomarkers_orig_recon_diff_MCSplus_MCSminus.png
@@ -7,10 +7,6 @@ Creates only these plots:
 4. custom_full_biomarkers_orig_recon_spearman.png
 5. custom_full_biomarkers_orig_recon_wilcoxon_corrected.png
 6. custom_full_biomarkers_orig_recon_wilcoxon.png
-7. custom_full_biomarkers_orig_recon_wilcoxon_MCSplus_MCSminus.png
-8. custom_full_biomarkers_orig_recon_wilcoxon_UWS_VS.png
-9. custom_full_biomarkers_orig_recon_spearman_MCSplus_MCSminus.png
-10. custom_full_biomarkers_orig_recon_spearman_UWS_VS.png
 
 Authors: Denis A. Engemann, Federico Raimondo, Trinidad Borrell
 """
@@ -229,7 +225,7 @@ def _setup_montage_and_sphere(n_channels, topos_mean=None):
 
 
 class GlobalTopoAnalyzer:
-    """Global topographic analysis - Minimal version for 10 specific plots."""
+    """Global topographic analysis - Minimal version for 6 specific plots."""
     
     def __init__(self, results_dir, output_dir, patient_labels_file=None):
         self.results_dir = results_dir
@@ -719,29 +715,6 @@ class GlobalTopoAnalyzer:
         
         n_biomarkers = len(biomarker_indices)
         
-        # Collect all p-values for FDR correction
-        p_values = []
-        
-        if topos_orig_all is not None and topos_recon_all is not None:
-            for marker_idx in biomarker_indices:
-                orig_vals = topos_orig_all[:, marker_idx, :].flatten()
-                recon_vals = topos_recon_all[:, marker_idx, :].flatten()
-                
-                try:
-                    _, p_val = stats.wilcoxon(orig_vals, recon_vals)
-                    p_values.append(p_val)
-                except:
-                    p_values.append(1.0)
-            
-            # Apply FDR correction (Benjamini-Hochberg)
-            if HAS_STATSMODELS:
-                _, p_values_corrected, _, _ = multipletests(p_values, method='fdr_bh')
-            else:
-                print("  ⚠️  statsmodels not available, skipping FDR correction")
-                p_values_corrected = p_values
-        else:
-            p_values_corrected = [1.0] * len(biomarker_indices)
-        
         # Create figure: 4 columns x n_biomarkers rows
         fig, axes = plt.subplots(n_biomarkers, 4, figsize=(25, max(12, n_biomarkers * 2.5)))
         
@@ -750,13 +723,13 @@ class GlobalTopoAnalyzer:
             axes = axes.reshape(1, -1)
         
         # Add column titles at the top
-        column_titles = ['Original', 'Reconstructed', 'Difference', 'Wilcoxon Test (FDR)']
+        column_titles = ['Original', 'Reconstructed', 'Difference', 'Wilcoxon Test']
         for col, title in enumerate(column_titles):
             axes[0, col].text(0.5, 1.15, title, transform=axes[0, col].transAxes,
                              ha='center', va='bottom', fontsize=25)
         
         # Plot each biomarker
-        for row, (marker_idx, label, p_val_corr) in enumerate(zip(biomarker_indices, biomarker_labels, p_values_corrected)):
+        for row, (marker_idx, label) in enumerate(zip(biomarker_indices, biomarker_labels)):
             orig_data = topos_orig_mean[marker_idx, :]
             recon_data = topos_recon_mean[marker_idx, :]
             diff_data = orig_data - recon_data
@@ -1214,420 +1187,8 @@ class GlobalTopoAnalyzer:
         
         print(f"  ✅ Custom FULL biomarker plot (FDR corrected) saved with {n_biomarkers} markers")
     
-    def _create_diagnosis_specific_wilcoxon_topomap(self, topos_orig_all, topos_recon_all, info, marker_names, 
-                                                    diagnosis_group=None, sphere=None, outlines='head'):
-        """Create diagnosis-specific 4-column topographic plot with Wilcoxon test."""
-        
-        if diagnosis_group is None or not self.patient_labels_original:
-            print("  ⚠️  No diagnosis filtering available, skipping diagnosis-specific wilcoxon plots")
-            return
-        
-        group_name = '_'.join(diagnosis_group).replace('+', 'plus').replace('-', 'minus')
-        print(f"  🎯 Creating diagnosis-specific wilcoxon plots for {diagnosis_group}...")
-        
-        # Filter subjects by diagnosis
-        subject_ids = self.global_topo_data['subjects']
-        filtered_indices = []
-        filtered_subject_ids = []
-        
-        for idx, subject_id in enumerate(subject_ids):
-            original_diagnosis = self.patient_labels_original.get(subject_id)
-            if original_diagnosis in diagnosis_group:
-                filtered_indices.append(idx)
-                filtered_subject_ids.append(subject_id)
-        
-        if len(filtered_indices) == 0:
-            print(f"     ⚠️  No subjects found with diagnoses {diagnosis_group}")
-            return
-        
-        if len(filtered_indices) < 6:
-            print(f"     ⚠️  Warning: Only {len(filtered_indices)} subjects found with diagnoses {diagnosis_group}. Wilcoxon test requires N≥6 for reliable results.")
-        
-        print(f"     ✓ Found {len(filtered_indices)} subjects with diagnoses {diagnosis_group}")
-        
-        # Filter the topographic data
-        topos_orig_filtered = topos_orig_all[filtered_indices]
-        topos_recon_filtered = topos_recon_all[filtered_indices]
-        
-        # Compute mean across filtered subjects
-        topos_orig_mean = np.mean(topos_orig_filtered, axis=0)
-        topos_recon_mean = np.mean(topos_recon_filtered, axis=0)
-        
-        # Define the 8 biomarkers to plot
-        biomarker_specs = [
-            ('alpha_relative_spectralpower', 'Alpha Normalized'),
-            ('beta_relative_spectralpower', 'Beta Normalized'),
-            ('delta_relative_spectralpower', 'Delta Normalized'),
-            ('gamma_relative_spectralpower', 'Gamma Normalized'),
-            ('theta_relative_spectralpower', 'Theta Normalized'),
-            ('pe_theta_permutationentropy', 'Permutation\nEntropy'),
-            ('kolmogorov_complexity_kolmogorovcomplexity', 'Kolmogorov\nComplexity'),
-            ('spectral_entropy_spectralpower', 'Spectral\nEntropy')
-        ]
-        
-        # Find indices for these markers
-        biomarker_indices = []
-        biomarker_labels = []
-        
-        for marker_name, display_name in biomarker_specs:
-            if marker_name in marker_names:
-                idx = marker_names.index(marker_name)
-                biomarker_indices.append(idx)
-                biomarker_labels.append(display_name)
-        
-        if not biomarker_indices:
-            print(f"     ❌ No requested biomarkers found in data")
-            return
-        
-        n_biomarkers = len(biomarker_indices)
-        
-        # Collect all p-values for FDR correction
-        p_values = []
-        
-        for marker_idx in biomarker_indices:
-            orig_vals = topos_orig_filtered[:, marker_idx, :].flatten()
-            recon_vals = topos_recon_filtered[:, marker_idx, :].flatten()
-            
-            try:
-                _, p_val = stats.wilcoxon(orig_vals, recon_vals)
-                p_values.append(p_val)
-            except:
-                p_values.append(1.0)
-        
-        # Apply FDR correction (Benjamini-Hochberg)
-        if HAS_STATSMODELS:
-            _, p_values_corrected, _, _ = multipletests(p_values, method='fdr_bh')
-        else:
-            print("     ⚠️  statsmodels not available, skipping FDR correction")
-            p_values_corrected = p_values
-        
-        # Create figure: 4 columns x n_biomarkers rows
-        fig, axes = plt.subplots(n_biomarkers, 4, figsize=(25, max(12, n_biomarkers * 2.5)))
-        
-        # Handle single row case
-        if n_biomarkers == 1:
-            axes = axes.reshape(1, -1)
-        
-        # Add column titles at the top
-        column_titles = ['Original', 'Reconstructed', 'Difference', 'Wilcoxon Test (FDR)']
-        for col, title in enumerate(column_titles):
-            axes[0, col].text(0.5, 1.15, title, transform=axes[0, col].transAxes,
-                             ha='center', va='bottom', fontsize=25)
-        
-        # Plot each biomarker
-        for row, (marker_idx, label, p_val_corr) in enumerate(zip(biomarker_indices, biomarker_labels, p_values_corrected)):
-            orig_data = topos_orig_mean[marker_idx, :]
-            recon_data = topos_recon_mean[marker_idx, :]
-            diff_data = orig_data - recon_data
-            
-            # Find common scale for original and reconstructed
-            orig_min, orig_max = np.min(orig_data), np.max(orig_data)
-            recon_min, recon_max = np.min(recon_data), np.max(recon_data)
-            
-            common_min = min(orig_min, recon_min)
-            common_max = max(orig_max, recon_max)
-            
-            # Symmetric scale for difference
-            diff_max_abs = max(abs(np.min(diff_data)), abs(np.max(diff_data)))
-            diff_vmin, diff_vmax = -diff_max_abs, diff_max_abs
-            
-            # Column 1: Original
-            im1, _ = mne.viz.plot_topomap(orig_data, info, axes=axes[row, 0],
-                                         vlim=(common_min, common_max),
-                                         show=False, cmap='viridis',
-                                         sphere=sphere, outlines=outlines,
-                                         extrapolate='local',
-                                         res=256, sensors=True, contours=6)
-            axes[row, 0].set_title('')
-            
-            # Column 2: Reconstructed
-            im2, _ = mne.viz.plot_topomap(recon_data, info, axes=axes[row, 1],
-                                         vlim=(common_min, common_max),
-                                         show=False, cmap='viridis',
-                                         sphere=sphere, outlines=outlines,
-                                         extrapolate='local',
-                                         res=256, sensors=True, contours=6)
-            axes[row, 1].set_title('')
-            
-            # Column 3: Difference
-            im3, _ = mne.viz.plot_topomap(diff_data, info, axes=axes[row, 2],
-                                         vlim=(diff_vmin, diff_vmax),
-                                         show=False, cmap='RdBu_r',
-                                         sphere=sphere, outlines=outlines,
-                                         extrapolate='local',
-                                         res=256, sensors=True, contours=6)
-            axes[row, 2].set_title('')
-            
-            # Column 4: Electrode-wise Wilcoxon test
-            if topos_orig_filtered is not None and topos_recon_filtered is not None:
-                # Perform electrode-wise Wilcoxon signed-rank test
-                n_channels = topos_orig_filtered.shape[2]
-                p_values = np.zeros(n_channels)
-                
-                for ch in range(n_channels):
-                    try:
-                        orig_ch = topos_orig_filtered[:, marker_idx, ch]  # shape: (n_subjects,)
-                        recon_ch = topos_recon_filtered[:, marker_idx, ch]
-                        stat, p = stats.wilcoxon(orig_ch, recon_ch)
-                        p_values[ch] = p
-                    except:
-                        p_values[ch] = 1.0  # Conservative: assume no significance
-                
-                # Apply FDR correction across electrodes
-                if HAS_STATSMODELS:
-                    _, p_values_corrected, _, _ = multipletests(p_values, method='fdr_bh')
-                else:
-                    p_values_corrected = p_values
-                    print("  ⚠️  statsmodels not available, using uncorrected p-values")
-                
-                # Create discrete p-value map for visualization
-                p_map = np.zeros(n_channels)
-                p_map[p_values_corrected < 0.01] = 0      # black: p < 0.01
-                p_map[(p_values_corrected >= 0.01) & (p_values_corrected < 0.05)] = 1  # gray: 0.01 ≤ p < 0.05
-                p_map[p_values_corrected >= 0.05] = 2    # white: p ≥ 0.05
-                
-                # Create custom colormap for discrete colors
-                cmap = ListedColormap(['black', 'gray', 'white'])
-                
-                # Plot p-value map
-                im4, _ = mne.viz.plot_topomap(p_map, info, axes=axes[row, 3],
-                                             vlim=(0, 2), cmap=cmap,
-                                             show=False, sphere=sphere, outlines=outlines,
-                                             extrapolate='local', res=256, sensors=True)
-                axes[row, 3].set_title('')
-                
-                # Add colorbar for p-values
-                cbar4 = plt.colorbar(im4, ax=axes[row, 3], shrink=0.6, aspect=20, ticks=[0, 1, 2])
-                cbar4.ax.set_yticklabels(['p<0.01', '0.01≤p<0.05', 'p≥0.05'])
-                cbar4.ax.tick_params(labelsize=12)
-            else:
-                axes[row, 3].text(0.5, 0.5, 'Wilcoxon\nTest\nNo Data', 
-                                  transform=axes[row, 3].transAxes,
-                                  fontsize=16, ha='center', va='center')
-                axes[row, 3].set_xlim(0, 1)
-                axes[row, 3].set_ylim(0, 1)
-                axes[row, 3].axis('off')
-            
-            # Add row label
-            axes[row, 0].text(-0.3, 0.5, label, transform=axes[row, 0].transAxes,
-                             ha='right', va='center', fontsize=25,
-                             rotation=0)
-            
-            # Add colorbars for columns 2 and 3
-            cbar2 = plt.colorbar(im2, ax=axes[row, 1], shrink=0.6, aspect=20)
-            cbar2.ax.tick_params(labelsize=14)
-            
-            cbar3 = plt.colorbar(im3, ax=axes[row, 2], shrink=0.6, aspect=20)
-            cbar3.ax.tick_params(labelsize=14)
-        
-        plt.subplots_adjust(wspace=0.3, hspace=0.3)
-        plt.tight_layout(pad=1.5)
-        
-        # Save plot with diagnosis group in filename
-        filename = f'custom_full_biomarkers_orig_recon_wilcoxon_{group_name}.png'
-        plt.savefig(op.join(self.plots_dir, filename), dpi=300, bbox_inches='tight')
-        plt.close()
-        
-        print(f"     ✅ Diagnosis-specific wilcoxon plot saved: {filename}")
-    
-    def _create_diagnosis_specific_spearman_topomap(self, topos_orig_all, topos_recon_all, info, marker_names, 
-                                                    diagnosis_group=None, sphere=None, outlines='head'):
-        """Create diagnosis-specific 4-column topographic plot with Spearman test."""
-        
-        if diagnosis_group is None or not self.patient_labels_original:
-            print("  ⚠️  No diagnosis filtering available, skipping diagnosis-specific spearman plots")
-            return
-        
-        group_name = '_'.join(diagnosis_group).replace('+', 'plus').replace('-', 'minus')
-        print(f"  🎯 Creating diagnosis-specific spearman plots for {diagnosis_group}...")
-        
-        # Filter subjects by diagnosis
-        subject_ids = self.global_topo_data['subjects']
-        filtered_indices = []
-        filtered_subject_ids = []
-        
-        for idx, subject_id in enumerate(subject_ids):
-            original_diagnosis = self.patient_labels_original.get(subject_id)
-            if original_diagnosis in diagnosis_group:
-                filtered_indices.append(idx)
-                filtered_subject_ids.append(subject_id)
-        
-        if len(filtered_indices) == 0:
-            print(f"     ⚠️  No subjects found with diagnoses {diagnosis_group}")
-            return
-        
-        if len(filtered_indices) < 6:
-            print(f"     ⚠️  Warning: Only {len(filtered_indices)} subjects found with diagnoses {diagnosis_group}. Spearman test requires N≥6 for reliable results.")
-        
-        print(f"     ✓ Found {len(filtered_indices)} subjects with diagnoses {diagnosis_group}")
-        
-        # Filter the topographic data
-        topos_orig_filtered = topos_orig_all[filtered_indices]
-        topos_recon_filtered = topos_recon_all[filtered_indices]
-        
-        # Compute mean across filtered subjects
-        topos_orig_mean = np.mean(topos_orig_filtered, axis=0)
-        topos_recon_mean = np.mean(topos_recon_filtered, axis=0)
-        
-        # Define the 8 biomarkers to plot
-        biomarker_specs = [
-            ('alpha_relative_spectralpower', 'Alpha Normalized'),
-            ('beta_relative_spectralpower', 'Beta Normalized'),
-            ('delta_relative_spectralpower', 'Delta Normalized'),
-            ('gamma_relative_spectralpower', 'Gamma Normalized'),
-            ('theta_relative_spectralpower', 'Theta Normalized'),
-            ('pe_theta_permutationentropy', 'Permutation\nEntropy'),
-            ('kolmogorov_complexity_kolmogorovcomplexity', 'Kolmogorov\nComplexity'),
-            ('spectral_entropy_spectralpower', 'Spectral\nEntropy')
-        ]
-        
-        # Find indices for these markers
-        biomarker_indices = []
-        biomarker_labels = []
-        
-        for marker_name, display_name in biomarker_specs:
-            if marker_name in marker_names:
-                idx = marker_names.index(marker_name)
-                biomarker_indices.append(idx)
-                biomarker_labels.append(display_name)
-        
-        if not biomarker_indices:
-            print(f"     ❌ No requested biomarkers found in data")
-            return
-        
-        n_biomarkers = len(biomarker_indices)
-        
-        # Create figure: 4 columns x n_biomarkers rows
-        fig, axes = plt.subplots(n_biomarkers, 4, figsize=(25, max(12, n_biomarkers * 2.5)))
-        
-        # Handle single row case
-        if n_biomarkers == 1:
-            axes = axes.reshape(1, -1)
-        
-        # Add column titles at the top
-        column_titles = ['Original', 'Reconstructed', 'Difference', 'Spearman Test']
-        for col, title in enumerate(column_titles):
-            axes[0, col].text(0.5, 1.15, title, transform=axes[0, col].transAxes,
-                             ha='center', va='bottom', fontsize=25)
-        
-        # Plot each biomarker
-        for row, (marker_idx, label) in enumerate(zip(biomarker_indices, biomarker_labels)):
-            orig_data = topos_orig_mean[marker_idx, :]
-            recon_data = topos_recon_mean[marker_idx, :]
-            diff_data = orig_data - recon_data
-            
-            # Find common scale for original and reconstructed
-            orig_min, orig_max = np.min(orig_data), np.max(orig_data)
-            recon_min, recon_max = np.min(recon_data), np.max(recon_data)
-            
-            common_min = min(orig_min, recon_min)
-            common_max = max(orig_max, recon_max)
-            
-            # Symmetric scale for difference
-            diff_max_abs = max(abs(np.min(diff_data)), abs(np.max(diff_data)))
-            diff_vmin, diff_vmax = -diff_max_abs, diff_max_abs
-            
-            # Column 1: Original
-            im1, _ = mne.viz.plot_topomap(orig_data, info, axes=axes[row, 0],
-                                         vlim=(common_min, common_max),
-                                         show=False, cmap='viridis',
-                                         sphere=sphere, outlines=outlines,
-                                         extrapolate='local',
-                                         res=256, sensors=True, contours=6)
-            axes[row, 0].set_title('')
-            
-            # Column 2: Reconstructed
-            im2, _ = mne.viz.plot_topomap(recon_data, info, axes=axes[row, 1],
-                                         vlim=(common_min, common_max),
-                                         show=False, cmap='viridis',
-                                         sphere=sphere, outlines=outlines,
-                                         extrapolate='local',
-                                         res=256, sensors=True, contours=6)
-            axes[row, 1].set_title('')
-            
-            # Column 3: Difference
-            im3, _ = mne.viz.plot_topomap(diff_data, info, axes=axes[row, 2],
-                                         vlim=(diff_vmin, diff_vmax),
-                                         show=False, cmap='RdBu_r',
-                                         sphere=sphere, outlines=outlines,
-                                         extrapolate='local',
-                                         res=256, sensors=True, contours=6)
-            axes[row, 2].set_title('')
-            
-            # Column 4: Electrode-wise Spearman test
-            if topos_orig_filtered is not None and topos_recon_filtered is not None:
-                # Perform electrode-wise Spearman correlation test
-                n_channels = topos_orig_filtered.shape[2]
-                p_values = np.zeros(n_channels)
-                
-                for ch in range(n_channels):
-                    try:
-                        orig_ch = topos_orig_filtered[:, marker_idx, ch]  # shape: (n_subjects,)
-                        recon_ch = topos_recon_filtered[:, marker_idx, ch]
-                        corr, p = stats.spearmanr(orig_ch, recon_ch)
-                        p_values[ch] = p
-                    except:
-                        p_values[ch] = 1.0  # Conservative: assume no significance
-                
-                # Apply FDR correction across electrodes
-                if HAS_STATSMODELS:
-                    _, p_values_corrected, _, _ = multipletests(p_values, method='fdr_bh')
-                else:
-                    p_values_corrected = p_values
-                    print("  ⚠️  statsmodels not available, using uncorrected p-values")
-                
-                # Create discrete p-value map for visualization
-                p_map = np.zeros(n_channels)
-                p_map[p_values_corrected < 0.01] = 0      # black: p < 0.01
-                p_map[(p_values_corrected >= 0.01) & (p_values_corrected < 0.05)] = 1  # gray: 0.01 ≤ p < 0.05
-                p_map[p_values_corrected >= 0.05] = 2    # white: p ≥ 0.05
-                
-                # Create custom colormap for discrete colors
-                cmap = ListedColormap(['black', 'gray', 'white'])
-                
-                # Plot p-value map
-                im4, _ = mne.viz.plot_topomap(p_map, info, axes=axes[row, 3],
-                                             vlim=(0, 2), cmap=cmap,
-                                             show=False, sphere=sphere, outlines=outlines,
-                                             extrapolate='local', res=256, sensors=True)
-                axes[row, 3].set_title('')
-                
-                # Add colorbar for p-values
-                cbar4 = plt.colorbar(im4, ax=axes[row, 3], shrink=0.6, aspect=20, ticks=[0, 1, 2])
-                cbar4.ax.set_yticklabels(['p<0.01', '0.01≤p<0.05', 'p≥0.05'])
-                cbar4.ax.tick_params(labelsize=12)
-            else:
-                axes[row, 3].text(0.5, 0.5, 'Spearman\nTest\nNo Data', 
-                                  transform=axes[row, 3].transAxes,
-                                  fontsize=16, ha='center', va='center')
-                axes[row, 3].set_xlim(0, 1)
-                axes[row, 3].set_ylim(0, 1)
-                axes[row, 3].axis('off')
-            
-            # Add row label
-            axes[row, 0].text(-0.3, 0.5, label, transform=axes[row, 0].transAxes,
-                             ha='right', va='center', fontsize=25,
-                             rotation=0)
-            
-            # Add colorbars for columns 2 and 3
-            cbar2 = plt.colorbar(im2, ax=axes[row, 1], shrink=0.6, aspect=20)
-            cbar2.ax.tick_params(labelsize=14)
-            
-            cbar3 = plt.colorbar(im3, ax=axes[row, 2], shrink=0.6, aspect=20)
-            cbar3.ax.tick_params(labelsize=14)
-        
-        plt.subplots_adjust(wspace=0.3, hspace=0.3)
-        plt.tight_layout(pad=1.5)
-        
-        # Save plot with diagnosis group in filename
-        filename = f'custom_full_biomarkers_orig_recon_spearman_{group_name}.png'
-        plt.savefig(op.join(self.plots_dir, filename), dpi=300, bbox_inches='tight')
-        plt.close()
-        
-        print(f"     ✅ Diagnosis-specific spearman plot saved: {filename}")
-    
     def create_mne_topomap_plots(self):
-        """Create the 10 required MNE topographic plots."""
+        """Create the 6 required MNE topographic plots."""
         if not HAS_MNE:
             print("  ⚠️  Skipping MNE topomap plots - MNE-Python not available")
             return
@@ -1679,21 +1240,10 @@ class GlobalTopoAnalyzer:
         self._create_custom_full_biomarker_topomap_spearman(topos_orig_mean, topos_recon_mean, info, marker_names, topos_orig_all, topos_recon_all, sphere, outlines)
         self._create_custom_full_biomarker_topomap_wilcoxon_corrected(topos_orig_mean, topos_recon_mean, info, marker_names, topos_orig_all, topos_recon_all, sphere, outlines)
         
-        # 4. Diagnosis-specific statistical test plots
-        print(f"  🎯 Creating diagnosis-specific statistical test plots...")
-        self._create_diagnosis_specific_wilcoxon_topomap(topos_orig_all, topos_recon_all, info, marker_names, 
-                                                         diagnosis_group=['MCS+', 'MCS-'], sphere=sphere, outlines=outlines)
-        self._create_diagnosis_specific_wilcoxon_topomap(topos_orig_all, topos_recon_all, info, marker_names, 
-                                                         diagnosis_group=['UWS', 'VS'], sphere=sphere, outlines=outlines)
-        self._create_diagnosis_specific_spearman_topomap(topos_orig_all, topos_recon_all, info, marker_names, 
-                                                        diagnosis_group=['MCS+', 'MCS-'], sphere=sphere, outlines=outlines)
-        self._create_diagnosis_specific_spearman_topomap(topos_orig_all, topos_recon_all, info, marker_names, 
-                                                        diagnosis_group=['UWS', 'VS'], sphere=sphere, outlines=outlines)
-        
-        print(f"  ✅ Created 10 custom biomarker topographic plots")
+        print(f"  ✅ Created 6 custom biomarker topographic plots")
     
     def run_analysis(self):
-        """Run the minimal topographic analysis for the 10 required plots."""
+        """Run the minimal topographic analysis for the 6 required plots."""
         print("=" * 60)
         print("GLOBAL TOPOGRAPHIC ANALYSIS - MINIMAL VERSION")
         print("=" * 60)
@@ -1707,37 +1257,33 @@ class GlobalTopoAnalyzer:
         # Prepare data structures
         self.prepare_global_data()
         
-        # Create the 10 required plots
+        # Create the 6 required plots
         print("\n--- Creating Required Plots ---")
         self.create_mne_topomap_plots()
         
-        print("=" * 60)
+        print("\n" + "=" * 60)
         print("TOPOGRAPHIC ANALYSIS COMPLETE")
         print("=" * 60)
         print(f"Subjects analyzed: {len(subjects)}")
         print(f"Plots saved to: {self.plots_dir}")
-        print(f"Created 10 plots:")
+        print(f"Created 6 plots:")
         print(f"  1. custom_biomarkers_orig_recon_diff.png")
         print(f"  2. custom_biomarkers_orig_recon_diff_MCSplus_MCSminus.png")
         print(f"  3. custom_biomarkers_orig_recon_diff_UWS_VS.png")
         print(f"  4. custom_full_biomarkers_orig_recon_wilcoxon.png")
         print(f"  5. custom_full_biomarkers_orig_recon_spearman.png")
         print(f"  6. custom_full_biomarkers_orig_recon_wilcoxon_corrected.png")
-        print(f"  7. custom_full_biomarkers_orig_recon_wilcoxon_MCSplus_MCSminus.png")
-        print(f"  8. custom_full_biomarkers_orig_recon_wilcoxon_UWS_VS.png")
-        print(f"  9. custom_full_biomarkers_orig_recon_spearman_MCSplus_MCSminus.png")
-        print(f"  10. custom_full_biomarkers_orig_recon_spearman_UWS_VS.png")
         print("=" * 60)
 
 
 def main():
     """Main function."""
-    parser = argparse.ArgumentParser(description='Global topographic analysis - Minimal version for 10 plots')
+    parser = argparse.ArgumentParser(description='Global topographic analysis - Minimal version for 6 plots')
     parser.add_argument('--results-dir', 
                        default='/data/project/eeg_foundation/src/doc_benchmark/results/new_results/MARKERS',
                        help='Results directory containing subject folders')
     parser.add_argument('--output-dir', 
-                       default='/data/project/eeg_foundation/src/doc_benchmark/results/new_results/GLOBAL/control_rs',
+                       default='/data/project/eeg_foundation/src/doc_benchmark/results/new_results/GLOBAL',
                        help='Output directory for topographic analysis')
     parser.add_argument('--patient-labels', 
                        default='/data/project/eeg_foundation/data/metadata/patient_labels_with_controls.csv',

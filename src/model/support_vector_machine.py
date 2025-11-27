@@ -4179,7 +4179,7 @@ def main():
     parser = argparse.ArgumentParser(
         description='Cross-subject binary SVM classification for VS vs MCS consciousness states'
     )
-    parser.add_argument('--data-dir', default = '/data/project/eeg_foundation/src/doc_benchmark/results/new_results/MARKERS/computed_data_DoC',
+    parser.add_argument('--data-dir', default = '/data/project/eeg_foundation/src/doc_benchmark/results/new_results/MARKERS/computed_data',
                        help='Path to results directory containing subject data')
     parser.add_argument('--patient-labels', default = '/data/project/eeg_foundation/data/metadata/patient_labels_with_controls.csv',
                        help='Path to CSV file with patient labels')
