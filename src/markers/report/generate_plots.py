@@ -15,6 +15,7 @@ import argparse
 import gc
 import logging
 import sys
+import time
 from pathlib import Path
 import mne
 
@@ -42,6 +43,38 @@ from report_modules.viz import (
     render_prediction_summary,
 )
 from report_modules.viz.equipments import prepare_layout
+
+
+def _ensure_montage(evoked, reference_info):
+    """Copy montage / digitization from reference_info into an Evoked if missing.
+
+    Reconstructed FIF files created by mne.EpochsArray often lack electrode
+    locations.  This helper copies them from the original epochs info so that
+    topomap plotting works.
+    """
+    if evoked is None or reference_info is None:
+        return evoked
+    # Check if evoked already has channel positions
+    try:
+        has_locs = any(
+            ch.get("loc") is not None and not np.all(np.array(ch["loc"][:3]) == 0)
+            for ch in evoked.info["chs"]
+        )
+    except Exception:
+        has_locs = False
+    if has_locs:
+        return evoked
+    # Copy digitization and channel locations from reference
+    try:
+        evoked.info["dig"] = reference_info["dig"]
+        # Copy per-channel loc arrays (match by name)
+        ref_locs = {ch["ch_name"]: ch["loc"] for ch in reference_info["chs"]}
+        for ch in evoked.info["chs"]:
+            if ch["ch_name"] in ref_locs:
+                ch["loc"] = ref_locs[ch["ch_name"]]
+    except Exception:
+        pass
+    return evoked
 
 
 def main():
@@ -177,37 +210,58 @@ def main():
 
         # === DIAGNOSTIC PLOTS ===
         logger.info("Adding diagnostic plots...")
-        _add_diagnostic_plots(report, epochs, data_path_original, data_path_recon, output_dir)
+        try:
+            _add_diagnostic_plots(report, epochs, data_path_original, data_path_recon, output_dir)
+        except Exception as e:
+            logger.warning(f"Diagnostic plots failed: {e}")
         gc.collect()
 
         # === ERP PLOTS ===
         logger.info("Adding ERP plots...")
-        _add_erp_plots(report, epochs, args.skip_clustering, data_path_original, data_path_recon, output_dir)
+        try:
+            _add_erp_plots(report, epochs, args.skip_clustering, data_path_original, data_path_recon, output_dir, reference_info=epochs.info)
+        except Exception as e:
+            logger.warning(f"ERP plots failed: {e}")
         gc.collect()
 
         # === CNV PLOTS ===
         logger.info("Adding CNV plots...")
-        _add_cnv_plots(report, data_path_original, data_path_recon, output_dir)
+        try:
+            _add_cnv_plots(report, data_path_original, data_path_recon, output_dir)
+        except Exception as e:
+            logger.warning(f"CNV plots failed: {e}")
         gc.collect()
 
         # === SPECTRAL PLOTS ===
         logger.info("Adding spectral plots...")
-        _add_spectral_plots(report, data_path_original, data_path_recon, output_dir)
+        try:
+            _add_spectral_plots(report, data_path_original, data_path_recon, output_dir)
+        except Exception as e:
+            logger.warning(f"Spectral plots failed: {e}")
         gc.collect()
 
         # === CONNECTIVITY PLOTS ===
         logger.info("Adding connectivity plots...")
-        _add_connectivity_plots(report, data_path_original, data_path_recon, output_dir)
+        try:
+            _add_connectivity_plots(report, data_path_original, data_path_recon, output_dir)
+        except Exception as e:
+            logger.warning(f"Connectivity plots failed: {e}")
         gc.collect()
 
         # === INFORMATION THEORY PLOTS ===
         logger.info("Adding information theory plots...")
-        _add_information_theory_plots(report, data_path_original, data_path_recon, output_dir)
+        try:
+            _add_information_theory_plots(report, data_path_original, data_path_recon, output_dir)
+        except Exception as e:
+            logger.warning(f"Information theory plots failed: {e}")
         gc.collect()
 
         # === PREDICTION ANALYSIS ===
         logger.info("Adding prediction analysis...")
-        _add_prediction_plots(report, data_path_original, data_path_recon, output_dir)
+        try:
+            _add_prediction_plots(report, data_path_original, data_path_recon, output_dir)
+        except Exception as e:
+            logger.warning(f"Prediction plots failed: {e}")
         gc.collect()
 
         logger.info("="*60)
@@ -237,6 +291,9 @@ def _add_preprocessing_plots(report, epochs, report_data, save_dir=None):
     import json
     import pickle
     logger = logging.getLogger(__name__)
+    start_time = time.time()
+    logger.info(f"[TIMING] Starting preprocessing plots at {start_time}")
+    sys.stdout.flush()  # Ensure timing log is written immediately
     
     # Get preprocessing info
     metadata = report_data.get("metadata", {})
@@ -373,6 +430,7 @@ def _add_preprocessing_plots(report, epochs, report_data, save_dir=None):
     </div>
     """
     report.add_html(html, title="Preprocessing Summary", section="Preprocessing")
+    logger.info(f"[TIMING] Completed preprocessing plots in {time.time() - start_time:.2f}s")
 
 
 def _create_side_by_side_figure(fig_left, fig_right, title_left="ORIGINAL", title_right="RECONSTRUCTED"):
@@ -484,6 +542,9 @@ def _create_vertical_stacked_figure(fig_top, fig_bottom, title_top="ORIGINAL", t
 def _add_diagnostic_plots(report, epochs, data_path_original, data_path_recon, save_dir=None):
     """Add diagnostic plots (side-by-side comparison)"""
     logger = logging.getLogger(__name__)
+    start_time = time.time()
+    logger.info(f"[TIMING] Starting diagnostic plots at {start_time}")
+    sys.stdout.flush()  # Ensure timing log is written immediately
     # 1. Local Global Paradigm (same for both)
     fig = mne.viz.plot_events(epochs.events, epochs.info["sfreq"], event_id=epochs.event_id)
     ax = fig.get_axes()[0]
@@ -586,6 +647,7 @@ def _add_diagnostic_plots(report, epochs, data_path_original, data_path_recon, s
         
         report.add_figure(fig, title="All Blocks: Global Field Power Comparison", section="Diagnostic")
         plt.close(fig)
+    logger.info(f"[TIMING] Completed diagnostic plots in {time.time() - start_time:.2f}s")
 
 
 def _add_cnv_plots(report, data_path_original, data_path_recon, save_dir=None):
@@ -593,6 +655,9 @@ def _add_cnv_plots(report, data_path_original, data_path_recon, save_dir=None):
     import pickle
     import logging
     logger = logging.getLogger(__name__)
+    start_time = time.time()
+    logger.info(f"[TIMING] Starting CNV plots at {start_time}")
+    sys.stdout.flush()  # Ensure timing log is written immediately
     
     event_times = {0: "I", 150: "II", 300: "III", 450: "IV", 600: "V"}
     cnv_path_original = Path(data_path_original) / "cnv_computed_data.pkl"
@@ -696,12 +761,16 @@ def _add_cnv_plots(report, data_path_original, data_path_recon, save_dir=None):
             plt.close(fig_orig)
         if fig_recon:
             plt.close(fig_recon)
+    logger.info(f"[TIMING] Completed CNV plots in {time.time() - start_time:.2f}s")
 
 
 def _add_spectral_plots(report, data_path_original, data_path_recon, save_dir=None):
     """Add spectral plots (side-by-side comparison with matched scales)"""
     import pickle
     logger = logging.getLogger(__name__)
+    start_time = time.time()
+    logger.info(f"[TIMING] Starting spectral plots at {start_time}")
+    sys.stdout.flush()  # Ensure timing log is written immediately
     
     # Helper to match scales and plot side-by-side
     def plot_with_matched_scales(path_orig, path_recon, title_base, section, plot_prefix):
@@ -795,12 +864,16 @@ def _add_spectral_plots(report, data_path_original, data_path_recon, save_dir=No
         "Spectral",
         "summaries"
     )
+    logger.info(f"[TIMING] Completed spectral plots in {time.time() - start_time:.2f}s")
 
 
 def _add_connectivity_plots(report, data_path_original, data_path_recon, save_dir=None):
     """Add connectivity plots (vertically stacked with matched scales)"""
     import pickle
     logger = logging.getLogger(__name__)
+    start_time = time.time()
+    logger.info(f"[TIMING] Starting connectivity plots at {start_time}")
+    sys.stdout.flush()  # Ensure timing log is written immediately
     
     # Helper for markers topos
     def plot_markers_with_matched_scales(path_orig, path_recon, title_base, section):
@@ -910,6 +983,9 @@ def _add_information_theory_plots(report, data_path_original, data_path_recon, s
     """Add information theory plots (side-by-side comparison with matched scales)"""
     import pickle
     logger = logging.getLogger(__name__)
+    start_time = time.time()
+    logger.info(f"[TIMING] Starting information theory plots at {start_time}")
+    sys.stdout.flush()  # Ensure timing log is written immediately
     
     # Helper for markers topos
     def plot_markers_with_matched_scales(path_orig, path_recon, title_base, section):
@@ -1022,17 +1098,21 @@ def _add_information_theory_plots(report, data_path_original, data_path_recon, s
             measure_name.upper(),
             "Information Theory"
         )
+    logger.info(f"[TIMING] Completed information theory plots in {time.time() - start_time:.2f}s")
 
 
-def _add_erp_plots(report, epochs, skip_clustering, data_path_original, data_path_recon, save_dir=None):
+def _add_erp_plots(report, epochs, skip_clustering, data_path_original, data_path_recon, save_dir=None, reference_info=None):
     """Add ERP plots (side-by-side comparison)"""
     logger = logging.getLogger(__name__)
+    start_time = time.time()
+    logger.info(f"[TIMING] Starting ERP plots at {start_time}")
+    sys.stdout.flush()  # Ensure timing log is written immediately
     
     logger.info("Generating side-by-side ERP plots...")
     
     # Generate figures for both datasets
-    figs_orig = _generate_erp_figures(epochs, skip_clustering, data_path_original, "ORIGINAL", save_dir)
-    figs_recon = _generate_erp_figures(epochs, skip_clustering, data_path_recon, "RECONSTRUCTED", save_dir)
+    figs_orig = _generate_erp_figures(epochs, skip_clustering, data_path_original, "ORIGINAL", save_dir, reference_info=reference_info)
+    figs_recon = _generate_erp_figures(epochs, skip_clustering, data_path_recon, "RECONSTRUCTED", save_dir, reference_info=reference_info)
     
     # Combine and add to report
     for key in figs_orig.keys():
@@ -1056,10 +1136,19 @@ def _add_erp_plots(report, epochs, skip_clustering, data_path_original, data_pat
                 plt.close(fig_orig)
             if fig_recon:
                 plt.close(fig_recon)
+    logger.info(f"[TIMING] Completed ERP plots in {time.time() - start_time:.2f}s")
 
 
-def _generate_erp_figures(epochs, skip_clustering, data_path, label_prefix, save_dir=None):
-    """Helper function to generate ERP figures for a single dataset - returns dict of figures"""
+def _generate_erp_figures(epochs, skip_clustering, data_path, label_prefix, save_dir=None, reference_info=None):
+    """Helper function to generate ERP figures for a single dataset - returns dict of figures.
+    
+    Parameters
+    ----------
+    reference_info : mne.Info | None
+        Info from the *original* epochs.  Used to copy montage/dig into
+        evokeds loaded from reconstructed pkl files that lack electrode
+        positions.
+    """
     logger = logging.getLogger(__name__)
     figures = {}
     
@@ -1074,36 +1163,47 @@ def _generate_erp_figures(epochs, skip_clustering, data_path, label_prefix, save
     # LOCAL EFFECT
     local_gfp_path = Path(data_path) / "local_effect_gfp.pkl"
     if local_gfp_path.exists():
-        fig_gfp = plot_gfp(computed_data_path=local_gfp_path, colors=["r", "b"], labels=local_labels,
-                           fig_kwargs=dict(figsize=(12, 6)), sns_kwargs=dict(style="darkgrid"))
-        figures["Local Effect - GFP"] = fig_gfp
+        try:
+            fig_gfp = plot_gfp(computed_data_path=local_gfp_path, colors=["r", "b"], labels=local_labels,
+                               fig_kwargs=dict(figsize=(12, 6)), sns_kwargs=dict(style="darkgrid"))
+            figures["Local Effect - GFP"] = fig_gfp
+        except Exception as e:
+            logger.warning(f"Skipping Local Effect GFP plot ({label_prefix}): {e}")
+            figures["Local Effect - GFP"] = None
     else:
         figures["Local Effect - GFP"] = None
     
     local_contrast_path = Path(data_path) / "local_effect_contrast.pkl"
     if local_contrast_path.exists():
-        evoked, _, _, local_contrast = get_contrast(computed_data_path=local_contrast_path)
-        evoked.shift_time(time_shift)
-        
-        fig_topo = plot_evoked_topomap(evoked, times=plot_times, ch_type="eeg", contours=0, cmap="RdBu_r",
-                                       cbar_fmt="%0.3f", average=0.04, units=r"$\mu{V}$", ncols=10, nrows="auto",
-                                       extrapolate="local", sns_kwargs=dict(style="white"))
-        figures["Local Effect - Topographies"] = fig_topo
-        
-        # Statistical color scaling
-        local_contrast.mlog10_p_val.shift_time(time_shift)
-        stat_data = np.array(local_contrast.mlog10_p_val.data)
-        stat_vmin_actual = max(0, np.nanmin(stat_data))
-        stat_vmax_actual = max(np.nanmax(stat_data), stat_logpsig + 2.0)
-        stat_cmap = get_stat_colormap(stat_logpsig, stat_vmin_actual, stat_vmax_actual)
-        
-        fig_topo_stat = plot_evoked_topomap(local_contrast.mlog10_p_val, times=plot_times, ch_type="eeg",
-                                           contours=0, cmap=stat_cmap, scalings=1, cbar_fmt="%0.3f", average=0.04,
-                                           units="-log10(p)", ncols=10, nrows="auto", extrapolate="local",
-                                           vlim=(stat_vmin_actual, stat_vmax_actual),
-                                           sns_kwargs=dict(style="white"))
-        figures["Local Effect - Topographies (-log10(p))"] = fig_topo_stat
-        gc.collect()
+        try:
+            evoked, _, _, local_contrast = get_contrast(computed_data_path=local_contrast_path)
+            _ensure_montage(evoked, reference_info)
+            _ensure_montage(local_contrast.mlog10_p_val, reference_info)
+            evoked.shift_time(time_shift)
+            
+            fig_topo = plot_evoked_topomap(evoked, times=plot_times, ch_type="eeg", contours=0, cmap="RdBu_r",
+                                           cbar_fmt="%0.3f", average=0.04, units=r"$\mu{V}$", ncols=10, nrows="auto",
+                                           extrapolate="local", sns_kwargs=dict(style="white"))
+            figures["Local Effect - Topographies"] = fig_topo
+            
+            # Statistical color scaling
+            local_contrast.mlog10_p_val.shift_time(time_shift)
+            stat_data = np.array(local_contrast.mlog10_p_val.data)
+            stat_vmin_actual = max(0, np.nanmin(stat_data))
+            stat_vmax_actual = max(np.nanmax(stat_data), stat_logpsig + 2.0)
+            stat_cmap = get_stat_colormap(stat_logpsig, stat_vmin_actual, stat_vmax_actual)
+            
+            fig_topo_stat = plot_evoked_topomap(local_contrast.mlog10_p_val, times=plot_times, ch_type="eeg",
+                                               contours=0, cmap=stat_cmap, scalings=1, cbar_fmt="%0.3f", average=0.04,
+                                               units="-log10(p)", ncols=10, nrows="auto", extrapolate="local",
+                                               vlim=(stat_vmin_actual, stat_vmax_actual),
+                                               sns_kwargs=dict(style="white"))
+            figures["Local Effect - Topographies (-log10(p))"] = fig_topo_stat
+            gc.collect()
+        except Exception as e:
+            logger.warning(f"Skipping Local Effect Topographies ({label_prefix}): {e}")
+            figures["Local Effect - Topographies"] = None
+            figures["Local Effect - Topographies (-log10(p))"] = None
     else:
         figures["Local Effect - Topographies"] = None
         figures["Local Effect - Topographies (-log10(p))"] = None
@@ -1112,8 +1212,12 @@ def _generate_erp_figures(epochs, skip_clustering, data_path, label_prefix, save
     if not skip_clustering:
         local_cluster_path = Path(data_path) / "local_cluster_test.pkl"
         if local_cluster_path.exists():
-            fig_cluster = plot_cluster_test(computed_data_path=local_cluster_path, sns_kwargs={"style": "darkgrid"})
-            figures["Local Effect - Cluster"] = fig_cluster
+            try:
+                fig_cluster = plot_cluster_test(computed_data_path=local_cluster_path, sns_kwargs={"style": "darkgrid"})
+                figures["Local Effect - Cluster"] = fig_cluster
+            except Exception as e:
+                logger.warning(f"Skipping Local Effect Cluster ({label_prefix}): {e}")
+                figures["Local Effect - Cluster"] = None
         else:
             figures["Local Effect - Cluster"] = None
     else:
@@ -1122,36 +1226,47 @@ def _generate_erp_figures(epochs, skip_clustering, data_path, label_prefix, save
     # GLOBAL EFFECT
     global_gfp_path = Path(data_path) / "global_effect_gfp.pkl"
     if global_gfp_path.exists():
-        fig_gfp = plot_gfp(computed_data_path=global_gfp_path, colors=["r", "b"], labels=global_labels,
-                           fig_kwargs=dict(figsize=(12, 6)), sns_kwargs=dict(style="darkgrid"))
-        figures["Global Effect - GFP"] = fig_gfp
+        try:
+            fig_gfp = plot_gfp(computed_data_path=global_gfp_path, colors=["r", "b"], labels=global_labels,
+                               fig_kwargs=dict(figsize=(12, 6)), sns_kwargs=dict(style="darkgrid"))
+            figures["Global Effect - GFP"] = fig_gfp
+        except Exception as e:
+            logger.warning(f"Skipping Global Effect GFP plot ({label_prefix}): {e}")
+            figures["Global Effect - GFP"] = None
     else:
         figures["Global Effect - GFP"] = None
     
     global_contrast_path = Path(data_path) / "global_effect_contrast.pkl"
     if global_contrast_path.exists():
-        evoked, _, _, global_contrast = get_contrast(computed_data_path=global_contrast_path)
-        evoked.shift_time(time_shift)
-        
-        fig_topo = plot_evoked_topomap(evoked, times=plot_times, ch_type="eeg", contours=0, cmap="RdBu_r",
-                                       cbar_fmt="%0.3f", average=0.04, units=r"$\mu{V}$", ncols=10, nrows="auto",
-                                       extrapolate="local", sns_kwargs=dict(style="white"))
-        figures["Global Effect - Topographies"] = fig_topo
-        
-        # Statistical color scaling
-        global_contrast.mlog10_p_val.shift_time(time_shift)
-        stat_data_global = np.array(global_contrast.mlog10_p_val.data)
-        stat_vmin_global = max(0, np.nanmin(stat_data_global))
-        stat_vmax_global = max(np.nanmax(stat_data_global), stat_logpsig + 2.0)
-        stat_cmap_global = get_stat_colormap(stat_logpsig, stat_vmin_global, stat_vmax_global)
-        
-        fig_topo_stat = plot_evoked_topomap(global_contrast.mlog10_p_val, times=plot_times, ch_type="eeg",
-                                           contours=0, cmap=stat_cmap_global, scalings=1, cbar_fmt="%0.3f", average=0.04,
-                                           units="-log10(p)", ncols=10, nrows="auto", extrapolate="local",
-                                           vlim=(stat_vmin_global, stat_vmax_global),
-                                           sns_kwargs=dict(style="white"))
-        figures["Global Effect - Topographies (-log10(p))"] = fig_topo_stat
-        gc.collect()
+        try:
+            evoked, _, _, global_contrast = get_contrast(computed_data_path=global_contrast_path)
+            _ensure_montage(evoked, reference_info)
+            _ensure_montage(global_contrast.mlog10_p_val, reference_info)
+            evoked.shift_time(time_shift)
+            
+            fig_topo = plot_evoked_topomap(evoked, times=plot_times, ch_type="eeg", contours=0, cmap="RdBu_r",
+                                           cbar_fmt="%0.3f", average=0.04, units=r"$\mu{V}$", ncols=10, nrows="auto",
+                                           extrapolate="local", sns_kwargs=dict(style="white"))
+            figures["Global Effect - Topographies"] = fig_topo
+            
+            # Statistical color scaling
+            global_contrast.mlog10_p_val.shift_time(time_shift)
+            stat_data_global = np.array(global_contrast.mlog10_p_val.data)
+            stat_vmin_global = max(0, np.nanmin(stat_data_global))
+            stat_vmax_global = max(np.nanmax(stat_data_global), stat_logpsig + 2.0)
+            stat_cmap_global = get_stat_colormap(stat_logpsig, stat_vmin_global, stat_vmax_global)
+            
+            fig_topo_stat = plot_evoked_topomap(global_contrast.mlog10_p_val, times=plot_times, ch_type="eeg",
+                                               contours=0, cmap=stat_cmap_global, scalings=1, cbar_fmt="%0.3f", average=0.04,
+                                               units="-log10(p)", ncols=10, nrows="auto", extrapolate="local",
+                                               vlim=(stat_vmin_global, stat_vmax_global),
+                                               sns_kwargs=dict(style="white"))
+            figures["Global Effect - Topographies (-log10(p))"] = fig_topo_stat
+            gc.collect()
+        except Exception as e:
+            logger.warning(f"Skipping Global Effect Topographies ({label_prefix}): {e}")
+            figures["Global Effect - Topographies"] = None
+            figures["Global Effect - Topographies (-log10(p))"] = None
     else:
         figures["Global Effect - Topographies"] = None
         figures["Global Effect - Topographies (-log10(p))"] = None
@@ -1160,8 +1275,12 @@ def _generate_erp_figures(epochs, skip_clustering, data_path, label_prefix, save
     if not skip_clustering:
         global_cluster_path = Path(data_path) / "global_cluster_test.pkl"
         if global_cluster_path.exists():
-            fig_cluster = plot_cluster_test(computed_data_path=global_cluster_path, sns_kwargs={"style": "darkgrid"})
-            figures["Global Effect - Cluster"] = fig_cluster
+            try:
+                fig_cluster = plot_cluster_test(computed_data_path=global_cluster_path, sns_kwargs={"style": "darkgrid"})
+                figures["Global Effect - Cluster"] = fig_cluster
+            except Exception as e:
+                logger.warning(f"Skipping Global Effect Cluster ({label_prefix}): {e}")
+                figures["Global Effect - Cluster"] = None
         else:
             figures["Global Effect - Cluster"] = None
     else:
@@ -1175,6 +1294,9 @@ def _add_prediction_plots(report, data_path_original, data_path_recon, save_dir=
     """Add prediction plots from precomputed results (side-by-side comparison)"""
     import pickle
     logger = logging.getLogger(__name__)
+    start_time = time.time()
+    logger.info(f"[TIMING] Starting prediction plots at {start_time}")
+    sys.stdout.flush()  # Ensure timing log is written immediately
     
     # Process original predictions
     prediction_path_original = Path(data_path_original) / "prediction_results.pkl"
@@ -1199,6 +1321,7 @@ def _add_prediction_plots(report, data_path_original, data_path_recon, save_dir=
         </div>
         """
         report.add_html(html, title="Prediction Summary", section="Prediction")
+    logger.info(f"[TIMING] Completed prediction plots in {time.time() - start_time:.2f}s")
 
 
 def _process_prediction_data(report, prediction_path, label_prefix, save_dir=None):

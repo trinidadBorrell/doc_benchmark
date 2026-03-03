@@ -38,7 +38,7 @@ def setup_logging():
     return logging.getLogger(__name__)
 
 
-def find_all_fif_files(fif_folder):
+def find_all_fif_files(fif_folder, task = 'rs'):
     """Find all .fif files and organize by subject-session-type"""
     fif_path = Path(fif_folder)
     if not fif_path.exists():
@@ -53,7 +53,7 @@ def find_all_fif_files(fif_folder):
     for fif_file in fif_files:
         filename = fif_file.name
         # Extract: sub-AA048_ses-01_task-lg_acq-01_epo_original.fif
-        match = re.match(r'(sub-[^_]+)_(ses-\d+)_task-lg_acq-\d+_epo_(original|recon)\.fif', filename)
+        match = re.match(rf'(sub-[^_]+)_(ses-\d+)_task-{task}_acq-\d+_epo_(original|recon)\.fif', filename)
         if match:
             subject = match.group(1)
             session = match.group(2)
@@ -243,7 +243,7 @@ def submit_htcondor_job(submit_file, logger):
         return False, None
 
 
-def monitor_htcondor_jobs(cluster_ids, job_names, logger, check_interval=30):
+def monitor_htcondor_jobs(cluster_ids, job_names, logger, check_interval=30, yaml_dir=None):
     """Monitor multiple HTCondor jobs
     
     Args:
@@ -251,6 +251,7 @@ def monitor_htcondor_jobs(cluster_ids, job_names, logger, check_interval=30):
         job_names: List of job names (for logging)
         logger: Logger instance
         check_interval: Seconds between status checks
+        yaml_dir: Directory containing YAML files (used to find job logs)
     
     Returns:
         Dictionary mapping job names to success status
@@ -301,11 +302,65 @@ def monitor_htcondor_jobs(cluster_ids, job_names, logger, check_interval=30):
                         failed_count += 1
                         logger.error(f"❌ {job_name} failed with exit code {exit_code}")
                 else:
-                    # Log why we couldn't get exit code
-                    logger.warning(f"Could not get exit code for {job_name}: returncode={history_result.returncode}, stdout='{history_result.stdout}', stderr='{history_result.stderr}'")
-                    job_status[job_name] = 'failed'
-                    failed_count += 1
-                    logger.error(f"❌ {job_name} failed")
+                    # condor_history doesn't have the job - check job log as fallback
+                    logger.warning(f"Could not get exit code from condor_history for {job_name}: returncode={history_result.returncode}, stdout='{history_result.stdout}', stderr='{history_result.stderr}'")
+                    
+                    # Try to check job log file
+                    job_completed = None  # None means unknown
+                    if yaml_dir:
+                        job_log = Path(yaml_dir) / "htcondor_jobs" / job_name / "job.log"
+                        if job_log.exists():
+                            try:
+                                with open(job_log, 'r') as f:
+                                    log_content = f.read()
+                                    # Check for "Job terminated" and "return value 0"
+                                    # HTCondor log format: "Normal termination (return value 0)"
+                                    if "return value 0" in log_content:
+                                        logger.info(f"Found successful completion in job log for {job_name}")
+                                        job_completed = True
+                                    elif re.search(r'return value [1-9]', log_content):
+                                        # Job terminated with non-zero exit code
+                                        logger.info(f"Found failed completion in job log for {job_name}")
+                                        job_completed = False
+                                    elif "Job terminated" in log_content:
+                                        # Job terminated but couldn't parse return value - check H5 file
+                                        logger.warning(f"Job terminated but unclear return value for {job_name}, checking output file")
+                                        job_completed = None
+                                    else:
+                                        logger.warning(f"Job log exists but no clear completion status for {job_name}")
+                            except Exception as e:
+                                logger.warning(f"Could not read job log for {job_name}: {e}")
+                        else:
+                            logger.warning(f"Job log not found at {job_log}")
+                    
+                    # If still unknown, check if the H5 output file exists as final fallback
+                    if job_completed is None and yaml_dir:
+                        yaml_file = Path(yaml_dir) / f"{job_name}.yaml"
+                        if yaml_file.exists():
+                            try:
+                                ryaml_check = YAML()
+                                with open(yaml_file, 'r') as f:
+                                    config_check = ryaml_check.load(f)
+                                    h5_path = config_check.get('storage', {}).get('uri')
+                                    if h5_path and Path(h5_path).exists():
+                                        logger.info(f"H5 output file exists for {job_name}, assuming success")
+                                        job_completed = True
+                            except Exception as e:
+                                logger.warning(f"Could not check H5 file for {job_name}: {e}")
+                    
+                    if job_completed is True:
+                        job_status[job_name] = 'completed'
+                        completed_count += 1
+                        logger.info(f"✅ {job_name} completed successfully (verified from log/output)")
+                    elif job_completed is False:
+                        job_status[job_name] = 'failed'
+                        failed_count += 1
+                        logger.error(f"❌ {job_name} failed (non-zero exit code)")
+                    else:
+                        # job_completed is None - truly unknown
+                        job_status[job_name] = 'failed'
+                        failed_count += 1
+                        logger.error(f"❌ {job_name} failed (could not verify completion)")
             else:
                 running_count += 1
         
@@ -477,12 +532,12 @@ def main():
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=20,
+        default=10,
         help="Number of subject-sessions to process per batch (default: 20)"
     )
     parser.add_argument(
         "--template-yaml",
-        default="input/icm_non-aggregated_full_markers_jobs.yaml",
+        default="input/icm_non-aggregated_full_markers_jobs_resting_state.yaml",
         help="Path to template YAML file"
     )
     parser.add_argument(
@@ -497,7 +552,7 @@ def main():
     )
     parser.add_argument(
         "--task",
-        default="lg",
+        default="rs",
         choices=["lg", "rs"],
         help="Paradigm task: 'lg' (Local-Global) or 'rs' (Resting State)"
     )
@@ -554,7 +609,7 @@ def main():
     
     # Find all FIF files
     try:
-        all_files = find_all_fif_files(args.fif_folder)
+        all_files = find_all_fif_files(args.fif_folder, args.task)
         logger.info(f"Found {len(all_files)} .fif files")
     except Exception as e:
         logger.error(f"Error finding .fif files: {e}")
@@ -661,7 +716,7 @@ def main():
             
             # Monitor all jobs
             logger.info(f"Waiting for {len(cluster_ids)} jobs to complete...")
-            job_results = monitor_htcondor_jobs(cluster_ids, job_names, logger, args.check_interval)
+            job_results = monitor_htcondor_jobs(cluster_ids, job_names, logger, args.check_interval, yaml_dir=batch_yaml_dir)
             
             # Process results for successful jobs
             logger.info(f"Processing results for batch {batch_idx + 1}...")
