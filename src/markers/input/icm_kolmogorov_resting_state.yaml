@@ -1,0 +1,55 @@
+---
+# ICM Complete Configuration with Individual Markers
+# Replicates ICMReportDataExtractorReviewed using individual junifer markers
+# Based on analysis of icm_report_data_extractor_reviewed.py
+
+with:
+  - "junifer_eeg"
+
+workdir: "."
+
+queue:
+  jobname: TestCondor
+  kind: HTCondor
+  env:
+    kind: venv
+    name: /data/project/eeg_foundation/src/doc_benchmark/.venv_n  # should be at the level above `bin/activate`
+    shell: zsh
+  mem: 8G
+  disk: 2G
+  collect: "yes"
+
+datagrabber:
+  kind: ICMLGDataGrabber
+  patterns:
+    EEG:
+      pattern: "dummy.fif"
+      space: "native"
+  replacements: []
+  types:
+    - EEG
+  datadir: "/data/project/eeg_foundation/"
+
+storage:
+  kind: HDF5FeatureStorage
+  uri: icm_complete_features.h5
+  single_output: true
+
+markers:
+
+# ========================================
+# KOLMOGOROV COMPLEXITY (1 total)
+# ========================================
+
+  # Kolmogorov Complexity (broadband)
+  - kind: KolmogorovComplexity
+    name: kolmogorov_complexity
+    tmin: null
+    tmax: 0.6  # ICM standard
+    nbins: 32
+    channel_aggregation_method: null
+    trial_aggregation_method: null
+    on: EEG
+
+
+  

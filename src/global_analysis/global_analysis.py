@@ -357,35 +357,35 @@ class MarkerNameMapper:
     def __init__(self):
         # IMPORTANT: These names must match EXACTLY the format used in analysis_summary.json
         # The format is: ClassName_comment (where comment comes from marker creation)
+        # NEW NAMING SCHEME - Updated to match new pipeline marker names
         self.marker_names = [
-            'PowerSpectralDensity_delta',
-            'PowerSpectralDensity_deltan',
-            'PowerSpectralDensity_theta',
-            'PowerSpectralDensity_thetan',
-            'PowerSpectralDensity_alpha',
-            'PowerSpectralDensity_alphan',
-            'PowerSpectralDensity_beta',
-            'PowerSpectralDensity_betan',
-            'PowerSpectralDensity_gamma',
-            'PowerSpectralDensity_gamman',
-            'PowerSpectralDensity_summary_se',
-            'PowerSpectralDensitySummary_summary_msf',
-            'PowerSpectralDensitySummary_summary_sef90',
-            'PowerSpectralDensitySummary_summary_sef95',
-            'PermutationEntropy_default',
-            'SymbolicMutualInformation_weighted',
-            'KolmogorovComplexity_default',
-            'ContingentNegativeVariation_default',
-            'TimeLockedTopography_p1',
-            'TimeLockedTopography_p3a',
-            'TimeLockedTopography_p3b',
-            'TimeLockedContrast_LSGS-LDGD',
-            'TimeLockedContrast_LSGD-LDGS',
-            'TimeLockedContrast_LD-LS',
-            'TimeLockedContrast_mmn',
-            'TimeLockedContrast_p3a',
-            'TimeLockedContrast_GD-GS',
-            'TimeLockedContrast_p3b'
+            'delta_power_spectralpower',
+            'delta_relative_spectralpower',
+            'theta_power_spectralpower',
+            'theta_relative_spectralpower',
+            'alpha_power_spectralpower',
+            'alpha_relative_spectralpower',
+            'beta_power_spectralpower',
+            'beta_relative_spectralpower',
+            'gamma_power_spectralpower',
+            'gamma_relative_spectralpower',
+            'spectral_entropy_spectralpower',
+            'msf_psdsummary',
+            'sef90_psdsummary',
+            'sef95_psdsummary',
+            'pe_theta_permutationentropy',
+            'kolmogorov_complexity_kolmogorovcomplexity',
+            'cnv_detailed_cnvslope',
+            'p1_topography_timelockedtopo',
+            'p3a_topography_timelockedtopo',
+            'p3b_topography_timelockedtopo',
+            'timelockedcontrast_lsgs_ldgd_timelockedcontrast',
+            'timelockedcontrast_lsgd_ldgs_timelockedcontrast',
+            'timelockedcontrast_ld_ls_timelockedcontrast',
+            'timelockedcontrast_mmn_timelockedcontrast',
+            'timelockedcontrast_p3a_timelockedcontrast',
+            'timelockedcontrast_gd_gs_timelockedcontrast',
+            'Timelockedcontrast_p3b_timelockedcontrast'
         ]
         
         # Both scalar and topo use the same names since they're the same markers
@@ -403,208 +403,7 @@ class MarkerNameMapper:
         return f'Topo_Marker_{idx}'
 
 
-class OutlierDetector:
-    """Methods for detecting and filtering outliers in data."""
-    
-    @staticmethod
-    def detect_outliers_iqr(data, factor=1.5):
-        """Detect outliers using the IQR method.
-        
-        Parameters
-        ----------
-        data : array-like
-            Input data
-        factor : float
-            IQR factor for outlier detection (typically 1.5 or 3.0)
-            
-        Returns
-        -------
-        mask : boolean array
-            True for outliers, False for normal values
-        """
-        data = np.asarray(data)
-        if data.size == 0:
-            return np.array([], dtype=bool)
-            
-        q1 = np.percentile(data, 25)
-        q3 = np.percentile(data, 75)
-        iqr = q3 - q1
-        
-        lower_bound = q1 - factor * iqr
-        upper_bound = q3 + factor * iqr
-        
-        outliers = (data < lower_bound) | (data > upper_bound)
-        return outliers
-    
-    @staticmethod
-    def detect_outliers_zscore(data, threshold=3.0):
-        """Detect outliers using z-score method.
-        
-        Parameters
-        ----------
-        data : array-like
-            Input data
-        threshold : float
-            Z-score threshold for outlier detection
-            
-        Returns
-        -------
-        mask : boolean array
-            True for outliers, False for normal values
-        """
-        data = np.asarray(data)
-        if data.size == 0:
-            return np.array([], dtype=bool)
-            
-        z_scores = np.abs(zscore(data, nan_policy='omit'))
-        outliers = z_scores > threshold
-        return outliers
-    
-    @staticmethod
-    def filter_outliers_2d(matrix, method='iqr', factor=1.5, threshold=3.0):
-        """Filter outliers from a 2D matrix for better visualization.
-        
-        Parameters
-        ----------
-        matrix : 2D array
-            Input matrix
-        method : str
-            'iqr' or 'zscore'
-        factor : float
-            IQR factor (for IQR method)
-        threshold : float
-            Z-score threshold (for zscore method)
-            
-        Returns
-        -------
-        filtered_matrix : 2D array
-            Matrix with outliers clipped to bounds
-        outlier_info : dict
-            Information about detected outliers
-        """
-        matrix = np.asarray(matrix)
-        original_matrix = matrix.copy()
-        
-        # Flatten for outlier detection
-        flat_data = matrix.flatten()
-        flat_data = flat_data[~np.isnan(flat_data)]  # Remove NaNs
-        
-        if len(flat_data) == 0:
-            return matrix, {'n_outliers': 0, 'outlier_percent': 0}
-        
-        # Detect outliers
-        if method == 'iqr':
-            outlier_mask = OutlierDetector.detect_outliers_iqr(flat_data, factor)
-            # Get bounds
-            q1 = np.percentile(flat_data, 25)
-            q3 = np.percentile(flat_data, 75)
-            iqr = q3 - q1
-            lower_bound = q1 - factor * iqr
-            upper_bound = q3 + factor * iqr
-        else:  # zscore
-            outlier_mask = OutlierDetector.detect_outliers_zscore(flat_data, threshold)
-            # Get bounds based on std
-            mean_val = np.nanmean(flat_data)
-            std_val = np.nanstd(flat_data)
-            lower_bound = mean_val - threshold * std_val
-            upper_bound = mean_val + threshold * std_val
-        
-        # Count outliers
-        n_outliers = np.sum(outlier_mask)
-        outlier_percent = (n_outliers / len(flat_data)) * 100
-        
-        # Clip outliers to bounds
-        filtered_matrix = matrix.copy()
-        filtered_matrix = np.clip(filtered_matrix, lower_bound, upper_bound)
-        
-        outlier_info = {
-            'n_outliers': int(n_outliers),
-            'outlier_percent': float(outlier_percent),
-            'total_values': len(flat_data),
-            'lower_bound': float(lower_bound),
-            'upper_bound': float(upper_bound),
-            'original_min': float(np.nanmin(matrix)),
-            'original_max': float(np.nanmax(matrix)),
-            'filtered_min': float(np.nanmin(filtered_matrix)),
-            'filtered_max': float(np.nanmax(filtered_matrix))
-        }
-        
-        return filtered_matrix, outlier_info
-    
-    @staticmethod
-    def create_comparison_heatmaps(fig, axes, original_matrix, filtered_matrix, outlier_info, 
-                                  title_base, xlabel, ylabel, xticklabels=None, yticklabels=None):
-        """Create side-by-side comparison of original and outlier-filtered heatmaps.
-        
-        Parameters
-        ----------
-        fig : matplotlib figure
-        axes : array of matplotlib axes (2 axes)
-        original_matrix : 2D array
-            Original data matrix
-        filtered_matrix : 2D array  
-            Outlier-filtered data matrix
-        outlier_info : dict
-            Information about outliers
-        title_base : str
-            Base title for the plots
-        xlabel, ylabel : str
-            Axis labels
-        xticklabels, yticklabels : list, optional
-            Tick labels
-        """
-        
-        # Determine if data should be centered around 0
-        orig_min, orig_max = np.nanmin(original_matrix), np.nanmax(original_matrix)
-        filt_min, filt_max = np.nanmin(filtered_matrix), np.nanmax(filtered_matrix)
-        
-        # Check if data crosses zero significantly
-        crosses_zero = (orig_min < -0.1 * abs(orig_max)) and (orig_max > 0.1 * abs(orig_min))
-        
-        if crosses_zero:
-            # Use symmetric colormap around 0
-            orig_vmax = max(abs(orig_min), abs(orig_max))
-            filt_vmax = max(abs(filt_min), abs(filt_max))
-            cmap = 'RdBu_r'
-            orig_vmin, orig_vmax = -orig_vmax, orig_vmax
-            filt_vmin, filt_vmax = -filt_vmax, filt_vmax
-        else:
-            # Use regular colormap
-            cmap = 'viridis'
-            orig_vmin, orig_vmax = orig_min, orig_max
-            filt_vmin, filt_vmax = filt_min, filt_max
-        
-        # Original heatmap
-        im1 = axes[0].imshow(original_matrix, aspect='auto', cmap=cmap, 
-                            vmin=orig_vmin, vmax=orig_vmax)
-        axes[0].set_title(f'{title_base} (Original)\nRange: [{orig_min:.3f}, {orig_max:.3f}]')
-        axes[0].set_xlabel(xlabel)
-        axes[0].set_ylabel(ylabel)
-        
-        # Filtered heatmap
-        im2 = axes[1].imshow(filtered_matrix, aspect='auto', cmap=cmap,
-                            vmin=filt_vmin, vmax=filt_vmax)
-        axes[1].set_title(f'{title_base} (Outliers Filtered)\n'
-                         f'{outlier_info["n_outliers"]} outliers ({outlier_info["outlier_percent"]:.1f}%) filtered')
-        axes[1].set_xlabel(xlabel)
-        axes[1].set_ylabel(ylabel)
-        
-        # Set tick labels if provided
-        if xticklabels is not None:
-            for ax in axes:
-                ax.set_xticks(range(len(xticklabels)))
-                ax.set_xticklabels(xticklabels, rotation=45, ha='right')
-        
-        if yticklabels is not None:
-            for ax in axes:
-                ax.set_yticks(range(len(yticklabels)))
-                ax.set_yticklabels(yticklabels)
-        
-        # Add colorbars
-        plt.colorbar(im1, ax=axes[0])
-        plt.colorbar(im2, ax=axes[1])
-        
-        return im1, im2
+# OutlierDetector class removed - not needed for new pipeline
 
 
 # Define local compute_gfp function for fallback
@@ -687,7 +486,7 @@ def plot_gfp_local(epochs, conditions=None, colors=None, linestyles=None,
     
     return fig
 
-
+'''
 class GlobalFieldPowerGlobal:
     """Global Field Power analysis across all subjects."""
     
@@ -2235,7 +2034,7 @@ class GlobalFieldPowerGlobal:
         self._create_comprehensive_gfp_plots(aggregated_complete, times, event_types)
         
         print("     ✅ Cached GFP analysis completed successfully!")
-
+'''
 
 class GlobalAnalyzer:
     """Global analysis across multiple subjects."""
@@ -3507,32 +3306,32 @@ class GlobalAnalyzer:
         
         marker_names = [self.mapper.get_topo_name(i) for i in range(n_markers)]
         
-        # Define marker groups according to specifications
+        # Define marker groups according to new naming specifications
         psd_non_normalized = [
-            'PowerSpectralDensity_delta', 'PowerSpectralDensity_theta', 'PowerSpectralDensity_alpha', 
-            'PowerSpectralDensity_beta', 'PowerSpectralDensity_gamma'
+            'delta_power_spectralpower', 'theta_power_spectralpower', 'alpha_power_spectralpower', 
+            'beta_power_spectralpower', 'gamma_power_spectralpower'
         ]
         
         psd_normalized = [
-            'PowerSpectralDensity_deltan', 'PowerSpectralDensity_thetan', 'PowerSpectralDensity_alphan',
-            'PowerSpectralDensity_betan', 'PowerSpectralDensity_gamman'
+            'delta_relative_spectralpower', 'theta_relative_spectralpower', 'alpha_relative_spectralpower',
+            'beta_relative_spectralpower', 'gamma_relative_spectralpower'
         ]
         
         psd_summary = [
-            'PowerSpectralDensity_summary_se', 'PowerSpectralDensitySummary_summary_msf', 
-            'PowerSpectralDensitySummary_summary_sef90', 'PowerSpectralDensitySummary_summary_sef95'
+            'spectral_entropy_spectralpower', 'msf_psdsummary', 
+            'sef90_psdsummary', 'sef95_psdsummary'
         ]
         
         entropy_markers = [
-            'PermutationEntropy_default', 'SymbolicMutualInformation_weighted', 'KolmogorovComplexity_default'
+            'pe_theta_permutationentropy', 'kolmogorov_complexity_kolmogorovcomplexity'
         ]
         
         time_locked_topography_markers = [
-            'ContingentNegativeVariation_default', 'TimeLockedTopography_p1', 'TimeLockedTopography_p3a', 'TimeLockedTopography_p3b', 'TimeLockedContrast_LSGS-LDGD', 'TimeLockedContrast_LSGD-LDGS', 'TimeLockedContrast_LD-LS', 'TimeLockedContrast_GD-GS'
+            'cnv_detailed_cnvslope', 'p1_topography_timelockedtopo', 'p3a_topography_timelockedtopo', 'p3b_topography_timelockedtopo', 'timelockedcontrast_lsgs_ldgd_timelockedcontrast', 'timelockedcontrast_lsgd_ldgs_timelockedcontrast', 'timelockedcontrast_ld_ls_timelockedcontrast', 'timelockedcontrast_gd_gs_timelockedcontrast'
         ]
 
         time_locked_contrast_markers = [
-            'TimeLockedContrast_LSGS-LDGD', 'TimeLockedContrast_LSGD-LDGS', 'TimeLockedContrast_LD-LS', 'TimeLockedContrast_GD-GS', 'TimeLockedContrast_mmn', 'TimeLockedContrast_p3a', 'TimeLockedContrast_p3b'
+            'timelockedcontrast_lsgs_ldgd_timelockedcontrast', 'timelockedcontrast_lsgd_ldgs_timelockedcontrast', 'timelockedcontrast_ld_ls_timelockedcontrast', 'timelockedcontrast_gd_gs_timelockedcontrast', 'timelockedcontrast_mmn_timelockedcontrast', 'timelockedcontrast_p3a_timelockedcontrast', 'Timelockedcontrast_p3b_timelockedcontrast'
         ]
         
         # Create mapping from marker name to index
@@ -3696,20 +3495,19 @@ class GlobalAnalyzer:
         Create custom 4-column topographic plot for specific biomarkers.
         
         Layout: Original | Reconstructed | Difference (Relative Scale) | Difference (Original Scale)
-        Rows: Alpha-norm, Beta-norm, MMN, PermEntropy, Kolmogorov, P3b, SMI, CNV
+        Rows: Alpha-norm, Beta-norm, MMN, PermEntropy, Kolmogorov, P3b, CNV (NO SMI)
         """
         print("  🎯 Creating custom biomarker topographic plots...")
         
-        # Define specific biomarkers to plot
+        # Define specific biomarkers to plot (WITHOUT SymbolicMutualInformation)
         biomarker_specs = [
-            ('PowerSpectralDensity_alphan', 'Alpha Normalized'),
-            ('PowerSpectralDensity_betan', 'Beta Normalized'), 
-            ('TimeLockedContrast_mmn', 'MMN'),
-            ('PermutationEntropy_default', 'Permutation\nEntropy'),
-            ('KolmogorovComplexity_default', 'Kolmogorov\nComplexity'),
-            ('TimeLockedTopography_p3b', 'P3b'),
-            ('SymbolicMutualInformation_weighted', 'Symbolic Mutual\nInformation'),
-            ('ContingentNegativeVariation_default', 'CNV')
+            ('alpha_relative_spectralpower', 'Alpha Normalized'),
+            ('beta_relative_spectralpower', 'Beta Normalized'), 
+            ('timelockedcontrast_mmn_timelockedcontrast', 'MMN'),
+            ('pe_theta_permutationentropy', 'Permutation\nEntropy'),
+            ('kolmogorov_complexity_kolmogorovcomplexity', 'Kolmogorov\nComplexity'),
+            ('p3b_topography_timelockedtopo', 'P3b'),
+            ('cnv_detailed_cnvslope', 'CNV')
         ]
         
         # Find indices for these markers
@@ -3829,20 +3627,19 @@ class GlobalAnalyzer:
         Create custom 4-column topographic plot for specific biomarkers.
         
         Layout: Original | Reconstructed | Difference (Original Scale) | Wilcoxon Test
-        Rows: Alpha-norm, Beta-norm, MMN, PermEntropy, Kolmogorov, P3b, SMI, CNV
+        Rows: Alpha-norm, Beta-norm, MMN, PermEntropy, Kolmogorov, P3b, CNV (NO SMI)
         """
         print("  🎯 Creating custom biomarker topographic plots...")
         
-        # Define specific biomarkers to plot
+        # Define specific biomarkers to plot (WITHOUT SymbolicMutualInformation)
         biomarker_specs = [
-            ('PowerSpectralDensity_alphan', 'Alpha Normalized'),
-            ('PowerSpectralDensity_betan', 'Beta Normalized'), 
-            ('TimeLockedContrast_mmn', 'MMN'),
-            ('PermutationEntropy_default', 'Permutation\nEntropy'),
-            ('KolmogorovComplexity_default', 'Kolmogorov\nComplexity'),
-            ('TimeLockedTopography_p3b', 'P3b'),
-            ('SymbolicMutualInformation_weighted', 'Symbolic Mutual\nInformation'),
-            ('ContingentNegativeVariation_default', 'CNV')
+            ('alpha_relative_spectralpower', 'Alpha Normalized'),
+            ('beta_relative_spectralpower', 'Beta Normalized'), 
+            ('timelockedcontrast_mmn_timelockedcontrast', 'MMN'),
+            ('pe_theta_permutationentropy', 'Permutation\nEntropy'),
+            ('kolmogorov_complexity_kolmogorovcomplexity', 'Kolmogorov\nComplexity'),
+            ('p3b_topography_timelockedtopo', 'P3b'),
+            ('cnv_detailed_cnvslope', 'CNV')
         ]
         
         
@@ -4086,20 +3883,19 @@ class GlobalAnalyzer:
         Create custom 4-column topographic plot for specific biomarkers with relative difference scaling.
         
         Layout: Original | Reconstructed (with cbar) | Difference (Relative Scale with cbar) | Wilcoxon Test
-        Rows: Alpha-norm, Beta-norm, MMN, PermEntropy, Kolmogorov, P3b, SMI, CNV
+        Rows: Alpha-norm, Beta-norm, MMN, PermEntropy, Kolmogorov, P3b, CNV (NO SMI)
         """
         print("  🎯 Creating custom biomarker topographic plots with relative difference...")
         
-        # Define specific biomarkers to plot
+        # Define specific biomarkers to plot (WITHOUT SymbolicMutualInformation)
         biomarker_specs = [
-            ('PowerSpectralDensity_alphan', 'Alpha Normalized'),
-            ('PowerSpectralDensity_betan', 'Beta Normalized'), 
-            ('TimeLockedContrast_mmn', 'MMN'),
-            ('PermutationEntropy_default', 'Permutation\nEntropy'),
-            ('KolmogorovComplexity_default', 'Kolmogorov\nComplexity'),
-            ('TimeLockedTopography_p3b', 'P3b'),
-            ('SymbolicMutualInformation_weighted', 'Symbolic Mutual\nInformation'),
-            ('ContingentNegativeVariation_default', 'CNV')
+            ('alpha_relative_spectralpower', 'Alpha Normalized'),
+            ('beta_relative_spectralpower', 'Beta Normalized'), 
+            ('timelockedcontrast_mmn_timelockedcontrast', 'MMN'),
+            ('pe_theta_permutationentropy', 'Permutation\nEntropy'),
+            ('kolmogorov_complexity_kolmogorovcomplexity', 'Kolmogorov\nComplexity'),
+            ('p3b_topography_timelockedtopo', 'P3b'),
+            ('cnv_detailed_cnvslope', 'CNV')
         ]
         
         # Find indices for these markers
@@ -4339,21 +4135,20 @@ class GlobalAnalyzer:
         Create custom 4-column topographic plot for extended biomarker set with symmetric difference scaling.
         
         Layout: Original | Reconstructed (with cbar) | Difference (Symmetric RdBu_r with cbar) | Wilcoxon Test (NO FDR)
-        Rows: Alpha-norm, Beta-norm, Delta-norm, Gamma-norm, Theta-norm, PermEntropy, Kolmogorov, SpectralEntropy, SMI
+        Rows: Alpha-norm, Beta-norm, Delta-norm, Gamma-norm, Theta-norm, PermEntropy, Kolmogorov, SpectralEntropy (NO SMI)
         """
         print("  🎯 Creating custom FULL biomarker topographic plots...")
         
-        # Define specific biomarkers to plot (9 markers)
+        # Define specific biomarkers to plot (8 markers - WITHOUT SymbolicMutualInformation)
         biomarker_specs = [
-            ('PowerSpectralDensity_alphan', 'Alpha Normalized'),
-            ('PowerSpectralDensity_betan', 'Beta Normalized'),
-            ('PowerSpectralDensity_deltan', 'Delta Normalized'),
-            ('PowerSpectralDensity_gamman', 'Gamma Normalized'),
-            ('PowerSpectralDensity_thetan', 'Theta Normalized'),
-            ('PermutationEntropy_default', 'Permutation\nEntropy'),
-            ('KolmogorovComplexity_default', 'Kolmogorov\nComplexity'),
-            ('PowerSpectralDensitySummary_summary_se', 'Spectral\nEntropy'),
-            ('SymbolicMutualInformation_weighted', 'Symbolic Mutual\nInformation')
+            ('alpha_relative_spectralpower', 'Alpha Normalized'),
+            ('beta_relative_spectralpower', 'Beta Normalized'),
+            ('delta_relative_spectralpower', 'Delta Normalized'),
+            ('gamma_relative_spectralpower', 'Gamma Normalized'),
+            ('theta_relative_spectralpower', 'Theta Normalized'),
+            ('pe_theta_permutationentropy', 'Permutation\nEntropy'),
+            ('kolmogorov_complexity_kolmogorovcomplexity', 'Kolmogorov\nComplexity'),
+            ('spectral_entropy_spectralpower', 'Spectral\nEntropy')
         ]
         
         # Find indices for these markers
@@ -4545,21 +4340,20 @@ class GlobalAnalyzer:
         Create custom 4-column topographic plot for extended biomarker set with symmetric difference scaling.
         
         Layout: Original | Reconstructed (with cbar) | Difference (Symmetric RdBu_r with cbar) | Spearman Test
-        Rows: Alpha-norm, Beta-norm, Delta-norm, Gamma-norm, Theta-norm, PermEntropy, Kolmogorov, SpectralEntropy, SMI
+        Rows: Alpha-norm, Beta-norm, Delta-norm, Gamma-norm, Theta-norm, PermEntropy, Kolmogorov, SpectralEntropy (NO SMI)
         """
         print("  🎯 Creating custom FULL biomarker topographic plots (Spearman)...")
         
-        # Define specific biomarkers to plot (9 markers)
+        # Define specific biomarkers to plot (8 markers - WITHOUT SymbolicMutualInformation)
         biomarker_specs = [
-            ('PowerSpectralDensity_alphan', 'Alpha Normalized'),
-            ('PowerSpectralDensity_betan', 'Beta Normalized'),
-            ('PowerSpectralDensity_deltan', 'Delta Normalized'),
-            ('PowerSpectralDensity_gamman', 'Gamma Normalized'),
-            ('PowerSpectralDensity_thetan', 'Theta Normalized'),
-            ('PermutationEntropy_default', 'Permutation\nEntropy'),
-            ('KolmogorovComplexity_default', 'Kolmogorov\nComplexity'),
-            ('PowerSpectralDensitySummary_summary_se', 'Spectral\nEntropy'),
-            ('SymbolicMutualInformation_weighted', 'Symbolic Mutual\nInformation')
+            ('alpha_relative_spectralpower', 'Alpha Normalized'),
+            ('beta_relative_spectralpower', 'Beta Normalized'),
+            ('delta_relative_spectralpower', 'Delta Normalized'),
+            ('gamma_relative_spectralpower', 'Gamma Normalized'),
+            ('theta_relative_spectralpower', 'Theta Normalized'),
+            ('pe_theta_permutationentropy', 'Permutation\nEntropy'),
+            ('kolmogorov_complexity_kolmogorovcomplexity', 'Kolmogorov\nComplexity'),
+            ('spectral_entropy_spectralpower', 'Spectral\nEntropy')
         ]
         
         # Find indices for these markers
@@ -4750,21 +4544,20 @@ class GlobalAnalyzer:
         Create custom 4-column topographic plot for extended biomarker set with symmetric difference scaling and FDR correction.
         
         Layout: Original | Reconstructed (with cbar) | Difference (Symmetric RdBu_r with cbar) | Wilcoxon Test (WITH FDR)
-        Rows: Alpha-norm, Beta-norm, Delta-norm, Gamma-norm, Theta-norm, PermEntropy, Kolmogorov, SpectralEntropy, SMI
+        Rows: Alpha-norm, Beta-norm, Delta-norm, Gamma-norm, Theta-norm, PermEntropy, Kolmogorov, SpectralEntropy (NO SMI)
         """
         print("  🎯 Creating custom FULL biomarker topographic plots (FDR corrected)...")
         
-        # Define specific biomarkers to plot (9 markers)
+        # Define specific biomarkers to plot (8 markers - WITHOUT SymbolicMutualInformation)
         biomarker_specs = [
-            ('PowerSpectralDensity_alphan', 'Alpha Normalized'),
-            ('PowerSpectralDensity_betan', 'Beta Normalized'),
-            ('PowerSpectralDensity_deltan', 'Delta Normalized'),
-            ('PowerSpectralDensity_gamman', 'Gamma Normalized'),
-            ('PowerSpectralDensity_thetan', 'Theta Normalized'),
-            ('PermutationEntropy_default', 'Permutation\nEntropy'),
-            ('KolmogorovComplexity_default', 'Kolmogorov\nComplexity'),
-            ('PowerSpectralDensitySummary_summary_se', 'Spectral\nEntropy'),
-            ('SymbolicMutualInformation_weighted', 'Symbolic Mutual\nInformation')
+            ('alpha_relative_spectralpower', 'Alpha Normalized'),
+            ('beta_relative_spectralpower', 'Beta Normalized'),
+            ('delta_relative_spectralpower', 'Delta Normalized'),
+            ('gamma_relative_spectralpower', 'Gamma Normalized'),
+            ('theta_relative_spectralpower', 'Theta Normalized'),
+            ('pe_theta_permutationentropy', 'Permutation\nEntropy'),
+            ('kolmogorov_complexity_kolmogorovcomplexity', 'Kolmogorov\nComplexity'),
+            ('spectral_entropy_spectralpower', 'Spectral\nEntropy')
         ]
         
         # Find indices for these markers
@@ -5057,17 +4850,16 @@ class GlobalAnalyzer:
         topos_orig_mean = np.mean(topos_orig_filtered, axis=0)  # (n_markers, n_channels)
         topos_recon_mean = np.mean(topos_recon_filtered, axis=0)
         
-        # Define the 9 biomarkers to plot (same as wilcoxon_corrected)
+        # Define the 8 biomarkers to plot (WITHOUT SymbolicMutualInformation)
         biomarker_specs = [
-            ('PowerSpectralDensity_alphan', 'Alpha Normalized'),
-            ('PowerSpectralDensity_betan', 'Beta Normalized'),
-            ('PowerSpectralDensity_deltan', 'Delta Normalized'),
-            ('PowerSpectralDensity_gamman', 'Gamma Normalized'),
-            ('PowerSpectralDensity_thetan', 'Theta Normalized'),
-            ('PermutationEntropy_default', 'Permutation\nEntropy'),
-            ('KolmogorovComplexity_default', 'Kolmogorov\nComplexity'),
-            ('PowerSpectralDensitySummary_summary_se', 'Spectral\nEntropy'),
-            ('SymbolicMutualInformation_weighted', 'Symbolic Mutual\nInformation')
+            ('alpha_relative_spectralpower', 'Alpha Normalized'),
+            ('beta_relative_spectralpower', 'Beta Normalized'),
+            ('delta_relative_spectralpower', 'Delta Normalized'),
+            ('gamma_relative_spectralpower', 'Gamma Normalized'),
+            ('theta_relative_spectralpower', 'Theta Normalized'),
+            ('pe_theta_permutationentropy', 'Permutation\nEntropy'),
+            ('kolmogorov_complexity_kolmogorovcomplexity', 'Kolmogorov\nComplexity'),
+            ('spectral_entropy_spectralpower', 'Spectral\nEntropy')
         ]
         
         # Find indices for these markers
@@ -5199,16 +4991,15 @@ class GlobalAnalyzer:
             print("     ⚠️  No topographic data available. Skipping Wilcoxon distribution plots.")
             return
         
-        # Define the 8 biomarkers to plot (same as custom_biomarkers_orig_recon_diff_new.png)
+        # Define the 7 biomarkers to plot (WITHOUT SymbolicMutualInformation)
         biomarker_specs = [
-            ('PowerSpectralDensity_alphan', 'Alpha Normalized'),
-            ('PowerSpectralDensity_betan', 'Beta Normalized'), 
-            ('TimeLockedContrast_mmn', 'MMN'),
-            ('PermutationEntropy_default', 'Permutation Entropy'),
-            ('KolmogorovComplexity_default', 'Kolmogorov Complexity'),
-            ('TimeLockedTopography_p3b', 'P3b'),
-            ('SymbolicMutualInformation_weighted', 'Symbolic Mutual Information'),
-            ('ContingentNegativeVariation_default', 'CNV')
+            ('alpha_relative_spectralpower', 'Alpha Normalized'),
+            ('beta_relative_spectralpower', 'Beta Normalized'), 
+            ('timelockedcontrast_mmn_timelockedcontrast', 'MMN'),
+            ('pe_theta_permutationentropy', 'Permutation Entropy'),
+            ('kolmogorov_complexity_kolmogorovcomplexity', 'Kolmogorov Complexity'),
+            ('p3b_topography_timelockedtopo', 'P3b'),
+            ('cnv_detailed_cnvslope', 'CNV')
         ]
         
         # Find indices for these markers
@@ -5818,13 +5609,13 @@ class GlobalAnalyzer:
         self.create_mne_topomap_plots()
         
         # Create Global Field Power plots (optional)
-        if not self.skip_gfp:
-            print("\n--- Global Field Power Analysis ---")
-            gfp_analyzer = GlobalFieldPowerGlobal(self.output_dir, self.subjects_data, self.results_dir, self.fif_data_dir)
-            gfp_analyzer.analyze_all_subjects()
-        else:
-            print("\n--- Global Field Power Analysis (SKIPPED) ---")
-            print("🚫 Global Field Power analysis skipped as requested")
+        #if not self.skip_gfp:
+        #    print("\n--- Global Field Power Analysis ---")
+        #    gfp_analyzer = GlobalFieldPowerGlobal(self.output_dir, self.subjects_data, self.results_dir, self.fif_data_dir)
+        #    gfp_analyzer.analyze_all_subjects()
+        #else:
+        #    print("\n--- Global Field Power Analysis (SKIPPED) ---")
+        #    print("🚫 Global Field Power analysis skipped as requested")
         
         # Statistical Analysis - NEW integrated approach
         print("\n--- Statistical Analysis ---")

@@ -310,7 +310,7 @@ def main():
 
     parser.add_argument(
         '--template-yaml',
-        default="input/icm_complete_individual_markers_local_global_small.yaml",
+        default="input/icm_complete_individual_markers_local_global.yaml",
         help="Path to the template YAML file (default: input/icm_complete_individual_markers_local_global.yaml)"
     )
     args = parser.parse_args()

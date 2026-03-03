@@ -15,6 +15,24 @@ from scipy import stats
 import argparse
 
 
+def _truncate_to_common_length(timeseries_list):
+    """
+    Truncate a list of arrays to the minimum common length and stack into a 2D array.
+    
+    Different subjects may have different numbers of timepoints due to varying
+    epoch lengths. This function finds the minimum length and truncates all arrays
+    to that length so they can be stacked into a proper 2D numpy array.
+    """
+    if not timeseries_list:
+        return np.array([])
+    lengths = [len(ts) for ts in timeseries_list]
+    min_len = min(lengths)
+    if min(lengths) != max(lengths):
+        print(f"  [truncation] Timeseries lengths vary ({min(lengths)}-{max(lengths)}), "
+              f"truncating all to {min_len}")
+    return np.array([ts[:min_len] for ts in timeseries_list])
+
+
 def run_wilcoxon_per_timepoint(all_scores, alternative='greater'):
     """
     Run Wilcoxon signed-rank test per timepoint against chance (0.5).
@@ -122,7 +140,7 @@ def analyze_decoder_results(results_dir, output_dir=None):
     # Analyze overall classification
     if 'overall' in aggregated_results and 'all_mean_scores_time' in aggregated_results['overall']:
         print("Analyzing overall classification...")
-        all_scores = np.array(aggregated_results['overall']['all_mean_scores_time'])
+        all_scores = _truncate_to_common_length(aggregated_results['overall']['all_mean_scores_time'])
         
         print(f"  Data shape: {all_scores.shape} (n_subjects x n_timepoints)")
         
@@ -168,8 +186,13 @@ def analyze_decoder_results(results_dir, output_dir=None):
                 continue
             
             print(f"\n  {trial_type}:")
-            all_scores = np.array(trial_data['all_mean_scores_time'])
+            all_scores = _truncate_to_common_length(trial_data['all_mean_scores_time'])
             print(f"    Data shape: {all_scores.shape}")
+            
+            # Skip if data is empty or 1D (no subjects had this trial type)
+            if all_scores.ndim < 2 or all_scores.shape[0] < 2:
+                print(f"    Skipping {trial_type}: insufficient data (need ≥2 subjects with 2D scores)")
+                continue
             
             # Run Wilcoxon test
             wilcoxon_result = run_wilcoxon_per_timepoint(all_scores, alternative='greater')

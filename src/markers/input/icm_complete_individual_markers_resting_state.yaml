@@ -333,4 +333,3 @@ markers:
     channel_aggregation_method: null
     trial_aggregation_method: "trim_mean80"
     on: EEG
-

@@ -10,11 +10,15 @@ This script computes per-channel topographies from the marker data in the H5 fil
 """
 
 import argparse
-import json
 import logging
+import sys
 import numpy as np
 from pathlib import Path
-from scipy import stats
+
+# Allow import of sibling modules when run as a standalone script
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from marker_utils import get_electrode_mapping, trimmean80
 
 try:
     from junifer.storage import HDF5FeatureStorage
@@ -22,155 +26,48 @@ except ImportError:
     raise ImportError("junifer not found. Please install junifer: pip install junifer")
 
 
-def trimmean80(data, axis=None):
-    """Compute 80% trimmed mean (trim 10% from each tail)"""
-    return stats.trim_mean(data, proportiontocut=0.1, axis=axis)
-
-
-def create_256_to_64_roi_mapping():
-    """Create mapping from 256-channel ROIs to 64-channel ROIs using the JSON mapping.
-    
-    Returns
-    -------
-    function
-        Mapping function for ROI conversion
-    """
-    # Load the mapping file
-    mapping_file = Path(__file__).parent / '..' / '..' / 'data' / 'egi256_biosemi64.json'
-    
-    with open(mapping_file, 'r') as f:
-        mapping_data = json.load(f)
-    
-    # Get the recombination groups (biosemi64 -> 256 electrodes)
-    recombination_groups = mapping_data['recombination_groups']
-    
-    # Create reverse mapping: 256 electrode number -> 64 channel index
-    electrode_256_to_ch_64 = {}
-    
-    # Define the actual channel order from the fif file
-    ch_64_names_ordered = [
-        'Fp1', 'AF7', 'AF3', 'F1', 'F3', 'F5', 'F7', 'FT7', 'FC5', 'FC3', 'FC1', 'C1', 'C3', 'C5', 'T7', 'TP7',
-        'CP5', 'CP3', 'CP1', 'P1', 'P3', 'P5', 'P7', 'P9', 'PO7', 'PO3', 'O1', 'Iz', 'Oz', 'POz', 'Pz', 'CPz',
-        'Fpz', 'Fp2', 'AF8', 'AF4', 'AFz', 'Fz', 'F2', 'F4', 'F6', 'F8', 'FT8', 'FC6', 'FC4', 'FC2', 'FCz', 'Cz',
-        'C2', 'C4', 'C6', 'T8', 'TP8', 'CP6', 'CP4', 'CP2', 'P2', 'P4', 'P6', 'P8', 'P10', 'PO8', 'PO4', 'O2'
-    ]
-    
-    # Convert electrode names to indices and create mapping
-    for ch_64_name, electrode_256_list in recombination_groups.items():
-        if ch_64_name in ch_64_names_ordered:
-            ch_64_idx = ch_64_names_ordered.index(ch_64_name)  # 0-based indexing (0-63)
-            
-            # Convert electrode names like "E33" to electrode numbers
-            for electrode_name in electrode_256_list:
-                electrode_num = int(electrode_name[1:])  # E33 -> 33 (1-based EGI number)
-                electrode_256_to_ch_64[electrode_num] = ch_64_idx
-    
-    def map_256_roi_to_64(roi_256):
-        """Map a 256-channel ROI to corresponding 64-channel indices"""
-        mapped_channels = set()
-        for electrode_num in roi_256:
-            if electrode_num in electrode_256_to_ch_64:
-                mapped_channels.add(electrode_256_to_ch_64[electrode_num])
-        return np.array(sorted(mapped_channels))
-    
-    return map_256_roi_to_64
-
-
-def get_electrode_mapping(n_channels):
-    """Get electrode mappings based on the number of channels.
-    
-    Parameters
-    ----------
-    n_channels : int
-        Number of available channels
-        
-    Returns
-    -------
-    dict
-        Dictionary with electrode mappings for different ROIs
-    """
-    if n_channels == 256:  # EGI 256-channel system
-        scalp_roi = np.arange(224)
-        cnv_roi = np.array([5, 6, 13, 14, 15, 21, 22]) - 1  # Convert to 0-based
-        mmn_roi = np.array([5, 6, 8, 13, 14, 15, 21, 22, 44, 80, 131, 185]) - 1
-        p3b_roi = np.array([8, 44, 80, 99, 100, 109, 118, 127, 128, 131, 185]) - 1
-        p3a_roi = np.array([5, 6, 8, 13, 14, 15, 21, 22, 44, 80, 131, 185]) - 1
-        
-    elif n_channels == 64:  # Standard 64-channel system (biosemi64)
-        scalp_roi = np.arange(64)
-        
-        # Use mapping from 256-channel ROIs to 64-channel ROIs
-        map_roi = create_256_to_64_roi_mapping()
-        
-        # Original 256-channel ROIs (1-based)
-        cnv_roi_256 = np.array([5, 6, 13, 14, 15, 21, 22])
-        mmn_roi_256 = np.array([5, 6, 8, 13, 14, 15, 21, 22, 44, 80, 131, 185])
-        p3b_roi_256 = np.array([8, 44, 80, 99, 100, 109, 118, 127, 128, 131, 185])
-        p3a_roi_256 = np.array([5, 6, 8, 13, 14, 15, 21, 22, 44, 80, 131, 185])
-        
-        # Map to 64-channel indices (0-based)
-        cnv_roi = map_roi(cnv_roi_256)
-        mmn_roi = map_roi(mmn_roi_256)
-        p3b_roi = map_roi(p3b_roi_256)
-        p3a_roi = map_roi(p3a_roi_256)
-    else:
-        raise ValueError(f"Unsupported number of channels: {n_channels}")
-    
-    # Filter out channels that don't exist
-    cnv_roi = cnv_roi[cnv_roi < n_channels]
-    mmn_roi = mmn_roi[mmn_roi < n_channels]
-    p3b_roi = p3b_roi[p3b_roi < n_channels]
-    p3a_roi = p3a_roi[p3a_roi < n_channels]
-    
-    return {
-        'scalp_roi': scalp_roi,
-        'cnv_roi': cnv_roi,
-        'mmn_roi': mmn_roi,
-        'p3b_roi': p3b_roi,
-        'p3a_roi': p3a_roi
-    }
-
-
 def compute_topographies_from_h5(h5_file, output_file, logger):
     """
     Compute per-channel topographies from junifer H5 file.
-    
+
     Args:
         h5_file: Path to junifer H5 file
         output_file: Path to save output npz file
         logger: Logger instance
-    
+
     Returns:
         dict: Topographies dictionary
     """
     logger.info(f"Loading H5 file: {h5_file}")
-    
+
     topographies = {}
     topo_count = 0
-    
+
     # Use junifer's HDF5FeatureStorage to properly read the file
     storage = HDF5FeatureStorage(str(h5_file))
     features = storage.list_features()
-    
+
     logger.info(f"Found {len(features)} features in H5 file")
-    
+
     skipped_features = []  # Track skipped features
-    
+
     # Extract n_channels from equipment metadata
     first_feature = list(features.values())[0]
     equipment = first_feature.get("marker", {}).get("equipment", "")
-    
+
     # Parse equipment string (e.g., "egi256" → 256)
     if "egi" in equipment.lower():
         n_channels = int(equipment.lower().replace("egi", ""))
         logger.info(f"Detected {n_channels} channels from equipment: {equipment}")
     else:
-        raise ValueError(f"Could not parse number of channels from equipment: {equipment}")
-    
+        raise ValueError(
+            f"Could not parse number of channels from equipment: {equipment}"
+        )
+
     # Get n_epochs from ANY feature
     n_epochs = None
     candidate_n_epochs = []
-    
+
     logger.info("Searching for n_epochs from all features...")
     for i, feature_info in enumerate(features.values(), 1):
         feature_name = feature_info["name"]
@@ -179,109 +76,191 @@ def compute_topographies_from_h5(h5_file, output_file, logger):
             fdata = storage.read(feature_name=feature_name)
             if "data" not in fdata:
                 continue
-            
+
             data = fdata["data"]
             if isinstance(data, list):
                 data = np.array(data)
-            
+
             # Check for new format: (1, epochs, channels) or (1, epochs, channels, times)
             if len(data.shape) >= 3 and data.shape[0] == 1:
                 # Extract epochs from dimension 1
                 potential_n_epochs = data.shape[1]
                 # Sanity check: n_epochs should be > 0 and reasonable (< 10000)
                 if 0 < potential_n_epochs < 10000:
-                    candidate_n_epochs.append((potential_n_epochs, feature_name, data.shape))
-                    logger.debug(f"  {feature_name}: shape {data.shape} -> n_epochs={potential_n_epochs}")
+                    candidate_n_epochs.append(
+                        (potential_n_epochs, feature_name, data.shape)
+                    )
+                    logger.debug(
+                        f"  {feature_name}: shape {data.shape} -> n_epochs={potential_n_epochs}"
+                    )
                 else:
-                    skipped_features.append((feature_name, f"Invalid n_epochs from shape: {data.shape}"))
+                    skipped_features.append(
+                        (feature_name, f"Invalid n_epochs from shape: {data.shape}")
+                    )
             else:
                 # Old format: try flattened data divisible by channels
                 data_flat = data.flatten()
                 data_size = len(data_flat)
-                
+
                 # Check if this could be a simple 2D feature (epochs × channels)
                 if data_size % n_channels == 0:
                     potential_n_epochs = data_size // n_channels
                     # Sanity check: n_epochs should be > 0 and reasonable (< 10000)
                     if 0 < potential_n_epochs < 10000:
-                        candidate_n_epochs.append((potential_n_epochs, feature_name, data_size))
-                        logger.debug(f"  {feature_name}: size {data_size} -> n_epochs={potential_n_epochs}")
+                        candidate_n_epochs.append(
+                            (potential_n_epochs, feature_name, data_size)
+                        )
+                        logger.debug(
+                            f"  {feature_name}: size {data_size} -> n_epochs={potential_n_epochs}"
+                        )
                     else:
-                        skipped_features.append((feature_name, f"Invalid n_epochs from size: {data_size}"))
+                        skipped_features.append(
+                            (feature_name, f"Invalid n_epochs from size: {data_size}")
+                        )
                 else:
-                    skipped_features.append((feature_name, f"Size {data_size} not divisible by {n_channels}"))
+                    skipped_features.append(
+                        (
+                            feature_name,
+                            f"Size {data_size} not divisible by {n_channels}",
+                        )
+                    )
         except Exception as e:
             logger.debug(f"Could not read {feature_name}: {e}")
             skipped_features.append((feature_name, f"Read error: {e}"))
             continue
-    
+
     if not candidate_n_epochs:
         raise ValueError(
             f"Could not determine n_epochs from any features. "
             f"Found {len(features)} features but none had data divisible by {n_channels} channels."
         )
-    
+
     # Use the most common n_epochs (mode) instead of the smallest
     # TimeLockedContrast markers have different epoch counts, so we want the mode
     from collections import Counter
+
     epoch_counts = [x[0] for x in candidate_n_epochs]
     epoch_counter = Counter(epoch_counts)
     n_epochs = epoch_counter.most_common(1)[0][0]
-    
+
     # Find a feature with this epoch count for logging
     source_features = [x for x in candidate_n_epochs if x[0] == n_epochs]
     source_feature, data_info = source_features[0][1], source_features[0][2]
-    
-    logger.info(f"Calculated n_epochs={n_epochs} (mode from {len(candidate_n_epochs)} candidates)")
+
+    logger.info(
+        f"Calculated n_epochs={n_epochs} (mode from {len(candidate_n_epochs)} candidates)"
+    )
     logger.info(f"Most common: {n_epochs} appears {epoch_counter[n_epochs]} times")
     logger.info(f"Example: '{source_feature}' with shape {data_info}")
     logger.info(f"All epoch counts: {dict(epoch_counter)}")
-    
+
     logger.info(f"Using: {n_epochs} epochs × {n_channels} channels")
-    
+
     roi_mapping = get_electrode_mapping(n_channels)
-    
+
     # Process each feature
     for feature_info in features.values():
         marker_name = feature_info["name"]
-        
+
         # Remove the "EEG_" prefix if present (junifer adds this)
         display_name = marker_name.replace("EEG_", "")
-        
+
         # Skip window_decoding (no channel dimension)
-        if 'window_decoding' in display_name:
+        if "window_decoding" in display_name:
             logger.info(f"Skipping {display_name} (no channel dimension)")
             continue
-        
-        # Skip WSMI (connectivity, not per-channel)
-        if display_name.startswith('wsmi_'):
-            logger.info(f"Skipping {display_name} (connectivity marker)")
+
+        # Handle WSMI: save as connectivity matrix (channels x channels) aggregated across epochs
+        if display_name.startswith("wsmi_"):
+            # Process ALL wSMI bands (theta, delta, alpha, beta, gamma)
+
+            # Read feature data for WSMI
+            feature_data = storage.read(feature_name=marker_name)
+            if "data" not in feature_data:
+                logger.warning(f"Skipping {marker_name} - no 'data' field")
+                continue
+
+            data = feature_data["data"]
+            if isinstance(data, list):
+                data = np.array(data)
+
+            logger.info(f"Processing {display_name}, shape: {data.shape}")
+
+            # WSMI is connectivity: stored as upper triangle (no diagonal)
+            n_pairs = n_channels * (n_channels - 1) // 2
+
+            # Check if already properly shaped
+            if len(data.shape) == 2 and data.shape[1] == n_pairs:
+                logger.info(
+                    f"  WSMI already shaped as ({data.shape[0]}, {n_pairs} pairs)"
+                )
+            elif len(data.shape) <= 2:
+                # Need to reshape from flat
+                data_flat = data.flatten()
+                if len(data_flat) % n_pairs == 0:
+                    n_epochs_wsmi = len(data_flat) // n_pairs
+                    data = data_flat.reshape(n_epochs_wsmi, n_pairs)
+                    logger.info(
+                        f"  Reshaped WSMI to ({n_epochs_wsmi}, {n_pairs} pairs)"
+                    )
+                else:
+                    logger.warning(
+                        f"  Could not reshape WSMI: {len(data_flat)} not divisible by {n_pairs}"
+                    )
+                    continue
+            else:
+                logger.warning(f"  Unexpected WSMI shape: {data.shape}")
+                continue
+
+            # Reconstruct full symmetric connectivity matrices
+            n_epochs_wsmi = data.shape[0]
+            matrices = np.zeros((n_epochs_wsmi, n_channels, n_channels))
+
+            for epoch_idx in range(n_epochs_wsmi):
+                # Get upper triangle indices (k=1 means exclude diagonal)
+                triu_indices = np.triu_indices(n_channels, k=1)
+                # Fill upper triangle
+                matrices[epoch_idx][triu_indices] = data[epoch_idx]
+                # Make symmetric (copy upper to lower)
+                matrices[epoch_idx] = matrices[epoch_idx] + matrices[epoch_idx].T
+
+            logger.info(
+                f"  Reconstructed full WSMI matrices: ({n_epochs_wsmi}, {n_channels}, {n_channels})"
+            )
+
+            # Aggregate across epochs using trimmean80 -> (channels, channels)
+            wsmi_topo = trimmean80(matrices, axis=0)
+
+            # Save the full connectivity matrix as topography
+            topographies[display_name] = wsmi_topo
+            topo_count += 1
+            logger.info(f"  -> {display_name}: {wsmi_topo.shape} connectivity matrix")
             continue
-        
+
         feature_data = storage.read(feature_name=marker_name)
-        
+
         if "data" not in feature_data:
             logger.warning(f"Skipping {marker_name} - no 'data' field")
             continue
-        
+
         data = feature_data["data"]
-        
+
         # Convert to numpy array if it's a list
         if isinstance(data, list):
             data = np.array(data)
-        
+
         logger.info(f"Processing {display_name}, shape: {data.shape}")
-        
+
         # Handle new data format: (1, epochs, channels) or (1, epochs, channels, times)
         # Squeeze out the first dimension if it's 1
         if data.shape[0] == 1 and len(data.shape) >= 3:
             data = np.squeeze(data, axis=0)
             logger.info(f"  Squeezed to {data.shape}")
-        
+
         # Reshape flattened data back to proper shape if still flattened
         if len(data.shape) <= 2 and (data.shape[-1] == 1 or len(data.shape) == 1):
             data_flat = data.flatten()
-            
+
             # Try to reshape to (epochs, channels) first
             if len(data_flat) == n_epochs * n_channels:
                 data = data_flat.reshape(n_epochs, n_channels)
@@ -292,32 +271,36 @@ def compute_topographies_from_h5(h5_file, output_file, logger):
                 data = data_flat.reshape(n_epochs, n_channels, n_times)
                 logger.info(f"  Reshaped to ({n_epochs}, {n_channels}, {n_times})")
             else:
-                logger.warning(f"  Could not reshape {display_name}: {len(data_flat)} elements")
-                logger.warning(f"  Expected: {n_epochs}×{n_channels}={n_epochs*n_channels} or multiple thereof")
+                logger.warning(
+                    f"  Could not reshape {display_name}: {len(data_flat)} elements"
+                )
+                logger.warning(
+                    f"  Expected: {n_epochs}×{n_channels}={n_epochs * n_channels} or multiple thereof"
+                )
                 continue
-        
+
         # Handle different marker types
-        
+
         # 1. PE: only theta values
-        if display_name.startswith('pe_'):
-            if 'theta' not in display_name:
+        if display_name.startswith("pe_"):
+            if "theta" not in display_name:
                 logger.info(f"  -> Skipping {display_name} (only theta PE used)")
                 continue
-            
+
             # PE: regular channel data
             # Ensure 2D: (epochs, channels)
             if len(data.shape) == 3:
                 data = np.mean(data, axis=2)  # Average across time if present
-            
+
             # Compute trimmean80 across epochs for each channel
             topo = trimmean80(data, axis=0)  # Shape: (channels,)
             topographies[display_name] = topo
             topo_count += 1
             logger.info(f"  -> {display_name}: {len(topo)} channels")
             continue
-        
+
         # 2. TimeLockedContrast: special handling - different epoch count!
-        if display_name.startswith('tlc_'):
+        if display_name.startswith("tlc_"):
             if len(data.shape) == 3:
                 # Already shaped as (epochs, channels, times)
                 logger.info(f"  TLC already shaped as {data.shape}")
@@ -339,17 +322,23 @@ def compute_topographies_from_h5(h5_file, output_file, logger):
                         break
 
                 if n_epochs_tlc is None:
-                    logger.warning(f"  Could not determine epochs/times for {display_name}")
-                    logger.warning(f"  Data size: {data_size}, channels: {n_channels}, per_epoch: {n_per_epoch}")
+                    logger.warning(
+                        f"  Could not determine epochs/times for {display_name}"
+                    )
+                    logger.warning(
+                        f"  Data size: {data_size}, channels: {n_channels}, per_epoch: {n_per_epoch}"
+                    )
                     continue
 
                 # Reshape
                 data = data_flat.reshape(n_epochs_tlc, n_channels, n_times_tlc)
-                logger.info(f"  Reshaped to ({n_epochs_tlc}, {n_channels}, {n_times_tlc})")
+                logger.info(
+                    f"  Reshaped to ({n_epochs_tlc}, {n_channels}, {n_times_tlc})"
+                )
 
             # Mean across time → (epochs, channels)
             data = np.mean(data, axis=2)
-            
+
             # Compute trimmean80 across epochs for each channel
             topo = trimmean80(data, axis=0)  # Shape: (channels,)
             topographies[display_name] = topo
@@ -358,7 +347,15 @@ def compute_topographies_from_h5(h5_file, output_file, logger):
             continue
 
         # 3. Other time-locked markers (CNV, topography)
-        if any(x in display_name for x in ['cnv_detailed', 'p1_topography', 'p3a_topography', 'p3b_topography']):
+        if any(
+            x in display_name
+            for x in [
+                "cnv_detailed",
+                "p1_topography",
+                "p3a_topography",
+                "p3b_topography",
+            ]
+        ):
             # Mean across time if present
             if len(data.shape) == 3:
                 data = np.mean(data, axis=2)  # -> (epochs, channels)
@@ -366,20 +363,20 @@ def compute_topographies_from_h5(h5_file, output_file, logger):
             if len(data.shape) != 2:
                 logger.warning(f"  Unexpected shape for {display_name}: {data.shape}")
                 continue
-            
+
             # Compute trimmean80 across epochs for each channel
             topo = trimmean80(data, axis=0)  # Shape: (channels,)
             topographies[display_name] = topo
             topo_count += 1
             logger.info(f"  -> {display_name}: {len(topo)} channels")
             continue
-        
+
         # 4. Spectral power and other standard markers
         # Should have shape (epochs, channels) or (epochs, channels, time)
         if len(data.shape) == 3:
             # Average across time if present
             data = np.mean(data, axis=2)
-        
+
         if len(data.shape) == 2:  # (epochs, channels)
             # Compute trimmean80 across epochs for each channel
             topo = trimmean80(data, axis=0)  # Shape: (channels,)
@@ -387,43 +384,51 @@ def compute_topographies_from_h5(h5_file, output_file, logger):
             topo_count += 1
             logger.info(f"  -> {display_name}: {len(topo)} channels")
         else:
-            logger.warning(f"  Unexpected shape for {display_name}: {data.shape}, skipping")
-    
+            logger.warning(
+                f"  Unexpected shape for {display_name}: {data.shape}, skipping"
+            )
+
     logger.info(f"Total topographies computed: {topo_count}")
-    
+
     # Log skipped features summary
     if skipped_features:
-        logger.info(f"\nSkipped {len(skipped_features)} features during n_epochs detection:")
+        logger.info(
+            f"\nSkipped {len(skipped_features)} features during n_epochs detection:"
+        )
         for feat_name, reason in skipped_features:
             logger.info(f"  - {feat_name}: {reason}")
-    
+
     # Save topographies
     output_file = Path(output_file)
     np.savez(output_file, **topographies)
     logger.info(f"Topographies saved to: {output_file}")
-    
+
     return topographies
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Compute topographies from Junifer H5 file')
-    parser.add_argument('--h5_file', required=True, help='Path to H5 file')
-    parser.add_argument('--output_file', required=True, help='Path to output topographies file (.npz)')
-    parser.add_argument('--log_level', default='INFO', help='Logging level')
-    
+    parser = argparse.ArgumentParser(
+        description="Compute topographies from Junifer H5 file"
+    )
+    parser.add_argument("--h5_file", required=True, help="Path to H5 file")
+    parser.add_argument(
+        "--output_file", required=True, help="Path to output topographies file (.npz)"
+    )
+    parser.add_argument("--log_level", default="INFO", help="Logging level")
+
     args = parser.parse_args()
-    
+
     # Setup logging
     logging.basicConfig(
         level=getattr(logging, args.log_level.upper()),
-        format='%(asctime)s - %(levelname)s: %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
+        format="%(asctime)s - %(levelname)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
     )
     logger = logging.getLogger(__name__)
-    
+
     # Compute topographies
     topographies = compute_topographies_from_h5(args.h5_file, args.output_file, logger)
-    
+
     logger.info(f"✅ Computed {len(topographies)} topographies successfully")
 
 

@@ -66,8 +66,9 @@ def parse_arguments():
     )
     parser.add_argument(
         "--main_path", 
+        default = '/data/project/eeg_foundation/data/LaBram/fif_data_control_rs',
         type=str, 
-        required=True,
+        #required=True,
         help="Main path containing subject directories (e.g., /data/eeg_study)"
     )
     parser.add_argument(
@@ -97,7 +98,7 @@ def parse_arguments():
     parser.add_argument(
         "--output_dir", 
         type=str, 
-        default="./doc_benchmark/results/DECODER",
+        default="./doc_benchmark/results/LaBram/DECODER",
         help="Directory to save results (default: ./doc_benchmark/results/DECODER)"
     )
     parser.add_argument(
@@ -120,7 +121,7 @@ def parse_arguments():
         "--mode",
         type=str,
         choices=['patient', 'control'],
-        default='patient',
+        default='control',
         help="Analysis mode: 'patient' for patient data with state grouping, 'control' for simplified control analysis"
     )
     parser.add_argument(
@@ -129,6 +130,14 @@ def parse_arguments():
         nargs="+",
         choices=['HSTD', 'HDVT', 'LSGS', 'LSGD', 'LDGD', 'LDGS'],
         help="Optional: Filter to include only specific trial types (typically used in control mode)"
+    )
+    parser.add_argument(
+        "--original-data-path",
+        type=str,
+        nargs='+',
+        default=None,
+        dest='original_data_paths',
+        help="Path(s) to original data if separate from main_path (for CBraMod/LaBram). Multiple paths supported."
     )
     
     return parser.parse_args()
@@ -160,16 +169,22 @@ def find_subjects_sessions(main_path):
     
     return subjects, sessions
 
-def load_epochs_single_subject_session(main_path, subject_id, session_id, filter_trial_types=None, verbose=False):
+def load_epochs_single_subject_session(main_path, subject_id, session_id, filter_trial_types=None, verbose=False, original_data_paths=None):
     """
     Load epochs from .fif files for a single subject and session.
     
+    Supports multiple data structures:
+    - Standard: *_epo_original.fif / *_epo_recon.fif
+    - CBraMod/LaBram: *_vqnsp_reconstructed_epo.fif (recon) + original from separate path
+    - Subdirectory: orig/*.fif and recon/*.fif
+    
     Parameters:
-        main_path: str, path to main data directory
+        main_path: str, path to main data directory (reconstructed data for CBraMod/LaBram)
         subject_id: str, subject identifier
         session_id: str, session identifier
         filter_trial_types: list of str or None, trial types to include (e.g., ['LSGS', 'LSGD'])
         verbose: bool, print verbose output
+        original_data_paths: list of str or None, paths to original data if separate from main_path
     
     Returns:
         X: epochs data (n_epochs, n_channels, n_timepoints)
@@ -185,9 +200,60 @@ def load_epochs_single_subject_session(main_path, subject_id, session_id, filter
             print(f"Directory not found: {sub_ses_dir}")
         return None, None, None, None
     
-    # Find original and reconstructed files
-    original_files = list(sub_ses_dir.glob("*_epo_original.fif"))
-    recon_files = list(sub_ses_dir.glob("*_epo_recon.fif"))
+    # Also check BIDS-style eeg/ subdirectory
+    eeg_subdir = sub_ses_dir / "eeg"
+    search_dirs = [sub_ses_dir]
+    if eeg_subdir.exists():
+        search_dirs.append(eeg_subdir)
+    
+    # Find original and reconstructed files - support multiple patterns
+    original_files = []
+    recon_files = []
+    
+    for sdir in search_dirs:
+        # Pattern 1: Standard *_epo_original.fif / *_epo_recon.fif
+        original_files.extend(list(sdir.glob("*_epo_original.fif")))
+        recon_files.extend(list(sdir.glob("*_epo_recon.fif")))
+        
+        # Pattern 2: CBraMod/LaBram style - *_vqnsp_reconstructed_epo.fif
+        recon_files.extend(list(sdir.glob("*_reconstructed_epo.fif")))
+        
+        # Pattern 2b: NeuroLM style - *_epo_reconstructed.fif
+        recon_files.extend(list(sdir.glob("*_epo_reconstructed.fif")))
+    
+    # Pattern 3: Subdirectory structure - orig/*.fif and recon/*.fif
+    orig_subdir = sub_ses_dir / "orig"
+    recon_subdir = sub_ses_dir / "recon"
+    if orig_subdir.exists():
+        original_files.extend(list(orig_subdir.glob("*.fif")))
+    if recon_subdir.exists():
+        recon_files.extend(list(recon_subdir.glob("*.fif")))
+    
+    # Pattern 4: Original data from separate path(s) (for CBraMod/LaBram)
+    if original_data_paths:
+        if isinstance(original_data_paths, str):
+            original_data_paths = [original_data_paths]
+        for original_data_path in original_data_paths:
+            orig_path = Path(original_data_path)
+            orig_session_dir = orig_path / f"sub-{subject_id}" / f"ses-{session_id}"
+            # Check eeg subdirectory first
+            eeg_dir = orig_session_dir / "eeg"
+            search_dir = eeg_dir if eeg_dir.exists() else orig_session_dir
+            if search_dir.exists():
+                # Try specific task pattern first, then broader patterns
+                # Match *_epo_original.fif (standard naming) and *_epo.fif
+                found = list(search_dir.glob(f"sub-{subject_id}_ses-{session_id}_task-*_epo_original.fif"))
+                if not found:
+                    found = list(search_dir.glob(f"sub-{subject_id}_ses-{session_id}_task-*_epo.fif"))
+                if not found:
+                    found = list(search_dir.glob("*_epo_original.fif"))
+                if not found:
+                    found = list(search_dir.glob("*_epo.fif"))
+                original_files.extend(found)
+                # Stop searching additional paths once we found original files
+                # This prevents loading duplicate originals from multiple paths
+                if found:
+                    break
     
     if verbose:
         print(f"Subject {subject_id}, Session {session_id}:")
@@ -264,7 +330,27 @@ def load_epochs_single_subject_session(main_path, subject_id, session_id, filter
             print(f"    Error loading {fif_file}: {e}")
     
     if not all_epochs:
+        print(f"  No epochs loaded for sub-{subject_id} ses-{session_id}")
+        print(f"    Original files found: {[f.name for f in original_files]}")
+        print(f"    Recon files found: {[f.name for f in recon_files]}")
         return None, None, None, None
+    
+    # Check shape compatibility before concatenating
+    shapes = [ep.shape[1:] for ep in all_epochs]  # (n_channels, n_timepoints)
+    if len(set(shapes)) > 1:
+        print(f"  WARNING: Shape mismatch across epochs for sub-{subject_id} ses-{session_id}:")
+        for i, (ep, shape) in enumerate(zip(all_epochs, shapes)):
+            label = "original" if i < len([l for l in all_labels[:ep.shape[0]] if l == 0]) else "reconstructed"
+            print(f"    Epoch block {i}: shape={ep.shape}")
+        # Find the minimum common shape
+        min_channels = min(s[0] for s in shapes)
+        min_timepoints = min(s[1] for s in shapes)
+        print(f"  Truncating to common shape: ({min_channels}, {min_timepoints})")
+        all_epochs = [ep[:, :min_channels, :min_timepoints] for ep in all_epochs]
+        # Also truncate times to match the truncated timepoints
+        if times is not None and len(times) > min_timepoints:
+            print(f"  Truncating times from {len(times)} to {min_timepoints} points")
+            times = times[:min_timepoints]
     
     # Concatenate all data
     X = np.concatenate(all_epochs, axis=0)
@@ -298,14 +384,24 @@ def decode_single_subject_session(X, y, events, times, cv=10, n_jobs=None, mode=
         results: dict containing all analysis results
     """
     if X is None or len(np.unique(y)) < 2:
+        if X is None:
+            print(f"  No data loaded (X is None)")
+        else:
+            unique_labels = np.unique(y)
+            print(f"  Cannot decode: only {len(unique_labels)} class(es) found (labels={unique_labels})")
+            print(f"  Original epochs (y=0): {np.sum(y == 0)}, Reconstructed epochs (y=1): {np.sum(y == 1)}")
         return None
     
     if X.shape[0] < cv:
-        print(f"  WARNING: Too few trials ({X.shape[0]}) for {cv}-fold CV")
+        print(f"  WARNING: Too few trials ({X.shape[0]}) for {cv}-fold CV, need at least {cv}")
         return None
     
     results = {}
     clf = make_pipeline(StandardScaler(), LogisticRegression(solver="liblinear"))
+    
+    # Store the actual times array used for decoding (matches X.shape[2])
+    # This ensures plots always use the correct time axis regardless of truncation
+    results['times'] = times
     
     # Overall classification
     print("  Performing overall classification...")
@@ -378,6 +474,19 @@ def decode_single_subject_session(X, y, events, times, cv=10, n_jobs=None, mode=
 
 def save_single_subject_session_results(results, times, subject_id, session_id, output_dir):
     """Save results for a single subject/session."""
+    # Use times from results if available (stays in sync with scores)
+    if 'times' in results:
+        times = results['times']
+    
+    # Diagnostic: check times vs scores alignment
+    if 'overall' in results:
+        n_scores = len(results['overall']['mean_scores_time'])
+        if len(times) != n_scores:
+            print(f"  WARNING: times length ({len(times)}) != scores length ({n_scores}) "
+                  f"for sub-{subject_id} ses-{session_id}. "
+                  f"This indicates original and reconstructed files had different epoch lengths.")
+            times = times[:n_scores]
+    
     # Create output directory
     sub_ses_dir = Path(output_dir) / f"sub-{subject_id}" / f"ses-{session_id}"
     plots_dir = sub_ses_dir / "plots"
@@ -548,10 +657,24 @@ def run_permutation_test(all_scores, n_permutations=1000, seed=42):
 def create_single_subject_plots(results, times, plots_dir, subject_id, session_id):
     """Create plots for single subject/session results."""
     
+    # Use times stored in results if available (guaranteed to match scores),
+    # falling back to the passed-in times argument
+    times = results.get('times', times)
+    
     # Overall classification plot
     if 'overall' in results:
         fig, ax = plt.subplots(1, 1, figsize=(12, 6))
         mean_scores = results['overall']['mean_scores_time']
+        
+        # Safety check: align times with scores if they differ
+        # This can happen when original and reconstructed files have different
+        # epoch lengths and the data was truncated but times was not
+        if len(times) != len(mean_scores):
+            print(f"  WARNING: times ({len(times)}) and scores ({len(mean_scores)}) "
+                  f"length mismatch for sub-{subject_id} ses-{session_id}. "
+                  f"Truncating times to match scores.")
+            times = times[:len(mean_scores)]
+        
         ax.plot(times, mean_scores, 'b-', linewidth=2, label='AUC')
         add_stimulus_lines(ax, times)
         ax.set_xlabel("Time (s)")
@@ -576,7 +699,9 @@ def create_single_subject_plots(results, times, plots_dir, subject_id, session_i
         for i, trial_type in enumerate(trial_types):
             if trial_type in results['trial_types']:
                 mean_scores = results['trial_types'][trial_type]['mean_scores_time']
-                axes[i].plot(times, mean_scores, color=colors[i], linewidth=2)
+                # Ensure times matches scores length for trial type plots too
+                plot_times = times[:len(mean_scores)] if len(times) != len(mean_scores) else times
+                axes[i].plot(plot_times, mean_scores, color=colors[i], linewidth=2)
                 axes[i].axhline(0.5, color="k", linestyle="--", alpha=0.7)
                 add_stimulus_lines(axes[i], times)
                 axes[i].set_title(f"{trial_type}")
@@ -593,6 +718,28 @@ def create_single_subject_plots(results, times, plots_dir, subject_id, session_i
         plt.tight_layout()
         plt.savefig(plots_dir / "trial_type_classification.png", dpi=300, bbox_inches='tight')
         plt.close()
+
+def _truncate_to_common_length(timeseries_list):
+    """
+    Truncate a list of 1-D arrays to the minimum common length.
+    
+    Different subjects may have different epoch lengths (e.g. because original
+    and reconstructed files were created with slightly different parameters).
+    This helper finds the shortest array and truncates all others to match so
+    that np.array() can produce a well-formed 2-D matrix.
+    
+    Returns:
+        np.ndarray of shape (n_subjects, min_timepoints)
+    """
+    if not timeseries_list:
+        return np.array(timeseries_list)
+    lengths = [len(ts) for ts in timeseries_list]
+    min_len = min(lengths)
+    if min_len != max(lengths):
+        print(f"  NOTE: Timeseries lengths vary ({min(lengths)}-{max(lengths)}), "
+              f"truncating all to {min_len} timepoints")
+    return np.array([ts[:min_len] for ts in timeseries_list])
+
 
 def aggregate_all_results(output_dir, patient_labels_path=None, mode='patient'):
     """
@@ -723,8 +870,12 @@ def aggregate_all_results(output_dir, patient_labels_path=None, mode='patient'):
         aggregated['overall']['std_auc'] = np.std(aggregated['overall']['all_mean_aucs'])
         
         # Point-by-point statistics across subjects/sessions
-        all_timeseries = np.array(aggregated['overall']['all_mean_scores_time'])  # (n_subjects, n_timepoints)
+        all_timeseries = _truncate_to_common_length(aggregated['overall']['all_mean_scores_time'])  # (n_subjects, n_timepoints)
         print(f'All timeseries shape: {all_timeseries.shape}')
+        
+        # Truncate times to match the common timeseries length
+        if times is not None and len(times) > all_timeseries.shape[1]:
+            times = times[:all_timeseries.shape[1]]
         
         # Save timeseries data to output directory
         timeseries_dir = output_path / "all_auc_timeseries"
@@ -735,22 +886,22 @@ def aggregate_all_results(output_dir, patient_labels_path=None, mode='patient'):
         
         aggregated['overall']['mean_scores_time'] = np.mean(all_timeseries, axis=0)  # (n_timepoints,)
         # Calculate std per timepoint (axis=0 gives std across subjects at each time)
-        aggregated['overall']['std_scores_time'] = np.std(aggregated['overall']['all_mean_scores_time'], axis=0)
+        aggregated['overall']['std_scores_time'] = np.std(all_timeseries, axis=0)
         aggregated['overall']['sem_scores_time'] = aggregated['overall']['std_scores_time'] / np.sqrt(len(all_timeseries))
         
         # Calculate statistics for VS and MCS subgroups
         if aggregated['overall']['all_mean_scores_time_VS']:
-            all_timeseries_VS = np.array(aggregated['overall']['all_mean_scores_time_VS'])
+            all_timeseries_VS = _truncate_to_common_length(aggregated['overall']['all_mean_scores_time_VS'])
             print(f'VS timeseries shape: {all_timeseries_VS.shape}')
             aggregated['overall']['mean_scores_time_VS'] = np.mean(all_timeseries_VS, axis=0)
-            aggregated['overall']['std_scores_time_VS'] = np.std(aggregated['overall']['all_mean_scores_time_VS'], axis=0)
+            aggregated['overall']['std_scores_time_VS'] = np.std(all_timeseries_VS, axis=0)
             aggregated['overall']['n_subjects_VS'] = len(all_timeseries_VS)
         
         if aggregated['overall']['all_mean_scores_time_MCS']:
-            all_timeseries_MCS = np.array(aggregated['overall']['all_mean_scores_time_MCS'])
+            all_timeseries_MCS = _truncate_to_common_length(aggregated['overall']['all_mean_scores_time_MCS'])
             print(f'MCS timeseries shape: {all_timeseries_MCS.shape}')
             aggregated['overall']['mean_scores_time_MCS'] = np.mean(all_timeseries_MCS, axis=0)
-            aggregated['overall']['std_scores_time_MCS'] = np.std(aggregated['overall']['all_mean_scores_time_MCS'], axis=0)
+            aggregated['overall']['std_scores_time_MCS'] = np.std(all_timeseries_MCS, axis=0)
             aggregated['overall']['n_subjects_MCS'] = len(all_timeseries_MCS)
     
     # Aggregate trial type results
@@ -791,7 +942,7 @@ def aggregate_all_results(output_dir, patient_labels_path=None, mode='patient'):
             timeseries_dir = output_path / "all_auc_timeseries"
             timeseries_dir.mkdir(exist_ok=True)
             np.save(timeseries_dir / f'all_mean_scores_time_{trial_type}.npy', 
-                   aggregated['trial_types'][trial_type]['all_mean_scores_time'])
+                   _truncate_to_common_length(aggregated['trial_types'][trial_type]['all_mean_scores_time']))
         
         # Calculate statistics for this trial type
         if aggregated['trial_types'][trial_type]['all_mean_aucs']:
@@ -803,23 +954,23 @@ def aggregate_all_results(output_dir, patient_labels_path=None, mode='patient'):
             )
             
             # Point-by-point statistics
-            all_timeseries = np.array(aggregated['trial_types'][trial_type]['all_mean_scores_time'])
+            all_timeseries = _truncate_to_common_length(aggregated['trial_types'][trial_type]['all_mean_scores_time'])
             aggregated['trial_types'][trial_type]['mean_scores_time'] = np.mean(all_timeseries, axis=0)
             # Calculate std per timepoint (axis=0 gives std across subjects at each time)
-            aggregated['trial_types'][trial_type]['std_scores_time'] = np.std(aggregated['trial_types'][trial_type]['all_mean_scores_time'], axis=0)
+            aggregated['trial_types'][trial_type]['std_scores_time'] = np.std(all_timeseries, axis=0)
             aggregated['trial_types'][trial_type]['sem_scores_time'] = aggregated['trial_types'][trial_type]['std_scores_time'] / np.sqrt(len(all_timeseries))
             aggregated['trial_types'][trial_type]['n_subjects_sessions'] = len(all_timeseries)
             
             # Calculate statistics for VS and MCS subgroups
             if aggregated['trial_types'][trial_type]['all_mean_scores_time_VS']:
-                all_timeseries_VS = np.array(aggregated['trial_types'][trial_type]['all_mean_scores_time_VS'])
+                all_timeseries_VS = _truncate_to_common_length(aggregated['trial_types'][trial_type]['all_mean_scores_time_VS'])
                 print(f'  {trial_type} VS timeseries shape: {all_timeseries_VS.shape}')
                 aggregated['trial_types'][trial_type]['mean_scores_time_VS'] = np.mean(all_timeseries_VS, axis=0)
                 aggregated['trial_types'][trial_type]['std_scores_time_VS'] = np.std(all_timeseries_VS, axis=0)
                 aggregated['trial_types'][trial_type]['n_subjects_VS'] = len(all_timeseries_VS)
             
             if aggregated['trial_types'][trial_type]['all_mean_scores_time_MCS']:
-                all_timeseries_MCS = np.array(aggregated['trial_types'][trial_type]['all_mean_scores_time_MCS'])
+                all_timeseries_MCS = _truncate_to_common_length(aggregated['trial_types'][trial_type]['all_mean_scores_time_MCS'])
                 print(f'  {trial_type} MCS timeseries shape: {all_timeseries_MCS.shape}')
                 aggregated['trial_types'][trial_type]['mean_scores_time_MCS'] = np.mean(all_timeseries_MCS, axis=0)
                 aggregated['trial_types'][trial_type]['std_scores_time_MCS'] = np.std(all_timeseries_MCS, axis=0)
@@ -854,6 +1005,10 @@ def aggregate_all_results(output_dir, patient_labels_path=None, mode='patient'):
                 session_str = str(row['session']).zfill(2)
                 key = f"{row['subject']}_{session_str}"
                 state = row['state']
+                
+                # Skip rows with n/a or invalid state values
+                if pd.isna(state) or state == 'n/a' or state == '':
+                    continue
                 
                 # Group states: VS+UWS -> UWS, MCS+/MCS-/MCS -> MCS, COMA -> COMA
                 if state in ['VS', 'UWS']:
@@ -906,7 +1061,7 @@ def aggregate_all_results(output_dir, patient_labels_path=None, mode='patient'):
                 # Calculate statistics
                 if aggregated['by_subject_type'][state]['overall']['all_mean_aucs']:
                     all_aucs = aggregated['by_subject_type'][state]['overall']['all_mean_aucs']
-                    all_ts = np.array(aggregated['by_subject_type'][state]['overall']['all_mean_scores_time'])
+                    all_ts = _truncate_to_common_length(aggregated['by_subject_type'][state]['overall']['all_mean_scores_time'])
                     
                     aggregated['by_subject_type'][state]['overall']['mean_auc'] = np.mean(all_aucs)
                     aggregated['by_subject_type'][state]['overall']['std_auc'] = np.std(all_aucs)
@@ -944,16 +1099,17 @@ def save_aggregated_results(aggregated_results, times, subjects_sessions, output
     if 'overall' in aggregated_results:
         if 'all_mean_scores_time_dict' in aggregated_results['overall']:
             np.save(data_dir / "all_mean_scores_time_dict.npy", 
-                   np.array(aggregated_results['overall']['all_mean_scores_time_dict']))
+                   aggregated_results['overall']['all_mean_scores_time_dict'],
+                   allow_pickle=True)
         
         if 'all_mean_scores_time_VS' in aggregated_results['overall'] and aggregated_results['overall']['all_mean_scores_time_VS']:
             np.save(data_dir / "all_mean_scores_time_VS.npy", 
-                   np.array(aggregated_results['overall']['all_mean_scores_time_VS']))
+                   _truncate_to_common_length(aggregated_results['overall']['all_mean_scores_time_VS']))
             print(f"Saved VS timeseries: {len(aggregated_results['overall']['all_mean_scores_time_VS'])} subjects")
         
         if 'all_mean_scores_time_MCS' in aggregated_results['overall'] and aggregated_results['overall']['all_mean_scores_time_MCS']:
             np.save(data_dir / "all_mean_scores_time_MCS.npy", 
-                   np.array(aggregated_results['overall']['all_mean_scores_time_MCS']))
+                   _truncate_to_common_length(aggregated_results['overall']['all_mean_scores_time_MCS']))
             print(f"Saved MCS timeseries: {len(aggregated_results['overall']['all_mean_scores_time_MCS'])} subjects")
     
         if 'VS' in aggregated_results['overall'] and aggregated_results['overall']['VS']:
@@ -975,13 +1131,13 @@ def save_aggregated_results(aggregated_results, times, subjects_sessions, output
             # Save VS + trial_type
             if 'all_mean_scores_time_VS' in trial_data and trial_data['all_mean_scores_time_VS']:
                 np.save(data_dir / f"all_mean_scores_time_VS_{trial_type}.npy", 
-                       np.array(trial_data['all_mean_scores_time_VS']))
+                       _truncate_to_common_length(trial_data['all_mean_scores_time_VS']))
                 print(f"Saved VS_{trial_type} timeseries: {len(trial_data['all_mean_scores_time_VS'])} subjects")
             
             # Save MCS + trial_type
             if 'all_mean_scores_time_MCS' in trial_data and trial_data['all_mean_scores_time_MCS']:
                 np.save(data_dir / f"all_mean_scores_time_MCS_{trial_type}.npy", 
-                       np.array(trial_data['all_mean_scores_time_MCS']))
+                       _truncate_to_common_length(trial_data['all_mean_scores_time_MCS']))
                 print(f"Saved MCS_{trial_type} timeseries: {len(trial_data['all_mean_scores_time_MCS'])} subjects")
     
     # Save raw aggregated results
@@ -1432,12 +1588,26 @@ def main():
     print(f"\nProcessing {len(subjects)} subjects × {len(sessions)} sessions = {len(subjects) * len(sessions)} total combinations")
     
     # Sequential processing: decode each subject-session combination
+    # Only process sessions that actually exist for each subject
     processed_count = 0
     failed_count = 0
     skipped_count = 0
+    main_path = Path(args.main_path)
     
     for subject_id in subjects:
+        # Find sessions that actually exist for this subject
+        subject_dir = main_path / f"sub-{subject_id}"
+        available_sessions = []
         for session_id in sessions:
+            session_dir = subject_dir / f"ses-{session_id}"
+            if session_dir.exists():
+                available_sessions.append(session_id)
+        
+        if not available_sessions:
+            print(f"\n⏭️  Skipping sub-{subject_id} - no sessions found")
+            continue
+        
+        for session_id in available_sessions:
             print(f"\n{'='*50}")
             print(f"Processing sub-{subject_id} ses-{session_id}")
             print(f"{'='*50}")
@@ -1453,7 +1623,8 @@ def main():
             X, y, events, times = load_epochs_single_subject_session(
                 args.main_path, subject_id, session_id, 
                 filter_trial_types=args.filter_trial_types,
-                verbose=args.verbose
+                verbose=args.verbose,
+                original_data_paths=getattr(args, 'original_data_paths', None)
             )
             
             if X is None:

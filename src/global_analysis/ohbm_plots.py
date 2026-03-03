@@ -88,7 +88,7 @@ def load_decoder_results(output_dir):
                         if 'overall' in results and 'mean_scores_time' in results['overall']:
                             n_times = len(results['overall']['mean_scores_time'])
                             # Standard EEG epoch times
-                            times = np.linspace(-0.2, 0.8, n_times)  # -200ms to 800ms
+                            times = np.linspace(-0.2, 1.34, n_times)  # -200ms to 1340ms
                     
                     all_results.append(results)
                     subjects_sessions.append((subject_id, session_id))
@@ -498,8 +498,10 @@ def create_aggregated_overall_comparison_plot(output_dir):
                        alpha=0.3, color=dataset['color'])
         
         # Add chance line and stimulus markers
-        ax.axhline(0.5, color="k", linestyle="--", alpha=0.7)
-        add_stimulus_lines(ax, times_trimmed)
+        if dataset['name'] == 'DoC' or dataset['name'] == 'Control LG':
+            ax.axhline(0.5, color="k", linestyle="--", alpha=0.7)
+            add_stimulus_lines(ax, times_trimmed)
+        
         
         # Labels and formatting
         ax.set_ylabel("AUC", fontsize=22)

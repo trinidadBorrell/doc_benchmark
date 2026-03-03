@@ -67,7 +67,7 @@ class CrossSubjectClassifier:
     """Cross-subject binary SVM classifier for VS vs MCS state prediction."""
     
     def __init__(self, data_dir, patient_labels_file, marker_type='scalar', 
-                 data_origin='original', output_dir=None, random_state=42):
+                 data_origin='original', output_dir=None, random_state=72):
         """
         Initialize the cross-subject classifier.
         
@@ -1151,9 +1151,9 @@ class CrossSubjectClassifier:
         ax.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--')
         ax.set_xlim([0.0, 1.0])
         ax.set_ylim([0.0, 1.05])
-        ax.set_xlabel('False Positive Rate')
-        ax.set_ylabel('True Positive Rate')
-        ax.set_title('Receiver Operating Characteristic (ROC) Curve')
+        ax.set_xlabel('False Positive Rate', fontsize = 16)
+        ax.set_ylabel('True Positive Rate', fontsize = 16)
+        ax.set_title('Receiver Operating Characteristic (ROC) Curve', fontsize = 16)
         ax.legend(loc="lower right")
         ax.grid(True, alpha=0.3)
         
@@ -1566,10 +1566,10 @@ class CrossDataClassifier:
                     continue
                 
                 # Binary classification: VS vs MCS
-                if state == 'UWS':
+                if state in ['UWS', 'VS']:
                     # UWS corresponds to VS (Vegetative State)
                     state = 'VS'
-                elif state in ['MCS+', 'MCS-']:
+                elif state in ['MCS+', 'MCS-','MCS']:
                     # Merge MCS+ and MCS- into single MCS category
                     state = 'MCS'
                 else:
@@ -2992,6 +2992,9 @@ class CrossDataClassifier:
         # After saving all scenario results, create the combined 4-heatmap figure
         self._plot_combined_confusion_matrices(results)
         
+        # Create AUC heatmap
+        self._plot_auc_heatmap(results)
+        
         # Create combined ROC curves plot
         self._plot_combined_roc_curves(results)
         
@@ -3650,14 +3653,28 @@ class CrossDataClassifier:
         
         # Perform Wilcoxon tests
         p_values = []
-        for diff in differences:
+        diff_names = ['OO-OR', 'OO-RO', 'RR-OR', 'RR-RO']
+        for i, (diff, name) in enumerate(zip(differences, diff_names)):
             if len(diff) > 0:
                 try:
                     stat, p = wilcoxon(diff, alternative='two-sided')
                     p_values.append(p)
-                except:
+                    median_diff = np.median(diff)
+                    mean_diff = np.mean(diff)
+                    std_diff = np.std(diff)
+                    print(f"   Wilcoxon test {i+1} ({name}):")
+                    print(f"      - stat={stat:.4f}, p={p:.6f}")
+                    print(f"      - median diff={median_diff:.4f}, mean diff={mean_diff:.4f}, std diff={std_diff:.4f}")
+                    print(f"      - n_samples={len(diff)}")
+                    if p < 0.05:
+                        print(f"      - ✓ SIGNIFICANT (p < 0.05)")
+                    else:
+                        print(f"      - ✗ Not significant (p ≥ 0.05)")
+                except Exception as e:
+                    print(f"   WARNING: Wilcoxon test {i+1} ({name}) failed: {e}")
                     p_values.append(1.0)
             else:
+                print(f"   WARNING: Empty difference array for test {i+1} ({name})")
                 p_values.append(1.0)
         
         # Create figure (matching seed_differences_analysis.py style)
@@ -3783,10 +3800,10 @@ class CrossDataClassifier:
         
         # Define the 4 scenarios (same as confusion matrices)
         scenarios = [
-            ('model_A_orig_test', 0, 'OO:\n Original Train \n Test Original'),
-            ('model_A_recon_test', 1, 'OR:\n Original Train \n Test Reconstructed'),
-            ('model_B_orig_test', 2, 'RO:\n Reconstructed Train \n Test Original'),
-            ('model_B_recon_test', 3, 'RR:\n Reconstructed Train \n Test Reconstructed')
+            ('model_A_orig_test', 0, 'OO:\n Train Original \n Test Original'),
+            ('model_A_recon_test', 1, 'OR:\n Train Original \n Test Reconstructed'),
+            ('model_B_orig_test', 2, 'RO:\n Train Reconstructed \n Test Original'),
+            ('model_B_recon_test', 3, 'RR:\n Train Reconstructed \n Test Reconstructed')
         ]
         
         # Get shared test labels (same for all scenarios)
@@ -3809,9 +3826,9 @@ class CrossDataClassifier:
             # Formatting
             ax.set_xlim([0.0, 1.0])
             ax.set_ylim([0.0, 1.05])
-            ax.set_xlabel('False Positive Rate', fontsize=10)
+            ax.set_xlabel('False Positive Rate', fontsize=12)
             if col == 0:
-                ax.set_ylabel('True Positive Rate', fontsize=10)
+                ax.set_ylabel('True Positive Rate', fontsize=15)
             ax.set_title(title, fontsize=12)
             ax.legend(loc="lower right", fontsize=10)
             ax.grid(True, alpha=0.3)
@@ -4173,6 +4190,72 @@ class CrossDataClassifier:
         
         print(f"   ✓ Combined confusion matrices saved to: {combined_plot_file}")
 
+    def _plot_auc_heatmap(self, results):
+        """
+        Create a 2x2 heatmap showing AUC values for all cross-data scenarios.
+        
+        Layout:
+        - Rows: Tested on Original (upper), Tested on Reconstructed (lower)
+        - Columns: Trained on Original (left), Trained on Reconstructed (right)
+        
+        Each cell shows the AUC score for that train/test combination.
+        """
+        print("\n📊 Creating AUC heatmap figure...")
+        
+        # Create figure with 2x2 subplots for heatmap
+        fig, ax = plt.subplots(1, 1, figsize=(10, 8))
+        
+        # Extract AUC values for the 4 scenarios
+        auc_values = [
+            [results['model_A_orig_test']['auc_score'], results['model_B_orig_test']['auc_score']],  # Tested on Original (upper row)
+            [results['model_A_recon_test']['auc_score'], results['model_B_recon_test']['auc_score']]  # Tested on Reconstructed (lower row)
+        ]
+        
+        # Convert to numpy array and handle None values
+        auc_array = np.array(auc_values)
+        auc_array = np.where(auc_array == None, np.nan, auc_array)  # Replace None with NaN for plotting
+        
+        # Create heatmap
+        im = ax.imshow(auc_array, cmap='RdBu_r', aspect='auto', vmin=0, vmax=1.0)
+        
+        # Add colorbar
+        cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        cbar.ax.set_ylabel('AUC Score', rotation=270, labelpad=30, fontsize=25)
+        
+        # Set ticks and labels
+        ax.set_xticks([0, 1])
+        ax.set_yticks([0, 1])
+        ax.set_xticklabels(['Original', 'Reconstructed'], fontsize=22)
+        ax.set_yticklabels(['Original', 'Reconstructed'], fontsize=22)
+        
+        # Add text annotations with AUC values
+        for i in range(2):
+            for j in range(2):
+                auc_val = auc_array[i, j]
+                if not np.isnan(auc_val):
+                    text_color = 'black'
+                    ax.text(j, i, f'{auc_val:.3f}', ha="center", va="center", 
+                           fontsize=20, color=text_color)
+                else:
+                    ax.text(j, i, 'N/A', ha="center", va="center", 
+                           fontsize=14, color='red')
+        
+        # Set title and labels
+      #  ax.set_title(f'AUC Scores: Cross-Data Classification Results\n{self.marker_type.title()} Features',
+      #              fontsize=16, pad=20)
+        ax.set_xlabel('Training Data', fontsize=25)
+        ax.set_ylabel('Test Data', fontsize=25)
+        
+        plt.tight_layout()
+        
+        # Save heatmap plot
+        plt.grid(False)
+        heatmap_plot_file = op.join(self.output_dir, 'heatmap_AUC_results.png')
+        plt.savefig(heatmap_plot_file, dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        print(f"   ✓ AUC heatmap saved to: {heatmap_plot_file}")
+
 
 def main():
     """Main function for command line usage."""
@@ -4185,7 +4268,7 @@ def main():
                        help='Path to CSV file with patient labels')
     parser.add_argument('--marker-type', choices=['scalar', 'topo'], default='scalar',
                        help='Type of markers to use (scalar or topo)')
-    parser.add_argument('--output-dir', default = '/data/project/eeg_foundation/src/doc_benchmark/results/new_results/MODEL/svm',
+    parser.add_argument('--output-dir', default = '/data/project/eeg_foundation/src/doc_benchmark/results/new_results/MODEL/svm_crs_metadata',
                        help='Output directory for results (default: results/svm/{marker_type})')
     parser.add_argument('--cv-strategy', choices=['stratified', 'loo'], default='stratified',
                        help='Cross-validation strategy')
