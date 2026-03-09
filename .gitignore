@@ -26,6 +26,8 @@ src/markers/create_finished_markers.py
 src/markers/text_for_trini.txt
 src/global_analysis/global_analysis.py
 src/global_analysis/README_SCRIPTS.txt
+src/report_completed_results.py
+
 
 .ruff_cache/
 .vscode/

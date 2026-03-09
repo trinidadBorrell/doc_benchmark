@@ -289,6 +289,62 @@ def align_data_to_eeg_montage(
     )
 
 
+# Standard Local-Global paradigm mapping (10=HSTD, 20=HDVT, 30=LSGS, 40=LSGD, 50=LDGD, 60=LDGS)
+_LG_EVENT_ID_MAP = {10: "HSTD", 20: "HDVT", 30: "LSGS", 40: "LSGD", 50: "LDGD", 60: "LDGS"}
+
+
+def _remap_numeric_event_ids(epochs):
+    """Remap numeric-only event IDs to Local-Global condition names.
+
+    NeuroLM FIF files store event codes as bare integers (10, 20, …).
+    All downstream report modules expect string keys (LSGS, LDGD, …).
+    This function is a no-op when event_id already contains string keys.
+    """
+    # Detect whether all keys are numeric (int or digit-only str)
+    keys = list(epochs.event_id.keys())
+    all_numeric = all(
+        isinstance(k, (int, float)) or (isinstance(k, str) and k.isdigit())
+        for k in keys
+    )
+    if not all_numeric:
+        return epochs  # already has string names — nothing to do
+
+    # Rebuild event_id with string names, restricted to codes present in data
+    present_codes = set(epochs.events[:, 2].tolist())
+    new_event_id = {
+        name: code
+        for code, name in _LG_EVENT_ID_MAP.items()
+        if code in present_codes
+    }
+    if new_event_id:
+        epochs.event_id = new_event_id
+        logger.info(f"Remapped numeric event IDs to condition names: {new_event_id}")
+    else:
+        logger.warning("Could not remap event IDs: no known codes found in data")
+    return epochs
+
+
+def _ensure_montage(epochs):
+    """Ensure epochs have digitization points (montage) for topomap plotting.
+
+    CBraMod reconstructed FIF files lack embedded electrode locations.
+    Without digitization points, MNE's topomap functions crash with
+    "No digitization points found". This applies the standard EGI 256
+    montage when dig info is missing.
+
+    This is a no-op when epochs already have digitization data.
+    """
+    if epochs.info.get("dig"):
+        return epochs
+
+    montage = mne.channels.make_standard_montage("GSN-HydroCel-256")
+    epochs.set_montage(montage, on_missing="warn")
+    logger.info(
+        "Applied GSN-HydroCel-256 montage (epochs had no digitization points)"
+    )
+    return epochs
+
+
 # =============================================================================
 # Part 4: Report Data Loader (Main Orchestrator)
 # =============================================================================
@@ -317,6 +373,8 @@ class ReportDataLoader:
             # Load epochs directly from FIF file without preprocessing metadata
             logger.info(f"Loading epochs from FIF file: {self.fif_path}")
             epochs = mne.read_epochs(str(self.fif_path), preload=True)
+            epochs = _remap_numeric_event_ids(epochs)
+            epochs = _ensure_montage(epochs)
             report_data["epoch_info"] = epochs
             report_data["metadata"] = {
                 "preprocessing_info": {},

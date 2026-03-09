@@ -267,9 +267,22 @@ def compute_scalars_from_h5(h5_file, output_file, logger):
             data = np.squeeze(data, axis=0)
             logger.info(f"  Squeezed to {data.shape}")
 
+        # WSMI connectivity data: skip generic reshape (handled below)
+        # WSMI has n_pairs = n_channels*(n_channels-1)/2 values, not n_epochs*n_channels
+        if "wsmi" in display_name and len(data.shape) <= 2:
+            n_pairs = n_channels * (n_channels - 1) // 2
+            data_flat = data.flatten()
+            if len(data_flat) % n_pairs == 0:
+                n_epochs_wsmi = len(data_flat) // n_pairs
+                data = data_flat.reshape(n_epochs_wsmi, n_pairs)
+                logger.info(
+                    f"  Reshaped WSMI to ({n_epochs_wsmi}, {n_pairs} pairs)"
+                )
+            # Fall through to WSMI handling below
+
         # Reshape flattened data back to proper shape if still flattened
         # Junifer stores data as (n_epochs * n_channels, 1) or (n_epochs * n_channels * n_times, 1)
-        if len(data.shape) <= 2 and (data.shape[-1] == 1 or len(data.shape) == 1):
+        elif len(data.shape) <= 2 and (data.shape[-1] == 1 or len(data.shape) == 1):
             data_flat = data.flatten()  # Remove last dimension if (N, 1)
 
             # Try to reshape to (epochs, channels) first
