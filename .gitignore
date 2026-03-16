@@ -27,7 +27,7 @@ src/markers/text_for_trini.txt
 src/global_analysis/global_analysis.py
 src/global_analysis/README_SCRIPTS.txt
 src/report_completed_results.py
-
+src/model/run_mlp_embedding.txt
 
 .ruff_cache/
 .vscode/

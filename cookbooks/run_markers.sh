@@ -20,7 +20,6 @@ cd /data/project/eeg_foundation/src/doc_benchmark
 
 CMD=(
     "$PYTHON_EXE" cookbooks/pipeline.py
-    --all
     --main-path "$MAIN_PATH"
     --metadata-dir /data/project/eeg_foundation/data/metadata
     --mode "$MODE" --task "$TASK"
@@ -32,5 +31,14 @@ CMD=(
 # Optional flags (only added when set)
 [ -n "$DATA_SOURCE" ]         && CMD+=(--data-source "$DATA_SOURCE")
 [ -n "$ORIGINAL_DATA_PATH" ]  && CMD+=(--original-data-path $ORIGINAL_DATA_PATH)
+
+# Subject selection: use the explicit partition if provided (set by markers.submit
+# via "queue partition from partitions.txt"), otherwise fall back to --all.
+if [ -n "$SUBJECTS" ]; then
+    echo "[run_markers] Using subject partition: $(echo "$SUBJECTS" | tr ',' '\n' | wc -l) subjects"
+    CMD+=(--subjects "$SUBJECTS")
+else
+    CMD+=(--all)
+fi
 
 exec "${CMD[@]}"

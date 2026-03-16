@@ -73,13 +73,159 @@ DEFAULT_SUBJECT_DIR = (
 )
 DEFAULT_RESULTS_ROOT = "/data/project/eeg_foundation/data/benchmark_results/new_results"
 DEFAULT_METADATA_DIR = "/data/project/eeg_foundation/data/metadata"
-MODELS = ["CBraMod", "LaBram", "NeuroLM"]
+MODELS = ["TOTEM", "CBraMod", "LaBram", "NeuroLM"]
 
 # Embedding directory mapping per model
 EMBEDDING_DIR_MAP = {
+    "TOTEM":   "/data/project/eeg_foundation/data/data_250Hz_EGI256/zero_shot_data/DOC/final_layer_embeddings",
     "CBraMod": "/data/project/eeg_foundation/data/CbraMod/final_layer_embeddings",
-    "LaBram": "/data/project/eeg_foundation/data/LaBram/results_DoC_lg/final_layer_embeddings",
+    "LaBram":  "/data/project/eeg_foundation/data/LaBram/results_DoC_lg/final_layer_embeddings",
     "NeuroLM": "/data/project/eeg_foundation/data/NeuroLM-output/final_layer_embeddings",
+}
+
+# ---------------------------------------------------------------------------
+# Color mapping for inter-model comparison plots — modify as desired
+# ---------------------------------------------------------------------------
+MODEL_COLORS = {
+    "TOTEM":    "#2166ac",  # blue
+    "CBraMod":  "#d6604d",  # red-orange
+    "LaBram":   "#4dac26",  # green
+    "NeuroLM":  "#8B44AC",  # purple
+}
+
+
+# ---------------------------------------------------------------------------
+# Marker topoplot grid — paths, marker selection, and display names
+# ---------------------------------------------------------------------------
+
+DEFAULT_ORIG_MARKERS_ROOT = (
+    "/data/project/eeg_foundation/data/benchmark_results/new_results"
+    "/TOTEM/doc_patients/MARKERS"
+)
+
+# Default model list for the marker topoplot grid.  Can differ from MODELS
+# (e.g. TOTEM may lack embedding dirs but still have MARKERS data).
+MARKER_TOPO_MODELS = ["TOTEM", "CBraMod", "LaBram", "NeuroLM"]
+
+# ---------------------------------------------------------------------------
+# Edit INTERMODEL_TOPO_MARKER_NAMES to control the display name for each
+# marker key in the plot.  Both recon-side and original-side key names are
+# accepted; original-side keys are automatically remapped to their recon
+# equivalents before lookup.
+# ---------------------------------------------------------------------------
+INTERMODEL_TOPO_MARKER_NAMES: dict = {
+    # Normalised spectral power (recon-side naming)
+    "alphan_spectralpower_spectralpower":     "Alpha Norm.",
+    "betan_spectralpower_spectralpower":      "Beta Norm.",
+    "deltan_spectralpower_spectralpower":     "Delta Norm.",
+    "gamman_spectralpower_spectralpower":     "Gamma Norm.",
+    "thetan_spectralpower_spectralpower":     "Theta Norm.",
+    # Original-side naming (auto-mapped to recon names when loading)
+    "alpha_relative_spectralpower":           "Alpha Norm.",
+    "beta_relative_spectralpower":            "Beta Norm.",
+    "delta_relative_spectralpower":           "Delta Norm.",
+    "gamma_relative_spectralpower":           "Gamma Norm.",
+    "theta_relative_spectralpower":           "Theta Norm.",
+    # Per-channel raw spectral power
+ #   "per_channel_alpha_spectralpower":        "Per-ch. Alpha",
+ #   "per_channel_beta_spectralpower":         "Per-ch. Beta",
+ #   "per_channel_delta_spectralpower":        "Per-ch. Delta",
+ #   "per_channel_gamma_spectralpower":        "Per-ch. Gamma",
+ #   "per_channel_theta_spectralpower":        "Per-ch. Theta",
+    # Complexity / entropy
+    "pe_theta_permutationentropy":            "Permutation\nEntropy (\u03b8)",
+ #   "summary_se_spectralpower_spectralpower": "Spectral Entropy",
+  #  "spectral_entropy_spectralpower":         "Spectral Entropy",
+    "kolmogorov_complexity_kolmogorovcomplexity": "Kolmogorov\nComplexity",
+    # Connectivity
+ #   "wsmi_theta_symbolicmutualinformation":   "wSMI (\u03b8)",
+ #   "wsmi_alpha_symbolicmutualinformation":   "wSMI (\u03b1)",
+ #   "wsmi_beta_symbolicmutualinformation":    "wSMI (\u03b2)",
+ #   "wsmi_gamma_symbolicmutualinformation":   "wSMI (\u03b3)",
+    # PSD summaries
+ #   "per_channel_msf_psdsummary":             "MSF",
+ #   "per_channel_sef90_psdsummary":           "SEF90",
+ #   "per_channel_sef95_psdsummary":           "SEF95",
+ #   "msf_psdsummary":                         "MSF",
+#    "sef90_psdsummary":                       "SEF90",
+#    "sef95_psdsummary":                       "SEF95",
+    # CNV
+    "cnv_detailed_cnvslope":                  "CNV",
+ #   "cnv_detailed_cnvintercept":              "CNV Intercept",
+    # ERP topographies
+    "p1_topography_timelockedtopo":           "P1",
+    "p3a_topography_timelockedtopo":          "P3a",
+    "p3b_topography_timelockedtopo":          "P3b",
+    # ERP / time-locked contrasts
+  #  "timelockedcontrast_mmn_timelockedcontrast":       "MMN",
+  #  "timelockedcontrast_p3a_timelockedcontrast":       "P3a Contrast",
+  #  "timelockedcontrast_p3b_timelockedcontrast":       "P3b Contrast",
+  #  "Timelockedcontrast_p3b_timelockedcontrast":       "P3b Contrast",
+  #  "timelockedcontrast_lsgs_ldgd_timelockedcontrast": "LSGS\u2013LDGD",
+  #  "timelockedcontrast_lsgd_ldgs_timelockedcontrast": "LSGD\u2013LDGS",
+  #  "timelockedcontrast_ld_ls_timelockedcontrast":     "LD\u2013LS",
+  #  "timelockedcontrast_gd_gs_timelockedcontrast":     "GD\u2013GS",
+}
+
+# ---------------------------------------------------------------------------
+# Edit INTERMODEL_TOPO_MARKER_ORDER to choose which markers appear as rows
+# and in which order.  Any key not found in the npz files will show as N/A.
+# ---------------------------------------------------------------------------
+INTERMODEL_TOPO_MARKER_ORDER: list = [
+    # --- Normalised band power ---
+    "deltan_spectralpower_spectralpower",
+    "thetan_spectralpower_spectralpower",
+    "alphan_spectralpower_spectralpower",
+    "betan_spectralpower_spectralpower",
+    "gamman_spectralpower_spectralpower",
+    # --- Per-channel raw spectral power ---
+ #   "per_channel_delta_spectralpower",
+ #   "per_channel_theta_spectralpower",
+ #   "per_channel_alpha_spectralpower",
+ #   "per_channel_beta_spectralpower",
+ #   "per_channel_gamma_spectralpower",
+    # --- Complexity / entropy ---
+    "pe_theta_permutationentropy",
+   # "summary_se_spectralpower_spectralpower",
+    "kolmogorov_complexity_kolmogorovcomplexity",
+    # --- Connectivity ---
+#    "wsmi_theta_symbolicmutualinformation",
+#    "wsmi_alpha_symbolicmutualinformation",
+#    "wsmi_beta_symbolicmutualinformation",
+#    "wsmi_gamma_symbolicmutualinformation",
+    # --- PSD summaries ---
+ #   "per_channel_msf_psdsummary",
+ #   "per_channel_sef90_psdsummary",
+ #   "per_channel_sef95_psdsummary",
+    # --- CNV ---
+    "cnv_detailed_cnvslope",
+ #   "cnv_detailed_cnvintercept",
+    # --- ERP topographies ---
+    "p1_topography_timelockedtopo",
+    "p3a_topography_timelockedtopo",
+    "p3b_topography_timelockedtopo",
+    # --- Time-locked contrasts ---
+ #   "timelockedcontrast_mmn_timelockedcontrast",
+ #   "timelockedcontrast_p3a_timelockedcontrast",
+ #   "timelockedcontrast_p3b_timelockedcontrast",
+ #   "timelockedcontrast_lsgs_ldgd_timelockedcontrast",
+ #   "timelockedcontrast_lsgd_ldgs_timelockedcontrast",
+ #   "timelockedcontrast_ld_ls_timelockedcontrast",
+ #   "timelockedcontrast_gd_gs_timelockedcontrast",
+]
+
+# Mapping: original-pipeline npz key → recon-pipeline canonical key.
+# Used to align the "Original" column with the recon model columns.
+_ORIG_TO_RECON_TOPO: dict = {
+    "alpha_relative_spectralpower":   "alphan_spectralpower_spectralpower",
+    "beta_relative_spectralpower":    "betan_spectralpower_spectralpower",
+    "delta_relative_spectralpower":   "deltan_spectralpower_spectralpower",
+    "gamma_relative_spectralpower":   "gamman_spectralpower_spectralpower",
+    "theta_relative_spectralpower":   "thetan_spectralpower_spectralpower",
+    "spectral_entropy_spectralpower": "summary_se_spectralpower_spectralpower",
+    "msf_psdsummary":                 "per_channel_msf_psdsummary",
+    "sef90_psdsummary":               "per_channel_sef90_psdsummary",
+    "sef95_psdsummary":               "per_channel_sef95_psdsummary",
 }
 
 
@@ -309,6 +455,14 @@ def aggregate_decoder_for_model(
     # ------------------------------------------------------------------
     # 3. Aggregate
     # ------------------------------------------------------------------
+    # Diagnostic group definitions for disaggregated plots
+    DIAG_GROUPS = {
+        "UWS":  ["VS", "UWS"],
+        "MCS":  ["MCS", "MCS-", "MCS+"],
+        "COMA": ["COMA"],
+        "EMCS": ["EMCS"],
+    }
+
     aggregated = {
         "overall": {
             "all_mean_aucs": [],
@@ -318,6 +472,7 @@ def aggregate_decoder_for_model(
             "all_mean_scores_time_dict": {},
             "MCS": {},
             "VS": {},
+            **{f"all_mean_scores_time_{g}": [] for g in DIAG_GROUPS},
         },
         "trial_types": {},
         "has_task_events": False,
@@ -338,6 +493,7 @@ def aggregate_decoder_for_model(
         ]
         if subject_state_map:
             state = subject_state_map.get(key, "UNKNOWN")
+            # Legacy VS/MCS split (kept for backwards compat)
             if state in ["VS", "UWS"]:
                 aggregated["overall"]["all_mean_scores_time_VS"].append(
                     results["overall"]["mean_scores_time"]
@@ -354,6 +510,12 @@ def aggregate_decoder_for_model(
                     "mean_scores_time"
                 ]
                 keys_MCS.append(key)
+            # Fine-grained groups
+            for grp, states in DIAG_GROUPS.items():
+                if state in states:
+                    aggregated["overall"][f"all_mean_scores_time_{grp}"].append(
+                        results["overall"]["mean_scores_time"]
+                    )
 
     if not aggregated["overall"]["all_mean_aucs"]:
         print(f"  WARNING [{model}]: No overall results to aggregate.")
@@ -389,6 +551,16 @@ def aggregate_decoder_for_model(
         aggregated["overall"]["mean_scores_time_MCS"] = np.mean(mcs_ts, axis=0)
         aggregated["overall"]["std_scores_time_MCS"] = np.std(mcs_ts, axis=0)
         aggregated["overall"]["n_subjects_MCS"] = len(mcs_ts)
+
+    # Fine-grained per-group stats
+    for grp in DIAG_GROUPS:
+        ts_list = aggregated["overall"][f"all_mean_scores_time_{grp}"]
+        if ts_list:
+            grp_ts = _truncate_to_common_length(ts_list)
+            grp_ts = grp_ts[:, :canonical_len]
+            aggregated["overall"][f"mean_scores_time_{grp}"] = np.mean(grp_ts, axis=0)
+            aggregated["overall"][f"std_scores_time_{grp}"] = np.std(grp_ts, axis=0)
+            aggregated["overall"][f"n_subjects_{grp}"] = len(grp_ts)
 
     # Trial-type aggregation
     trial_types = ["LSGS", "LSGD", "LDGD", "LDGS"]
@@ -871,7 +1043,7 @@ def run_mlp_for_model(
             f"  WARNING [{model}]: Embedding directory not found "
             f"({emb_dir}) – skipping MLP."
         )
-        return False
+        return False, {}
 
     emb_dir = Path(emb_dir)
     model_out = output_dir / model
@@ -1124,6 +1296,581 @@ def _check_group_leakage(
 
 
 # ======================================================================
+# Inter-model comparison plots
+# ======================================================================
+
+
+def _create_intermodel_comparison_plots(decoder_output: Path, models: list) -> None:
+    """Create inter-model decoder comparison plots saved next to intermodel_summary.json.
+
+    Generates two figures:
+      PLOT 1 — one row, one column per model: overall AUC-ROC timeseries ±1 SD.
+      PLOT 2 — rows = diagnostic groups (Overall, UWS, MCS, COMA, EMCS);
+               columns = models; same AUC-ROC timeseries ±1 SD style.
+
+    Parameters
+    ----------
+    decoder_output :
+        Directory that contains per-model subdirectories and intermodel_summary.json.
+    models :
+        Ordered list of model names to include (left to right columns).
+    """
+    # ── Collect per-model data ─────────────────────────────────────────────
+    model_data: dict = {}
+    for model in models:
+        data_dir = decoder_output / model / "data"
+        agg_path = data_dir / "aggregated_results.pkl"
+        times_path = data_dir / "times.npy"
+        if not agg_path.exists():
+            print(f"  [comparison plot] No aggregated results for {model} – skipping.")
+            continue
+        try:
+            with open(agg_path, "rb") as f:
+                agg = pickle.load(f)
+            times = np.load(times_path) if times_path.exists() else None
+            model_data[model] = {"aggregated": agg, "times": times}
+        except Exception as exc:
+            print(f"  [comparison plot] Error loading {model}: {exc}")
+
+    available = [m for m in models if m in model_data]
+    if not available:
+        print("  [comparison plot] No model data available – skipping.")
+        return
+
+    n = len(available)
+
+    def _plot_timeseries(ax, mean_sc, std_sc, times, color):
+        """Plot one AUC-ROC timeseries with ±1 SD band on *ax*."""
+        t = times[: len(mean_sc)] if times is not None else np.linspace(
+            -0.2, 1.34, len(mean_sc)
+        )
+        ax.plot(t, mean_sc, color=color, linewidth=2.5)
+        ax.fill_between(t, mean_sc - std_sc, mean_sc + std_sc, alpha=0.3, color=color)
+        add_stimulus_lines(ax, t)
+        ax.axhline(0.5, color="k", linestyle="--", alpha=0.5, linewidth=1)
+        ax.set_xlim(-0.25, 1.4)
+        ax.set_ylim(0.4, 1.0)
+        ax.set_xlabel("Time (s)", fontsize=20)
+        ax.tick_params(axis="both", labelsize=11)
+        ax.grid(True, alpha=0.3)
+
+    # ── PLOT 1: Overall AUC per model, shared y-axis ───────────────────────
+    fig, axes = plt.subplots(1, n, figsize=(4 * n, 4), sharey=True)
+    if n == 1:
+        axes = [axes]
+
+    for ax, model in zip(axes, available):
+        color = MODEL_COLORS.get(model, "steelblue")
+        agg = model_data[model]["aggregated"]
+        times = model_data[model]["times"]
+        overall = agg.get("overall", {})
+        if "mean_scores_time" not in overall:
+            ax.set_title(model, fontsize=14)
+            ax.text(0.5, 0.5, "No data", ha="center", va="center",
+                    transform=ax.transAxes, fontsize=12)
+            continue
+        _plot_timeseries(
+            ax, overall["mean_scores_time"], overall["std_scores_time"], times, color
+        )
+        n_sub = len(overall.get("all_mean_aucs", []))
+        ax.set_title(f"{model}", fontsize=20)
+
+    axes[0].set_ylabel("AUC-ROC", fontsize=20)
+    plt.tight_layout()
+    out1 = decoder_output / "intermodel_overall_comparison.png"
+    plt.savefig(out1, dpi=300, bbox_inches="tight")
+    plt.close()
+    print(f"  [comparison plot] Saved → {out1}")
+
+    # ── PLOT 2: Disaggregated by diagnostic group ──────────────────────────
+    # Row order: Overall first, then groups sorted by those with data
+    group_order = ["Overall", "UWS", "MCS"]
+    group_key = {
+        "Overall": ("mean_scores_time",     "std_scores_time"),
+        "UWS":     ("mean_scores_time_UWS",  "std_scores_time_UWS"),
+        "MCS":     ("mean_scores_time_MCS",  "std_scores_time_MCS"),
+        "COMA":    ("mean_scores_time_COMA", "std_scores_time_COMA"),
+        "EMCS":    ("mean_scores_time_EMCS", "std_scores_time_EMCS"),
+    }
+    group_n_key = {
+        "Overall": "all_mean_aucs",
+        "UWS":  "all_mean_scores_time_UWS",
+        "MCS":  "all_mean_scores_time_MCS",
+        "COMA": "all_mean_scores_time_COMA",
+        "EMCS": "all_mean_scores_time_EMCS",
+    }
+    # Keep only groups that have data in at least one model
+    active_groups = [
+        g for g in group_order
+        if any(
+            group_key[g][0] in model_data[m]["aggregated"].get("overall", {})
+            for m in available
+        )
+    ]
+
+    n_rows = len(active_groups)
+    fig2, axes2 = plt.subplots(
+        n_rows, n, figsize=(4 * n, 3.5 * n_rows), sharey=True, sharex=True
+    )
+    if n_rows == 1:
+        axes2 = np.array([axes2])
+    if n == 1:
+        axes2 = axes2.reshape(-1, 1)
+
+    # Column headers (model names + n)
+    for col, model in enumerate(available):
+        overall = model_data[model]["aggregated"].get("overall", {})
+        n_sub = len(overall.get("all_mean_aucs", []))
+        axes2[0, col].set_title(model, fontsize=24)
+
+    for row, grp in enumerate(active_groups):
+        mk, sk = group_key[grp]
+        nk = group_n_key[grp]
+        axes2[row, 0].set_ylabel(f"{grp}\nAUC-ROC", fontsize=20)
+        for col, model in enumerate(available):
+            ax = axes2[row, col]
+            color = MODEL_COLORS.get(model, "steelblue")
+            overall = model_data[model]["aggregated"].get("overall", {})
+            times = model_data[model]["times"]
+            if mk in overall and sk in overall:
+                n_grp = len(overall.get(nk, []))
+                _plot_timeseries(ax, overall[mk], overall[sk], times, color)
+               # ax.text(
+               #     0.97, 0.95, f"n={n_grp}",
+               #     transform=ax.transAxes, ha="right", va="top",
+               #     fontsize=10, color="gray",
+               # )
+            else:
+                ax.text(0.5, 0.5, "N/A", ha="center", va="center",
+                        transform=ax.transAxes, fontsize=12, color="gray")
+                ax.set_xlim(-0.2, 1.34)
+                ax.set_ylim(0.4, 1.0)
+
+   # fig2.suptitle(
+   #     "Inter-Model Decoding — Disaggregated by Diagnostic Group",
+   #     fontsize=16, y=1.01,
+   # )
+    plt.tight_layout()
+    out2 = decoder_output / "intermodel_disaggregated_comparison.png"
+    fig2.savefig(out2, dpi=300, bbox_inches="tight")
+    plt.close(fig2)
+    print(f"  [comparison plot] Saved → {out2}")
+
+
+# ======================================================================
+# Intermodel marker topoplot grid
+# ======================================================================
+
+
+def _find_topos_npz(directory: str, prefix: str = "topos_"):
+    """Return path to the first ``topos_*.npz`` file in *directory*, or None."""
+    if not os.path.isdir(directory):
+        return None
+    candidates = [
+        f for f in os.listdir(directory)
+        if f.startswith(prefix) and f.endswith(".npz")
+    ]
+    return os.path.join(directory, candidates[0]) if candidates else None
+
+
+def _load_subject_topos_orig(orig_markers_root: str, subject_id: str) -> dict:
+    """Load original marker topos for one subject, averaged across sessions.
+
+    Keys are canonicalised to the recon-side naming convention via
+    ``_ORIG_TO_RECON_TOPO``.
+
+    Returns
+    -------
+    dict[str, np.ndarray]
+        ``{canonical_key: mean_topo_across_sessions}``.
+    """
+    subj_dir = os.path.join(orig_markers_root, f"sub-{subject_id}")
+    if not os.path.isdir(subj_dir):
+        return {}
+    session_data: dict = {}
+    for ses_name in sorted(os.listdir(subj_dir)):
+        if not ses_name.startswith("ses-"):
+            continue
+        # Try "original/" (TOTEM naming convention) then "orig/" (legacy)
+        npz_path = None
+        for subdir in ("original", "orig"):
+            npz_path = _find_topos_npz(os.path.join(subj_dir, ses_name, subdir))
+            if npz_path is not None:
+                break
+        if npz_path is None:
+            continue
+        try:
+            npz = np.load(npz_path)
+            for k in npz.files:
+                if npz[k].ndim != 1:
+                    continue
+                canon = _ORIG_TO_RECON_TOPO.get(k, k)
+                session_data.setdefault(canon, []).append(npz[k])
+        except Exception as exc:
+            print(f"  [orig] Error loading {npz_path}: {exc}")
+    return {k: np.mean(v, axis=0) for k, v in session_data.items() if v}
+
+
+def _load_subject_topos_recon(model_markers_root: str, subject_id: str) -> dict:
+    """Load reconstructed marker topos for one subject, averaged across sessions.
+
+    Returns
+    -------
+    dict[str, np.ndarray]
+        ``{key: mean_topo_across_sessions}``.
+    """
+    subj_dir = os.path.join(model_markers_root, f"sub-{subject_id}")
+    if not os.path.isdir(subj_dir):
+        return {}
+    session_data: dict = {}
+    for ses_name in sorted(os.listdir(subj_dir)):
+        if not ses_name.startswith("ses-"):
+            continue
+        npz_path = _find_topos_npz(os.path.join(subj_dir, ses_name, "recon"))
+        if npz_path is None:
+            continue
+        try:
+            npz = np.load(npz_path)
+            for k in npz.files:
+                if npz[k].ndim != 1:
+                    continue
+                session_data.setdefault(k, []).append(npz[k])
+        except Exception as exc:
+            print(f"  [recon] Error loading {npz_path}: {exc}")
+    return {k: np.mean(v, axis=0) for k, v in session_data.items() if v}
+
+
+def _compute_mean_topo(subjects, marker_key: str, loader_fn):
+    """Return ``(mean_topo, n_contributors)`` for *marker_key* over *subjects*.
+
+    *loader_fn* must accept a subject ID string and return
+    ``dict[str, np.ndarray]``.
+    """
+    topos = []
+    for subj in subjects:
+        data = loader_fn(subj)
+        if marker_key in data:
+            topos.append(data[marker_key])
+    if not topos:
+        return None, 0
+    return np.mean(topos, axis=0), len(topos)
+
+
+# EGI-256 electrode indices that define ear and head-outline paths
+_EGI256_OUTLINES = {
+    "ear1":  np.array([190, 191, 201, 209, 218, 217, 216, 208, 200, 190]),
+    "ear2":  np.array([81, 72, 66, 67, 68, 73, 82, 92, 91, 81]),
+    "outer": np.array([
+        9, 17, 24, 30, 31, 36, 45, 243, 240, 241, 242, 246, 250,
+        255, 90, 101, 110, 119, 132, 144, 164, 173, 186, 198,
+        207, 215, 228, 232, 236, 239, 238, 237, 233, 9,
+    ]),
+}
+
+
+def _egi256_sphere_and_outlines(info):
+    """Compute sphere and custom outlines for a 256-channel EGI-HydroCel montage."""
+    try:
+        import mne
+        from matplotlib.path import Path as MplPath
+        from matplotlib.patches import PathPatch
+    except ImportError:
+        return "auto", "head"
+
+    sphere_ch_names = ["E137", "E26", "E69", "E202"]
+    ch_names = info.ch_names
+    ch_idx = [ch_names.index(ch) for ch in sphere_ch_names if ch in ch_names]
+
+    sphere = "auto"
+    if len(ch_idx) == 4:
+        pos_3d = np.stack([info["chs"][idx]["loc"][:3] for idx in ch_idx])
+        radius = np.abs(pos_3d[[2, 3], 0]).mean()
+        x, y, z = pos_3d[0, 0], pos_3d[-1, 1], pos_3d[:, -1].mean()
+        sphere = (x, y, z, radius)
+
+    # Compute 2-D projected positions
+    dummy = mne.EvokedArray(np.zeros((len(ch_names), 1)), info, tmin=0)
+    _, pos, _, _, _, this_sphere, clip_origin = (
+        mne.viz.topomap._prepare_topomap_plot(info, "eeg", sphere=sphere)
+    )
+
+    outlines: dict = {}
+    codes_list, verts_list = [], []
+    for key, idx_arr in _EGI256_OUTLINES.items():
+        t_verts = pos[idx_arr, :]
+        outlines[key] = (t_verts[:, 0], t_verts[:, 1])
+        t_codes = 2 * np.ones(len(idx_arr))
+        t_codes[0] = 1
+        codes_list.append(t_codes)
+        verts_list.append(t_verts)
+
+    all_verts = np.concatenate(verts_list, axis=0)
+    all_codes = np.concatenate(codes_list, axis=0)
+    outlines["mask_pos"] = outlines["outer"]
+    outlines["clip_radius"] = clip_origin
+
+    path = MplPath(vertices=all_verts, codes=all_codes)
+    outlines["patch"] = lambda: PathPatch(path, alpha=0.1)
+    return this_sphere, outlines
+
+
+def _topo_mne_info(n_channels: int):
+    """Return ``(mne.Info, sphere, outlines)`` for topoplots, or ``(None, None, None)``."""
+    try:
+        import mne
+        mne.set_log_level("WARNING")
+    except ImportError:
+        return None, None, None
+
+    montage_map = {
+        256: "GSN-HydroCel-256",
+        128: "GSN-HydroCel-128",
+        64:  "GSN-HydroCel-64_1.0",
+    }
+    name = montage_map.get(n_channels)
+    if name:
+        montage = mne.channels.make_standard_montage(name)
+        info = mne.create_info(montage.ch_names, 250, ch_types="eeg")
+        info.set_montage(montage, on_missing="warn")
+    else:
+        ch_names = [f"EEG{i + 1:03d}" for i in range(n_channels)]
+        info = mne.create_info(ch_names, 100, "eeg")
+        return info, "auto", "head"
+
+    if n_channels == 256:
+        try:
+            sphere, outlines = _egi256_sphere_and_outlines(info)
+            return info, sphere, outlines
+        except Exception as exc:
+            print(f"  [topo] EGI-256 outlines failed ({exc}), using defaults.")
+
+    return info, "auto", "head"
+
+
+def plot_intermodel_marker_topo_grid(
+    models: list,
+    results_root: str,
+    orig_markers_root: str,
+    output_dir,
+    seed_subjects=None,
+    marker_order=None,
+    marker_names=None,
+):
+    """Topoplot grid: rows = markers, columns = Original + one per model.
+
+    Each cell shows the group-mean topographic value for the corresponding
+    marker, computed over the subjects common to **all** columns.  Row-wise
+    shared diverging colorbars (RdBu_r) allow cross-column comparison.
+
+    The aesthetic matches ``{MODEL}_difference_grid.png`` produced by
+    ``model_biomarker_group_comparison.py``.
+
+    Parameters
+    ----------
+    models : list[str]
+        Foundation model names to include as columns, e.g.
+        ``['TOTEM', 'CBraMod', 'LaBram', 'NeuroLM']``.
+    results_root : str
+        Root directory for benchmark results
+        (``{results_root}/{model}/doc_patients/MARKERS/``).
+    orig_markers_root : str
+        Root directory for original (non-reconstructed) marker topos
+        (``{orig_markers_root}/sub-{id}/ses-{n}/orig/topos_*.npz``).
+    output_dir : Path | str
+        Directory where ``intermodel_marker_topo_grid.png`` will be saved.
+    seed_subjects : set[str] | None
+        Optional set of subject IDs to restrict to.  When *None*, the
+        intersection is computed purely from directory existence.
+    marker_order : list[str] | None
+        Ordered marker keys for the rows.  Defaults to
+        ``INTERMODEL_TOPO_MARKER_ORDER``.
+    marker_names : dict[str, str] | None
+        Key → display-name mapping.  Defaults to
+        ``INTERMODEL_TOPO_MARKER_NAMES``.
+    """
+    try:
+        import mne
+        mne.set_log_level("WARNING")
+    except ImportError:
+        print("  [markers topo grid] MNE not available — skipping.")
+        return None
+
+    if marker_order is None:
+        marker_order = INTERMODEL_TOPO_MARKER_ORDER
+    if marker_names is None:
+        marker_names = INTERMODEL_TOPO_MARKER_NAMES
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # ------------------------------------------------------------------
+    # Build column descriptors: (label, loader_fn, root_dir)
+    # ------------------------------------------------------------------
+    col_defs = []
+
+    # Original column
+    col_defs.append(("Original", orig_markers_root, "orig"))
+
+    # One column per model
+    for model in models:
+        model_root = str(Path(results_root) / model / "doc_patients" / "MARKERS")
+        col_defs.append((model, model_root, "recon"))
+
+    # ------------------------------------------------------------------
+    # Compute per-column available subjects (restricted to seed_subjects)
+    # ------------------------------------------------------------------
+    per_col_subjects = []
+    for col_label, col_root, _ in col_defs:
+        if os.path.isdir(col_root):
+            found = {
+                d.replace("sub-", "")
+                for d in os.listdir(col_root)
+                if d.startswith("sub-") and os.path.isdir(os.path.join(col_root, d))
+            }
+        else:
+            print(
+                f"  [markers topo grid] {col_label}: directory not found "
+                f"({col_root}) — column will show N/A."
+            )
+            found = set()
+        if seed_subjects is not None:
+            found &= seed_subjects
+        per_col_subjects.append(found)
+
+    # Intersection across all non-empty columns
+    non_empty = [s for s in per_col_subjects if s]
+    common_subjects = set.intersection(*non_empty) if non_empty else set()
+    print(
+        f"  [markers topo grid] Intersection subjects across all columns: "
+        f"{len(common_subjects)}"
+    )
+
+    # ------------------------------------------------------------------
+    # Build loader functions (closure over col_root/kind)
+    # ------------------------------------------------------------------
+    def _make_orig_loader(root):
+        def _loader(subj):
+            return _load_subject_topos_orig(root, subj)
+        return _loader
+
+    def _make_recon_loader(root):
+        def _loader(subj):
+            return _load_subject_topos_recon(root, subj)
+        return _loader
+
+    columns = []
+    for (col_label, col_root, kind), col_subj in zip(col_defs, per_col_subjects):
+        avail = col_subj & common_subjects
+        loader = _make_orig_loader(col_root) if kind == "orig" else _make_recon_loader(col_root)
+        columns.append((col_label, loader, avail))
+
+    n_rows = len(marker_order)
+    n_cols = len(columns)
+
+    # ------------------------------------------------------------------
+    # Auto-detect n_channels from first available topos file
+    # ------------------------------------------------------------------
+    n_channels = 256
+    for _, loader_fn, subj_set in columns:
+        for subj in sorted(subj_set)[:5]:
+            data = loader_fn(subj)
+            if data:
+                n_channels = len(next(iter(data.values())))
+                break
+        else:
+            continue
+        break
+
+    info, sphere, outlines = _topo_mne_info(n_channels)
+    if info is None:
+        print("  [markers topo grid] Could not set up MNE info — skipping.")
+        return None
+
+    print(
+        f"  [markers topo grid] Grid: {n_rows} rows × {n_cols} cols "
+        f"(n_channels={n_channels})"
+    )
+
+    # ------------------------------------------------------------------
+    # Pre-compute all cell mean topos and row-wise vlims
+    # ------------------------------------------------------------------
+    cell_data = []
+    row_vlims = []
+    for mkey in marker_order:
+        row = []
+        for _, loader_fn, subj_set in columns:
+            mean_topo, n_sub = _compute_mean_topo(subj_set, mkey, loader_fn)
+            row.append((mean_topo, n_sub))
+        cell_data.append(row)
+        valid = [t for t, _ in row if t is not None]
+        if valid:
+            vmax = max(np.max(np.abs(t)) for t in valid)
+            row_vlims.append((-vmax, vmax) if vmax > 0 else (-1, 1))
+        else:
+            row_vlims.append((-1, 1))
+
+    # ------------------------------------------------------------------
+    # Figure layout — same aesthetic as {MODEL}_difference_grid.png
+    # ------------------------------------------------------------------
+    fig_w = max(4 * n_cols + 2, 20)
+    fig_h = max(2.5 * n_rows, 16)
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(fig_w, fig_h))
+    if n_rows == 1 and n_cols == 1:
+        axes = np.array([[axes]])
+    elif n_rows == 1:
+        axes = axes.reshape(1, -1)
+    elif n_cols == 1:
+        axes = axes.reshape(-1, 1)
+
+    # Cells
+    for row, mkey in enumerate(marker_order):
+        display = marker_names.get(mkey, mkey)
+        axes[row, 0].text(
+            -0.35, 0.5, display,
+            transform=axes[row, 0].transAxes,
+            ha="right", va="center", fontsize=20,
+        )
+        for col in range(n_cols):
+            ax = axes[row, col]
+            mean_topo, _ = cell_data[row][col]
+            if mean_topo is not None:
+                im, _ = mne.viz.plot_topomap(
+                    mean_topo, info, axes=ax,
+                    vlim=row_vlims[row], cmap="RdBu_r",
+                    show=False, sphere=sphere, outlines=outlines,
+                    extrapolate="local", res=256,
+                    sensors=True, contours=6,
+                )
+                ax.set_title("")  # clear MNE auto-title
+                if col == n_cols - 1:
+                    cb = plt.colorbar(im, ax=ax, shrink=0.6, aspect=20)
+                    cb.ax.tick_params(labelsize=15)
+            else:
+                ax.text(
+                    0.5, 0.5, "N/A",
+                    transform=ax.transAxes,
+                    fontsize=12, ha="center", va="center", color="gray",
+                )
+                ax.axis("off")
+
+    # Column headers — set AFTER the cell loop so ax.set_title("") doesn't erase them
+    for col, (col_label, _, subj_set) in enumerate(columns):
+        axes[0, col].set_title(
+            f"{col_label}",
+            fontsize=30, pad=12
+        )
+
+    plt.tight_layout(pad=1.5)
+    plt.subplots_adjust(wspace=0.01, hspace=0.3)
+
+    out = output_dir / "intermodel_marker_topo_grid.png"
+    fig.savefig(out, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  [markers topo grid] Saved → {out}")
+    return str(out)
+
+
+# ======================================================================
 # CLI
 # ======================================================================
 
@@ -1196,6 +1943,38 @@ Examples:
         action="store_true",
         help="Only re-run MLP embedding classification",
     )
+    mode_group.add_argument(
+        "--markers-topo-only",
+        action="store_true",
+        help="Only produce the intermodel marker topoplot grid",
+    )
+
+    parser.add_argument(
+        "--skip-mlp-embedding",
+        action="store_true",
+        help="Skip the MLP embedding classification step",
+    )
+
+    # Marker topoplot grid options
+    parser.add_argument(
+        "--marker-models",
+        nargs="+",
+        default=MARKER_TOPO_MODELS,
+        help=(
+            f"Models to include as columns in the marker topoplot grid "
+            f"(default: {MARKER_TOPO_MODELS}).  The 'Original' column is "
+            f"always prepended automatically."
+        ),
+    )
+    parser.add_argument(
+        "--orig-markers-root",
+        type=str,
+        default=DEFAULT_ORIG_MARKERS_ROOT,
+        help=(
+            f"Root directory for original (non-reconstructed) marker topos "
+            f"(default: {DEFAULT_ORIG_MARKERS_ROOT})"
+        ),
+    )
 
     # MLP hyper-parameters
     parser.add_argument("--mlp-n-epochs", type=int, default=500)
@@ -1210,24 +1989,45 @@ Examples:
     args = parser.parse_args()
 
     # ------------------------------------------------------------------
-    # Resolve subject list: intersection of all models' embedding dirs
+    # Resolve subject list: per-model subject sets.
+    # Priority: embedding dir > DECODER dir (for models like TOTEM that
+    # have decoder results but no separate embedding directory).
     # ------------------------------------------------------------------
     emb_map = dict(EMBEDDING_DIR_MAP)
     model_subject_sets = {}
     for model in args.models:
         emb_dir = emb_map.get(model)
-        if emb_dir is None or not Path(emb_dir).exists():
-            print(f"WARNING: Embedding directory for {model} not found: {emb_dir}")
-            model_subject_sets[model] = set()
-            continue
-        model_subject_sets[model] = set(
-            d.name.replace("sub-", "")
-            for d in Path(emb_dir).iterdir()
-            if d.is_dir() and d.name.startswith("sub-")
-        )
-        print(
-            f"{model}: {len(model_subject_sets[model])} subjects found in embeddings dir."
-        )
+        if emb_dir is not None and Path(emb_dir).exists():
+            model_subject_sets[model] = set(
+                d.name.replace("sub-", "")
+                for d in Path(emb_dir).iterdir()
+                if d.is_dir() and d.name.startswith("sub-")
+            )
+            print(
+                f"{model}: {len(model_subject_sets[model])} subjects "
+                f"found in embeddings dir."
+            )
+        else:
+            # Fall back to DECODER directory
+            decoder_dir = (
+                Path(args.results_root) / model / "doc_patients" / "DECODER"
+            )
+            if decoder_dir.exists():
+                model_subject_sets[model] = {
+                    d.name.replace("sub-", "")
+                    for d in decoder_dir.glob("sub-*")
+                    if d.is_dir()
+                }
+                print(
+                    f"{model}: {len(model_subject_sets[model])} subjects "
+                    f"found in DECODER dir (no embedding dir)."
+                )
+            else:
+                print(
+                    f"WARNING: Neither embedding dir nor DECODER dir found "
+                    f"for {model} — excluded from intersection."
+                )
+                model_subject_sets[model] = set()
 
     # Find intersection
     if args.unique_subjects_values:
@@ -1289,8 +2089,9 @@ Examples:
         Path(args.metadata_dir) / "patient_labels_with_controls.csv"
     )
 
-    run_decoder = not args.mlp_embedding_only
-    run_mlp = not args.decoder_only
+    run_decoder = not args.mlp_embedding_only and not args.markers_topo_only
+    run_mlp = not args.decoder_only and not args.markers_topo_only and not args.skip_mlp_embedding
+    run_markers_topo = not args.decoder_only and not args.mlp_embedding_only
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
@@ -1397,6 +2198,9 @@ Examples:
                 indent=2,
             )
 
+        # Create inter-model comparison plots
+        _create_intermodel_comparison_plots(decoder_output, args.models)
+
         print(f"\nDecoder summary:")
         for m, s in decoder_summary.items():
             print(f"  {m}: {s}")
@@ -1484,6 +2288,32 @@ Examples:
                 )
             if failures.get("exception"):
                 print(f"  [ERROR]   {m}: classification raised exception")
+
+    # ------------------------------------------------------------------
+    # MARKERS TOPOPLOT GRID
+    # ------------------------------------------------------------------
+    if run_markers_topo:
+        markers_topo_output = output_root / "MARKERS" / f"intermodel-{timestamp}"
+        markers_topo_output.mkdir(parents=True, exist_ok=True)
+        print(f"\n{'=' * 60}")
+        print("INTERMODEL MARKER TOPOPLOT GRID")
+        print(f"{'=' * 60}")
+        print(f"  Marker models : {args.marker_models}")
+        print(f"  Orig markers  : {args.orig_markers_root}")
+        print(f"  Output        : {markers_topo_output}")
+
+        # For --markers-topo-only the embedding intersection may not exist;
+        # pass None so the function computes its own subject intersection from
+        # MARKERS directory existence.
+        seed = allowed_subjects if not args.markers_topo_only else None
+
+        plot_intermodel_marker_topo_grid(
+            models=args.marker_models,
+            results_root=args.results_root,
+            orig_markers_root=args.orig_markers_root,
+            output_dir=markers_topo_output,
+            seed_subjects=seed,
+        )
 
     # ------------------------------------------------------------------
     print(f"\n{'=' * 70}")

@@ -2,50 +2,89 @@
 """
 Unified Pipeline for EEG Foundation Benchmark
 
-Comprehensive pipeline orchestrating general_metrics, decoder, markers, and model training phases.
-Supports multiple data structures including CBraMod reconstructed data.
+Comprehensive pipeline orchestrating five independent analysis phases for
+benchmarking EEG foundation models on Disorders of Consciousness (DoC) data.
+Supports multiple data structures (CBraMod, TOTEM, LaBram, standard BIDS).
 
-Supported Data Structures:
-1. Standard: main_path/sub-{id}/ses-{num}/(orig|recon)/*.fif
+Supported Data Structures
+--------------------------
+1. Standard:     main_path/sub-{id}/ses-{num}/(orig|recon)/*.fif
 2. Suffix-based: main_path/sub-{id}/ses-{num}/*_original.fif and *_recon.fif
-3. CBraMod: main_path/sub-{id}/ses-{num}/sub-{id}_ses-{num}_vqnsp_reconstructed_epo.fif
-4. Single-file: main_path/sub-{id}/ses-{num}/*.fif (reconstructed only mode)
+3. CBraMod:      main_path/sub-{id}/ses-{num}/sub-{id}_ses-{num}_vqnsp_reconstructed_epo.fif
+4. BIDS:         main_path/sub-{id}/ses-{num}/eeg/*.fif
+5. Single-file:  main_path/sub-{id}/ses-{num}/*.fif  (reconstructed-only fallback)
 
-Pipeline Phases:
-A. GENERAL_METRICS: compute_metrics.py → Correlation/MAPE analysis
-B. MLP_EMBEDDING: mlp_embedding_classifier.py → MLP on foundation model embeddings (VS vs MCS)
-C. DECODER: decoder.py → analysis.py → viz.py
-D. MARKERS: compute_markers → compute_scalars → compute_topographies → HDF5 markers
-E. MODEL: support_vector_machine.py → SVM classification (VS vs MCS)
+Pipeline Phases
+---------------
+A. GENERAL_METRICS  compute_metrics.py          → MAPE & Pearson correlation
+B. MLP_EMBEDDING    mlp_embedding_classifier.py → MLP/RF/KR on embeddings
+                    Supports three sub-modes via CLI flags forwarded to the script:
+                    • default             — binary VS vs MCS classification
+                    • --marker-regression — Ridge regression: embeddings → scalar markers
+                    • --full-metric-prediction — 5 clinical targets (crs, etiology,
+                                                 cs_6m, cs_1y, cs_2y)
+C. DECODER          decoder.py → analysis.py → viz.py
+D. MARKERS          compute_markers_with_junifer.py → compute_scalars.py
+                    → compute_topographies.py  (parallel per subject)
+E. MODEL            support_vector_machine.py   → SVM classification (VS vs MCS)
 
-Usage Examples:
-    # CBraMod DoC patients
-    python pipeline.py \
-        --main-path /data/project/eeg_foundation/data/CbraMod/recon_data_inference \
-        --metadata-dir /data/project/eeg_foundation/data/metadata \
-        --mode patient --task lg --data-source CBraMod \
-        --results-subdir CBraMod/doc_patients --all
-    
-    # Standard DoC local-global
-    python pipeline.py \
-        --main-path /data/doc --metadata-dir /metadata \
-        --mode patient --task lg --all
-    
-    # Control resting-state
-    python pipeline.py \
-        --main-path /data/control_rs --metadata-dir /metadata \
-        --mode control --task rs --all
+Usage Examples
+--------------
+# CBraMod DoC patients — all phases
+python cookbooks/pipeline.py \\
+    --main-path /data/CbraMod/recon_data_inference \\
+    --metadata-dir /data/metadata \\
+    --mode patient --task lg --data-source CBraMod \\
+    --results-subdir CBraMod/doc_patients --all
 
-Phase-Specific Execution:
-    # Only general metrics
-    python pipeline.py --main-path /data --metadata-dir /meta --mode patient --task lg --all --general-metrics-only
-    
-    # Only markers (HDF5 + scalars + topos)
-    python pipeline.py --main-path /data --metadata-dir /meta --mode patient --task lg --all --markers-only
-    
-    # Skip specific phases
-    python pipeline.py --main-path /data --metadata-dir /meta --mode patient --task lg --all \
-        --skip-decoder --skip-general-metrics
+# Standard DoC local-global — all phases
+python cookbooks/pipeline.py \\
+    --main-path /data/doc --metadata-dir /data/metadata \\
+    --mode patient --task lg --all
+
+# Control resting-state — skip MODEL phase (auto-skipped for rs)
+python cookbooks/pipeline.py \\
+    --main-path /data/control_rs --metadata-dir /data/metadata \\
+    --mode control --task rs --all
+
+# Only markers phase
+python cookbooks/pipeline.py \\
+    --main-path /data --metadata-dir /data/metadata \\
+    --mode patient --task lg --all --markers-only
+
+# MLP embedding phase: binary VS/MCS with 5-fold CV
+python cookbooks/pipeline.py \\
+    --main-path /data --metadata-dir /data/metadata \\
+    --mode patient --task lg --all --mlp-embedding-only \\
+    --embedding-data-dir /data/embeddings/totem \\
+    --emb-full-cv
+
+# MODEL phase: SVM with baseline CSV and full CV
+python cookbooks/pipeline.py \\
+    --main-path /data --metadata-dir /data/metadata \\
+    --mode patient --task lg --all --model-only \\
+    --model-baseline-csv /data/original_DoC/baseline_stable_20210128_scalars.csv \\
+    --model-full-cv --model-use-subject-intersection
+
+# Skip general metrics and decoder, run everything else
+python cookbooks/pipeline.py \\
+    --main-path /data --metadata-dir /data/metadata \\
+    --mode patient --task lg --all \\
+    --skip-general-metrics --skip-decoder
+
+Phase-Specific Flags
+--------------------
+--general-metrics-only   Only GENERAL_METRICS
+--mlp-embedding-only     Only MLP_EMBEDDING
+--decoder-only           Only DECODER
+--markers-only           Only MARKERS
+--model-only             Only MODEL
+
+--skip-general-metrics   Skip GENERAL_METRICS
+--skip-mlp-embedding     Skip MLP_EMBEDDING
+--skip-decoder           Skip DECODER
+--skip-markers           Skip MARKERS
+--skip-model             Skip MODEL
 
 Authors: Trinidad Borrell <trinidad.borrell@gmail.com>
 """
@@ -87,11 +126,23 @@ class Pipeline:
         markers_keep_h5: bool = False,
         # Model parameters
         model_marker_type: str = "scalar",
+        model_orig_data_dir: str = None,
+        model_baseline_csv: str = None,
+        model_use_subject_intersection: bool = False,
+        model_full_cv: bool = False,
         # MLP Embedding parameters
         embedding_data_dir: str = None,
         mlp_n_epochs: int = 500,
         mlp_lr: float = 1e-3,
         mlp_batch_size: int = 32,
+        emb_full_cv: bool = False,
+        emb_use_subject_intersection: bool = False,
+        emb_all_embedding_dirs: list = None,
+        emb_marker_regression: bool = False,
+        emb_marker_csv: str = None,
+        emb_marker_reduction: str = "A",
+        emb_full_metric_prediction: bool = False,
+        emb_patient_labels_full: str = None,
         # New parameters for CBraMod and flexible data handling
         data_source: str = "auto",
         results_subdir: str = None,
@@ -132,6 +183,10 @@ class Pipeline:
             Keep H5 files after markers computation
         model_marker_type : str
             Marker type for model training: 'scalar' or 'topo'
+        model_orig_data_dir : str, optional
+            Path to a separate directory tree with the original (non-reconstructed)
+            marker files (sub-{ID}/ses-{N}/orig/scalars_*.npz).  When set, the
+            standard MARKERS output dir is used for recon and this path for orig.
         embedding_data_dir : str
             Path to pre-computed embeddings directory (for MLP embedding phase)
         mlp_n_epochs : int
@@ -172,6 +227,10 @@ class Pipeline:
         self.markers_skip_clustering = markers_skip_clustering
         self.markers_keep_h5 = markers_keep_h5
         self.model_marker_type = model_marker_type
+        self.model_orig_data_dir = model_orig_data_dir
+        self.model_baseline_csv = model_baseline_csv
+        self.model_use_subject_intersection = model_use_subject_intersection
+        self.model_full_cv = model_full_cv
 
         # MLP Embedding parameters
         self.embedding_data_dir = (
@@ -180,6 +239,14 @@ class Pipeline:
         self.mlp_n_epochs = mlp_n_epochs
         self.mlp_lr = mlp_lr
         self.mlp_batch_size = mlp_batch_size
+        self.emb_full_cv = emb_full_cv
+        self.emb_use_subject_intersection = emb_use_subject_intersection
+        self.emb_all_embedding_dirs = emb_all_embedding_dirs or []
+        self.emb_marker_regression = emb_marker_regression
+        self.emb_marker_csv = emb_marker_csv
+        self.emb_marker_reduction = emb_marker_reduction
+        self.emb_full_metric_prediction = emb_full_metric_prediction
+        self.emb_patient_labels_full = emb_patient_labels_full
 
         # New CBraMod and flexible data handling parameters
         self.data_source = data_source
@@ -777,10 +844,29 @@ class Pipeline:
 
     def run_mlp_embedding_phase(self) -> bool:
         """
-        Run MLP embedding classification phase.
-        Uses pre-computed embeddings from the benchmarked foundation model
-        for binary VS vs MCS classification.
-        Saves results to output_base/MLP_EMBEDDING/
+        Run MLP embedding classification phase (Phase B).
+
+        Invokes ``mlp_embedding_classifier.py`` with the configured options.
+        The sub-mode is determined by which flags are set on the Pipeline
+        instance (defaults to binary VS vs MCS):
+
+        - Standard binary classification (default):
+          trains MLP, Random Forest, and Kernel Ridge on pre-computed
+          embeddings for VS vs MCS discrimination.
+
+        - Marker regression (``--marker-regression`` / not yet wired into
+          pipeline CLI but callable programmatically via the classifier):
+          fits a Ridge regressor per scalar marker to predict it from
+          embeddings; results in ``regressor_results/``.
+
+        - Full metric prediction (``--full-metric-prediction``):
+          runs the same three models for five clinical targets
+          (crs, etiology, cs_6m, cs_1y, cs_2y); results under
+          ``{output_dir}/{target}/``.
+
+        Requires pre-computed ``*_embedding.npy`` or ``*_embedding.npz``
+        files under ``sub-{ID}/ses-{NUM}/`` in the embedding data directory.
+        Saves results to ``output_base/MLP_EMBEDDING/``.
 
         Returns
         -------
@@ -808,9 +894,12 @@ class Pipeline:
                 else:
                     emb_dir = self.main_path
 
-            # Validate that embedding files actually exist (support both singular and plural suffix)
-            embedding_files = list(emb_dir.glob("**/sub-*/**/*_embedding.npy")) + list(
-                emb_dir.glob("**/sub-*/**/*_embeddings.npy")
+            # Validate that embedding files actually exist (support both singular and plural suffix, .npy and .npz)
+            embedding_files = (
+                list(emb_dir.glob("**/sub-*/**/*_embedding.npy"))
+                + list(emb_dir.glob("**/sub-*/**/*_embeddings.npy"))
+                + list(emb_dir.glob("**/sub-*/**/*_embedding.npz"))
+                + list(emb_dir.glob("**/sub-*/**/*_embeddings.npz"))
             )
             # Exclude metadata files
             embedding_files = [
@@ -818,10 +907,10 @@ class Pipeline:
             ]
             if not embedding_files:
                 self.logger.warning(
-                    f"No embedding files (*_embedding.npy / *_embeddings.npy) found in {emb_dir}"
+                    f"No embedding files (*_embedding.npy/npz / *_embeddings.npy/npz) found in {emb_dir}"
                 )
                 self.logger.warning(
-                    "MLP Embedding phase requires pre-computed .npy embeddings."
+                    "MLP Embedding phase requires pre-computed .npy or .npz embeddings."
                 )
                 self.logger.warning(
                     "Skipping MLP EMBEDDING phase. To generate embeddings, run the foundation model's embedding extraction first."
@@ -855,6 +944,41 @@ class Pipeline:
                 "--batch-size",
                 str(self.mlp_batch_size),
             ]
+
+            # Always pass pooled embeddings cache dir so pooling is done once
+            pooled_dir = mlp_output_dir / "pooled_embeddings"
+            cmd.extend(["--pooled-embeddings-dir", str(pooled_dir)])
+
+            if self.emb_full_cv:
+                cmd.append("--full-cv")
+
+            if self.emb_use_subject_intersection and self.emb_all_embedding_dirs:
+                cmd.append("--use-subject-intersection")
+                cmd.append("--embedding-dirs")
+                cmd.extend(self.emb_all_embedding_dirs)
+
+            if self.emb_marker_regression:
+                if not self.emb_marker_csv:
+                    self.logger.error(
+                        "--emb-marker-regression requires --emb-marker-csv"
+                    )
+                    return False
+                cmd.extend([
+                    "--marker-regression",
+                    "--marker-csv", self.emb_marker_csv,
+                    "--marker-reduction", self.emb_marker_reduction,
+                ])
+
+            if self.emb_full_metric_prediction:
+                if not self.emb_patient_labels_full:
+                    self.logger.error(
+                        "--emb-full-metric-prediction requires --emb-patient-labels-full"
+                    )
+                    return False
+                cmd.extend([
+                    "--full-metric-prediction",
+                    "--patient-labels-full", self.emb_patient_labels_full,
+                ])
 
             if not self._run_command(cmd):
                 self.logger.error("mlp_embedding_classifier.py failed")
@@ -1265,9 +1389,7 @@ class Pipeline:
             (subject_id, session, success, failed_list, skipped)
             skipped is True when another job already holds the processing lock.
         """
-        self.logger.info(
-            f"\n[{idx}/{total}] Processing {subject_id}/ses-{session}..."
-        )
+        self.logger.info(f"\n[{idx}/{total}] Processing {subject_id}/ses-{session}...")
 
         # Atomic lock file to prevent duplicate processing across HTCondor jobs
         lock_file = (
@@ -1296,9 +1418,7 @@ class Pipeline:
                 file_types_to_process.append("original")
         else:
             # Check standard original data locations
-            session_dir = (
-                self.main_path / f"sub-{subject_id}" / f"ses-{session}"
-            )
+            session_dir = self.main_path / f"sub-{subject_id}" / f"ses-{session}"
             if (session_dir / "orig").exists() or list(
                 session_dir.glob("*_original.fif")
             ):
@@ -1315,9 +1435,7 @@ class Pipeline:
         elif list(sessions_dir_eeg.glob("*_epo_reconstructed.fif")):
             file_types_to_process.append("recon")
         # Also check standard recon patterns
-        elif (session_dir / "recon").exists() or list(
-            session_dir.glob("*_recon.fif")
-        ):
+        elif (session_dir / "recon").exists() or list(session_dir.glob("*_recon.fif")):
             file_types_to_process.append("recon")
 
         if not file_types_to_process:
@@ -1331,9 +1449,7 @@ class Pipeline:
         # Process each available file type
         for file_type in file_types_to_process:
             self.logger.info(f"  Processing {file_type} data...")
-            if not self.run_markers_phase_for_subject(
-                subject_id, session, file_type
-            ):
+            if not self.run_markers_phase_for_subject(subject_id, session, file_type):
                 self.logger.error(
                     f"Failed to process {file_type} data for {subject_id}/ses-{session}"
                 )
@@ -1454,9 +1570,7 @@ class Pipeline:
                 )
                 with ThreadPoolExecutor(max_workers=self.batch_size) as executor:
                     futures = {}
-                    for idx, (subject_id, session) in enumerate(
-                        subjects_to_process, 1
-                    ):
+                    for idx, (subject_id, session) in enumerate(subjects_to_process, 1):
                         future = executor.submit(
                             self._process_single_subject_markers,
                             subject_id,
@@ -1468,9 +1582,7 @@ class Pipeline:
                         futures[future] = (subject_id, session)
 
                     for future in as_completed(futures):
-                        subj_id, sess, success, failed, skipped = (
-                            future.result()
-                        )
+                        subj_id, sess, success, failed, skipped = future.result()
                         with completed_lock:
                             completed_count += 1
                             if skipped:
@@ -1491,9 +1603,7 @@ class Pipeline:
                         self._flush_timing_csv()
             else:
                 # Sequential processing
-                for idx, (subject_id, session) in enumerate(
-                    subjects_to_process, 1
-                ):
+                for idx, (subject_id, session) in enumerate(subjects_to_process, 1):
                     subj_id, sess, success, failed, skipped = (
                         self._process_single_subject_markers(
                             subject_id, session, markers_dir, idx, total
@@ -1536,9 +1646,7 @@ class Pipeline:
                 f"Successfully processed: {success_count}/{len(subjects)} subjects"
             )
             if skipped_count > 0:
-                self.logger.info(
-                    f"Skipped (claimed by other jobs): {skipped_count}"
-                )
+                self.logger.info(f"Skipped (claimed by other jobs): {skipped_count}")
 
             if failed_subjects:
                 self.logger.warning(
@@ -1965,6 +2073,18 @@ class Pipeline:
                 "--cross-data",  # Enable cross-data classification
             ]
 
+            if self.model_orig_data_dir:
+                cmd.extend(["--orig-data-dir", str(self.model_orig_data_dir)])
+
+            if self.model_baseline_csv:
+                cmd.extend(["--baseline-csv", str(self.model_baseline_csv)])
+
+            if self.model_use_subject_intersection:
+                cmd.append("--use-subject-intersection")
+
+            if self.model_full_cv:
+                cmd.append("--full-cv")
+
             if not self._run_command(cmd):
                 self.logger.error("support_vector_machine.py failed")
                 return False
@@ -2030,9 +2150,7 @@ class Pipeline:
             )
             self.logger.info(f"Timing will be saved to: {self._timing_path}")
         else:
-            self.logger.info(
-                "Timing CSV disabled (use --save-time to enable)"
-            )
+            self.logger.info("Timing CSV disabled (use --save-time to enable)")
 
         self.logger.info("=" * 70)
         self.logger.info("PIPELINE START")
@@ -2328,26 +2446,55 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-    # CBraMod DoC patients
-    python pipeline.py \\
-        --main-path /data/project/eeg_foundation/data/CbraMod/recon_data_inference \\
-        --metadata-dir /data/project/eeg_foundation/data/metadata \\
-        --mode patient --task lg --data-source CBraMod \\
-        --results-subdir CBraMod/doc_patients --all
-    
-    # Standard DoC local-global
-    python pipeline.py --main-path /data/doc --metadata-dir /metadata --mode patient --task lg --all
-    
-    # Control resting-state
-    python pipeline.py --main-path /data/control_rs --metadata-dir /metadata --mode control --task rs --all
-    
-    # Run only markers phase
-    python pipeline.py --main-path /data --metadata-dir /meta --mode patient --task lg --all \\
-        --skip-decoder --skip-model --skip-general-metrics
-    
-    # Run only general metrics
-    python pipeline.py --main-path /data --metadata-dir /meta --mode patient --task lg --all \\
-        --general-metrics-only
+
+  # CBraMod DoC patients — all phases
+  python pipeline.py \\
+      --main-path /data/CbraMod/recon_data_inference \\
+      --metadata-dir /data/metadata \\
+      --mode patient --task lg --data-source CBraMod \\
+      --results-subdir CBraMod/doc_patients --all
+
+  # Standard DoC local-global — all phases
+  python pipeline.py \\
+      --main-path /data/doc --metadata-dir /data/metadata \\
+      --mode patient --task lg --all
+
+  # Control resting-state
+  python pipeline.py \\
+      --main-path /data/control_rs --metadata-dir /data/metadata \\
+      --mode control --task rs --all
+
+  # Only markers phase
+  python pipeline.py \\
+      --main-path /data --metadata-dir /data/metadata \\
+      --mode patient --task lg --all --markers-only
+
+  # MLP embedding phase only: binary VS/MCS with 5-fold CV
+  python pipeline.py \\
+      --main-path /data --metadata-dir /data/metadata \\
+      --mode patient --task lg --all --mlp-embedding-only \\
+      --embedding-data-dir /data/embeddings/totem \\
+      --emb-full-cv
+
+  # MODEL phase only: SVM with baseline CSV and full CV
+  python pipeline.py \\
+      --main-path /data --metadata-dir /data/metadata \\
+      --mode patient --task lg --all --model-only \\
+      --model-baseline-csv /data/original_DoC/baseline_stable_20210128_scalars.csv \\
+      --model-full-cv --model-use-subject-intersection
+
+  # Skip general metrics and decoder, run everything else
+  python pipeline.py \\
+      --main-path /data --metadata-dir /data/metadata \\
+      --mode patient --task lg --all \\
+      --skip-general-metrics --skip-decoder
+
+  # Subject intersection across two foundation models (embedding phase)
+  python pipeline.py \\
+      --main-path /data --metadata-dir /data/metadata \\
+      --mode patient --task lg --all --mlp-embedding-only \\
+      --emb-use-subject-intersection \\
+      --emb-all-embedding-dirs TOTEM=/data/totem_emb CBraMod=/data/cbramod_emb
         """,
     )
 
@@ -2462,6 +2609,47 @@ Examples:
         default="scalar",
         help="Marker type for model training (default: scalar)",
     )
+    parser.add_argument(
+        "--model-orig-data-dir",
+        default=None,
+        help=(
+            "Path to a separate directory tree containing the ORIGINAL "
+            "(non-reconstructed) marker files "
+            "(sub-{ID}/ses-{N}/orig/scalars_*.npz). "
+            "When set, the pipeline MARKERS output dir is used for recon and "
+            "this path is used for orig; only the intersection of "
+            "subject/sessions found in both trees is loaded."
+        ),
+    )
+
+    parser.add_argument(
+        "--model-baseline-csv",
+        default=None,
+        help=(
+            "Path to a baseline CSV file (semicolon-delimited) with "
+            "pre-computed original scalar markers. When set, this CSV "
+            "is used as the source of 'original' data instead of npz files."
+        ),
+    )
+    parser.add_argument(
+        "--model-use-subject-intersection",
+        action="store_true",
+        default=False,
+        help=(
+            "Restrict the SVM subject pool to the intersection of subjects "
+            "available in both the original source (baseline CSV or "
+            "orig-data-dir) and the reconstructed data."
+        ),
+    )
+    parser.add_argument(
+        "--model-full-cv",
+        action="store_true",
+        default=False,
+        help=(
+            "Run full 5-fold StratifiedGroupKFold cross-validation for the "
+            "SVM MODEL phase instead of a single train/test split."
+        ),
+    )
 
     # MLP Embedding parameters
     parser.add_argument(
@@ -2472,7 +2660,7 @@ Examples:
         "--mlp-n-epochs",
         type=int,
         default=500,
-        help="Max training epochs for MLP embedding classifier (default: 100)",
+        help="Max training epochs for MLP embedding classifier (default: 500)",
     )
     parser.add_argument(
         "--mlp-lr",
@@ -2485,6 +2673,58 @@ Examples:
         type=int,
         default=32,
         help="Batch size for MLP embedding classifier (default: 32)",
+    )
+    parser.add_argument(
+        "--emb-full-cv",
+        action="store_true",
+        default=False,
+        help="Run 5-fold StratifiedGroupKFold CV for embedding classifiers",
+    )
+    parser.add_argument(
+        "--emb-use-subject-intersection",
+        action="store_true",
+        default=False,
+        help="Restrict embedding subjects to intersection across all foundation models",
+    )
+    parser.add_argument(
+        "--emb-all-embedding-dirs",
+        nargs="+",
+        metavar="NAME=PATH",
+        help="Embedding dirs for all models (e.g., TOTEM=/path CBraMod=/path)",
+    )
+    parser.add_argument(
+        "--emb-marker-regression",
+        action="store_true",
+        default=False,
+        help="Run Ridge marker regression (embeddings → scalar markers) in the MLP EMBEDDING phase",
+    )
+    parser.add_argument(
+        "--emb-marker-csv",
+        default=None,
+        help=(
+            "Path to baseline scalars CSV for marker regression "
+            "(required with --emb-marker-regression)"
+        ),
+    )
+    parser.add_argument(
+        "--emb-marker-reduction",
+        choices=["A", "B", "C", "D"],
+        default="A",
+        help="Reduction variant for marker CSV: A=trim_mean80, B=std, C=gfp/trim_mean80, D=gfp/std (default: A)",
+    )
+    parser.add_argument(
+        "--emb-full-metric-prediction",
+        action="store_true",
+        default=False,
+        help="Run MLP+RF+KR for 5 clinical targets (crs, etiology, cs_6m, cs_1y, cs_2y) in the MLP EMBEDDING phase",
+    )
+    parser.add_argument(
+        "--emb-patient-labels-full",
+        default=None,
+        help=(
+            "Path to patient_labels.csv with all target columns "
+            "(required with --emb-full-metric-prediction)"
+        ),
     )
 
     # Phase skipping
@@ -2600,10 +2840,22 @@ Examples:
         markers_skip_clustering=args.skip_clustering,
         markers_keep_h5=args.keep_h5,
         model_marker_type=args.model_marker_type,
+        model_orig_data_dir=args.model_orig_data_dir,
+        model_baseline_csv=args.model_baseline_csv,
+        model_use_subject_intersection=args.model_use_subject_intersection,
+        model_full_cv=args.model_full_cv,
         embedding_data_dir=args.embedding_data_dir,
         mlp_n_epochs=args.mlp_n_epochs,
         mlp_lr=args.mlp_lr,
         mlp_batch_size=args.mlp_batch_size,
+        emb_full_cv=args.emb_full_cv,
+        emb_use_subject_intersection=args.emb_use_subject_intersection,
+        emb_all_embedding_dirs=args.emb_all_embedding_dirs,
+        emb_marker_regression=args.emb_marker_regression,
+        emb_marker_csv=args.emb_marker_csv,
+        emb_marker_reduction=args.emb_marker_reduction,
+        emb_full_metric_prediction=args.emb_full_metric_prediction,
+        emb_patient_labels_full=args.emb_patient_labels_full,
         data_source=args.data_source,
         results_subdir=args.results_subdir,
         original_data_paths=args.original_data_paths,
