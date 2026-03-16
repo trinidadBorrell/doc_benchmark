@@ -26,7 +26,7 @@ except ImportError:
     raise ImportError("junifer not found. Please install junifer: pip install junifer")
 
 
-def compute_topographies_from_h5(h5_file, output_file, logger):
+def compute_topographies_from_h5(h5_file, output_file, logger, detect_n_epochs=True):
     """
     Compute per-channel topographies from junifer H5 file.
 
@@ -34,6 +34,11 @@ def compute_topographies_from_h5(h5_file, output_file, logger):
         h5_file: Path to junifer H5 file
         output_file: Path to save output npz file
         logger: Logger instance
+        detect_n_epochs: If True (default), scan all features to determine n_epochs.
+            Set to False when all markers used trial_aggregation_method (i.e. all data
+            is already (n_channels, 1)) to skip the expensive full-scan read pass.
+            n_epochs is only needed for the legacy flat-reshape fallback path, which is
+            never reached when data is in (N, 1) format.
 
     Returns:
         dict: Topographies dictionary
@@ -64,97 +69,100 @@ def compute_topographies_from_h5(h5_file, output_file, logger):
             f"Could not parse number of channels from equipment: {equipment}"
         )
 
-    # Get n_epochs from ANY feature
     n_epochs = None
     candidate_n_epochs = []
 
-    logger.info("Searching for n_epochs from all features...")
-    for i, feature_info in enumerate(features.values(), 1):
-        feature_name = feature_info["name"]
-        logger.info(f"  [{i}/{len(features)}] Checking {feature_name}...")
-        try:
-            fdata = storage.read(feature_name=feature_name)
-            if "data" not in fdata:
-                continue
+    if not detect_n_epochs:
+        logger.info("Skipping n_epochs detection (detect_n_epochs=False)")
 
-            data = fdata["data"]
-            if isinstance(data, list):
-                data = np.array(data)
+    if detect_n_epochs:
+        logger.info("Searching for n_epochs from all features...")
+        for i, feature_info in enumerate(features.values(), 1):
+            feature_name = feature_info["name"]
+            logger.info(f"  [{i}/{len(features)}] Checking {feature_name}...")
+            try:
+                fdata = storage.read(feature_name=feature_name)
+                if "data" not in fdata:
+                    continue
 
-            # Check for new format: (1, epochs, channels) or (1, epochs, channels, times)
-            if len(data.shape) >= 3 and data.shape[0] == 1:
-                # Extract epochs from dimension 1
-                potential_n_epochs = data.shape[1]
-                # Sanity check: n_epochs should be > 0 and reasonable (< 10000)
-                if 0 < potential_n_epochs < 10000:
-                    candidate_n_epochs.append(
-                        (potential_n_epochs, feature_name, data.shape)
-                    )
-                    logger.debug(
-                        f"  {feature_name}: shape {data.shape} -> n_epochs={potential_n_epochs}"
-                    )
-                else:
-                    skipped_features.append(
-                        (feature_name, f"Invalid n_epochs from shape: {data.shape}")
-                    )
-            else:
-                # Old format: try flattened data divisible by channels
-                data_flat = data.flatten()
-                data_size = len(data_flat)
+                data = fdata["data"]
+                if isinstance(data, list):
+                    data = np.array(data)
 
-                # Check if this could be a simple 2D feature (epochs × channels)
-                if data_size % n_channels == 0:
-                    potential_n_epochs = data_size // n_channels
+                # Check for new format: (1, epochs, channels) or (1, epochs, channels, times)
+                if len(data.shape) >= 3 and data.shape[0] == 1:
+                    # Extract epochs from dimension 1
+                    potential_n_epochs = data.shape[1]
                     # Sanity check: n_epochs should be > 0 and reasonable (< 10000)
                     if 0 < potential_n_epochs < 10000:
                         candidate_n_epochs.append(
-                            (potential_n_epochs, feature_name, data_size)
+                            (potential_n_epochs, feature_name, data.shape)
                         )
                         logger.debug(
-                            f"  {feature_name}: size {data_size} -> n_epochs={potential_n_epochs}"
+                            f"  {feature_name}: shape {data.shape} -> n_epochs={potential_n_epochs}"
                         )
                     else:
                         skipped_features.append(
-                            (feature_name, f"Invalid n_epochs from size: {data_size}")
+                            (feature_name, f"Invalid n_epochs from shape: {data.shape}")
                         )
                 else:
-                    skipped_features.append(
-                        (
-                            feature_name,
-                            f"Size {data_size} not divisible by {n_channels}",
+                    # Old format: try flattened data divisible by channels
+                    data_flat = data.flatten()
+                    data_size = len(data_flat)
+
+                    # Check if this could be a simple 2D feature (epochs × channels)
+                    if data_size % n_channels == 0:
+                        potential_n_epochs = data_size // n_channels
+                        # Sanity check: n_epochs should be > 0 and reasonable (< 10000)
+                        if 0 < potential_n_epochs < 10000:
+                            candidate_n_epochs.append(
+                                (potential_n_epochs, feature_name, data_size)
+                            )
+                            logger.debug(
+                                f"  {feature_name}: size {data_size} -> n_epochs={potential_n_epochs}"
+                            )
+                        else:
+                            skipped_features.append(
+                                (feature_name, f"Invalid n_epochs from size: {data_size}")
+                            )
+                    else:
+                        skipped_features.append(
+                            (
+                                feature_name,
+                                f"Size {data_size} not divisible by {n_channels}",
+                            )
                         )
-                    )
-        except Exception as e:
-            logger.debug(f"Could not read {feature_name}: {e}")
-            skipped_features.append((feature_name, f"Read error: {e}"))
-            continue
+            except Exception as e:
+                logger.debug(f"Could not read {feature_name}: {e}")
+                skipped_features.append((feature_name, f"Read error: {e}"))
+                continue
 
-    if not candidate_n_epochs:
-        raise ValueError(
-            f"Could not determine n_epochs from any features. "
-            f"Found {len(features)} features but none had data divisible by {n_channels} channels."
+        if not candidate_n_epochs:
+            raise ValueError(
+                f"Could not determine n_epochs from any features. "
+                f"Found {len(features)} features but none had data divisible by {n_channels} channels."
+            )
+
+        # Use the most common n_epochs (mode) instead of the smallest
+        # TimeLockedContrast markers have different epoch counts, so we want the mode
+        from collections import Counter
+
+        epoch_counts = [x[0] for x in candidate_n_epochs]
+        epoch_counter = Counter(epoch_counts)
+        n_epochs = epoch_counter.most_common(1)[0][0]
+
+        # Find a feature with this epoch count for logging
+        source_features = [x for x in candidate_n_epochs if x[0] == n_epochs]
+        source_feature, data_info = source_features[0][1], source_features[0][2]
+
+        logger.info(
+            f"Calculated n_epochs={n_epochs} (mode from {len(candidate_n_epochs)} candidates)"
         )
+        logger.info(f"Most common: {n_epochs} appears {epoch_counter[n_epochs]} times")
+        logger.info(f"Example: '{source_feature}' with shape {data_info}")
+        logger.info(f"All epoch counts: {dict(epoch_counter)}")
 
-    # Use the most common n_epochs (mode) instead of the smallest
-    # TimeLockedContrast markers have different epoch counts, so we want the mode
-    from collections import Counter
-
-    epoch_counts = [x[0] for x in candidate_n_epochs]
-    epoch_counter = Counter(epoch_counts)
-    n_epochs = epoch_counter.most_common(1)[0][0]
-
-    # Find a feature with this epoch count for logging
-    source_features = [x for x in candidate_n_epochs if x[0] == n_epochs]
-    source_feature, data_info = source_features[0][1], source_features[0][2]
-
-    logger.info(
-        f"Calculated n_epochs={n_epochs} (mode from {len(candidate_n_epochs)} candidates)"
-    )
-    logger.info(f"Most common: {n_epochs} appears {epoch_counter[n_epochs]} times")
-    logger.info(f"Example: '{source_feature}' with shape {data_info}")
-    logger.info(f"All epoch counts: {dict(epoch_counter)}")
-
-    logger.info(f"Using: {n_epochs} epochs × {n_channels} channels")
+        logger.info(f"Using: {n_epochs} epochs × {n_channels} channels")
 
     roi_mapping = get_electrode_mapping(n_channels)
 
@@ -251,14 +259,61 @@ def compute_topographies_from_h5(h5_file, output_file, logger):
 
         logger.info(f"Processing {display_name}, shape: {data.shape}")
 
+        # ----------------------------------------------------------------
+        # Detect trial-aggregated (N, 1) format
+        # When trial_aggregation_method is set in the YAML, Junifer outputs
+        # per-channel data as (n_channels, 1) instead of (n_epochs, n_channels).
+        # ----------------------------------------------------------------
+        is_trial_aggregated = (
+            len(data.shape) == 2 and data.shape[1] == 1 and data.shape[0] > 0
+        )
+
+        if is_trial_aggregated:
+            n_flat = data.shape[0]
+
+            if n_flat == 0:
+                logger.warning(
+                    f"  Empty data for {display_name} (shape {data.shape}), skipping"
+                )
+                continue
+            elif n_flat == n_channels:
+                # Per-channel trial-aggregated data: (n_channels, 1) → (1, n_channels)
+                data = data.flatten().reshape(1, n_channels)
+                logger.info(
+                    f"  Trial-aggregated (n_channels, 1) -> reshaped to (1, {n_channels})"
+                )
+            elif n_flat % n_channels == 0:
+                # Multi-epoch data (e.g. CNV with no trial agg)
+                n_rows = n_flat // n_channels
+                data = data.flatten().reshape(n_rows, n_channels)
+                logger.info(f"  Reshaped ({n_flat}, 1) -> ({n_rows}, {n_channels})")
+            else:
+                logger.warning(
+                    f"  ⚠️ Unexpected (N, 1) shape for {display_name}: "
+                    f"N={n_flat} is not {n_channels} channels "
+                    f"and not divisible by {n_channels}. Skipping."
+                )
+                continue
+        elif data.shape[0] == 0:
+            logger.warning(
+                f"  Empty data for {display_name} (shape {data.shape}), skipping"
+            )
+            continue
+
         # Handle new data format: (1, epochs, channels) or (1, epochs, channels, times)
-        # Squeeze out the first dimension if it's 1
-        if data.shape[0] == 1 and len(data.shape) >= 3:
+        if len(data.shape) >= 3 and data.shape[0] == 1:
             data = np.squeeze(data, axis=0)
             logger.info(f"  Squeezed to {data.shape}")
 
         # Reshape flattened data back to proper shape if still flattened
+        # Requires n_epochs (only available when detect_n_epochs=True)
         if len(data.shape) <= 2 and (data.shape[-1] == 1 or len(data.shape) == 1):
+            if n_epochs is None:
+                logger.warning(
+                    f"  Cannot reshape {display_name} {data.shape}: "
+                    f"n_epochs unknown (detect_n_epochs=False). Skipping."
+                )
+                continue
             data_flat = data.flatten()
 
             # Try to reshape to (epochs, channels) first
@@ -266,7 +321,6 @@ def compute_topographies_from_h5(h5_file, output_file, logger):
                 data = data_flat.reshape(n_epochs, n_channels)
                 logger.info(f"  Reshaped to ({n_epochs}, {n_channels})")
             elif len(data_flat) % (n_epochs * n_channels) == 0:
-                # Has time dimension: (epochs, channels, times)
                 n_times = len(data_flat) // (n_epochs * n_channels)
                 data = data_flat.reshape(n_epochs, n_channels, n_times)
                 logger.info(f"  Reshaped to ({n_epochs}, {n_channels}, {n_times})")
@@ -275,7 +329,7 @@ def compute_topographies_from_h5(h5_file, output_file, logger):
                     f"  Could not reshape {display_name}: {len(data_flat)} elements"
                 )
                 logger.warning(
-                    f"  Expected: {n_epochs}×{n_channels}={n_epochs * n_channels} or multiple thereof"
+                    f"  Expected: {n_epochs}x{n_channels}={n_epochs * n_channels} or multiple thereof"
                 )
                 continue
 
@@ -287,59 +341,28 @@ def compute_topographies_from_h5(h5_file, output_file, logger):
                 logger.info(f"  -> Skipping {display_name} (only theta PE used)")
                 continue
 
-            # PE: regular channel data
-            # Ensure 2D: (epochs, channels)
             if len(data.shape) == 3:
-                data = np.mean(data, axis=2)  # Average across time if present
+                data = np.mean(data, axis=2)
 
-            # Compute trimmean80 across epochs for each channel
             topo = trimmean80(data, axis=0)  # Shape: (channels,)
             topographies[display_name] = topo
             topo_count += 1
             logger.info(f"  -> {display_name}: {len(topo)} channels")
             continue
 
-        # 2. TimeLockedContrast: special handling - different epoch count!
+        # 2. TimeLockedContrast
         if display_name.startswith("tlc_"):
             if len(data.shape) == 3:
-                # Already shaped as (epochs, channels, times)
-                logger.info(f"  TLC already shaped as {data.shape}")
+                logger.info(f"  TLC 3D shape {data.shape}, averaging time")
+                data = np.mean(data, axis=2)
+            elif len(data.shape) == 2:
+                logger.info(f"  TLC 2D shape {data.shape}")
             else:
-                # Need to reshape from flat
-                data_flat = data.flatten()
-                data_size = len(data_flat)
-                n_per_epoch = data_size // n_channels  # epochs × times
-
-                # Try common time ranges for ERPs (typically 100-500 time points)
-                possible_times = range(100, 600)
-                n_epochs_tlc = None
-                n_times_tlc = None
-
-                for t in possible_times:
-                    if n_per_epoch % t == 0:
-                        n_epochs_tlc = n_per_epoch // t
-                        n_times_tlc = t
-                        break
-
-                if n_epochs_tlc is None:
-                    logger.warning(
-                        f"  Could not determine epochs/times for {display_name}"
-                    )
-                    logger.warning(
-                        f"  Data size: {data_size}, channels: {n_channels}, per_epoch: {n_per_epoch}"
-                    )
-                    continue
-
-                # Reshape
-                data = data_flat.reshape(n_epochs_tlc, n_channels, n_times_tlc)
-                logger.info(
-                    f"  Reshaped to ({n_epochs_tlc}, {n_channels}, {n_times_tlc})"
+                logger.warning(
+                    f"  Unexpected TLC shape for {display_name}: {data.shape}"
                 )
+                continue
 
-            # Mean across time → (epochs, channels)
-            data = np.mean(data, axis=2)
-
-            # Compute trimmean80 across epochs for each channel
             topo = trimmean80(data, axis=0)  # Shape: (channels,)
             topographies[display_name] = topo
             topo_count += 1
@@ -356,15 +379,13 @@ def compute_topographies_from_h5(h5_file, output_file, logger):
                 "p3b_topography",
             ]
         ):
-            # Mean across time if present
             if len(data.shape) == 3:
-                data = np.mean(data, axis=2)  # -> (epochs, channels)
+                data = np.mean(data, axis=2)
 
             if len(data.shape) != 2:
                 logger.warning(f"  Unexpected shape for {display_name}: {data.shape}")
                 continue
 
-            # Compute trimmean80 across epochs for each channel
             topo = trimmean80(data, axis=0)  # Shape: (channels,)
             topographies[display_name] = topo
             topo_count += 1
@@ -372,13 +393,10 @@ def compute_topographies_from_h5(h5_file, output_file, logger):
             continue
 
         # 4. Spectral power and other standard markers
-        # Should have shape (epochs, channels) or (epochs, channels, time)
         if len(data.shape) == 3:
-            # Average across time if present
             data = np.mean(data, axis=2)
 
         if len(data.shape) == 2:  # (epochs, channels)
-            # Compute trimmean80 across epochs for each channel
             topo = trimmean80(data, axis=0)  # Shape: (channels,)
             topographies[display_name] = topo
             topo_count += 1

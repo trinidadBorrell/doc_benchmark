@@ -129,13 +129,18 @@ def run_junifer(yaml_file, logger):
     logger.info(f"Running junifer with config: {yaml_file}")
     logger.info("(This may take several minutes... streaming output below)")
     try:
+        # Disable numba JIT caching to avoid RuntimeError on worker nodes where
+        # site-packages is on a filesystem that doesn't support numba's cache locator
+        env = os.environ.copy()
+        env["NUMBA_DISABLE_JIT"] = "1"
         # Stream output in real-time instead of buffering
         process = subprocess.Popen(
             ["junifer", "run", yaml_file],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
-            bufsize=1  # Line buffered
+            bufsize=1,  # Line buffered
+            env=env,
         )
         
         # Stream output line by line

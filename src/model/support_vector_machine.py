@@ -25,6 +25,15 @@ Based on the DOC-Forest recipe from:
     Robust EEG-based cross-site and cross-protocol classification of
     states of consciousness. Brain. doi:10.1093/brain/awy251
 
+  Usage examples:
+
+  Use baseline CSV as original data source + full CV
+  python src/model/support_vector_machine.py \
+      --data-dir /path/to/recon/MARKERS \
+      --baseline-csv /data/project/eeg_foundation/data/original_DoC/basel
+  ine_stable_20210128_scalars.csv \
+      --full-cv --use-subject-intersection
+
 Author: Trinidad Borrell <trinidad.borrell@gmail.com>
 """
 
@@ -1505,25 +1514,116 @@ class CrossDataClassifier:
     controlling for subject-specific characteristics that could bias the results.
     """
     
-    def __init__(self, data_dir, patient_labels_file, marker_type='scalar', 
-                 output_dir=None, random_state=42):
+    # Mapping from baseline CSV column names to internal marker names (_A variant).
+    # The CSV columns (indices 1-30 after the unnamed row-number column) map
+    # positionally 1:1 to the list returned by ``get_marker_names()``.
+    BASELINE_CSV_MARKER_COLUMNS = [
+        'nice/marker/PowerSpectralDensity/delta',
+        'nice/marker/PowerSpectralDensity/deltan',
+        'nice/marker/PowerSpectralDensity/theta',
+        'nice/marker/PowerSpectralDensity/thetan',
+        'nice/marker/PowerSpectralDensity/alpha',
+        'nice/marker/PowerSpectralDensity/alphan',
+        'nice/marker/PowerSpectralDensity/beta',
+        'nice/marker/PowerSpectralDensity/betan',
+        'nice/marker/PowerSpectralDensity/gamma',
+        'nice/marker/PowerSpectralDensity/gamman',
+        'nice/marker/PowerSpectralDensity/summary_se',
+        'nice/marker/PowerSpectralDensitySummary/summary_msf',
+        'nice/marker/PowerSpectralDensitySummary/summary_sef90',
+        'nice/marker/PowerSpectralDensitySummary/summary_sef95',
+        'nice/marker/PermutationEntropy/default',
+        'nice/marker/SymbolicMutualInformation/weighted',
+        'nice/marker/KolmogorovComplexity/default',
+        'nice/marker/ContingentNegativeVariation/default',
+        'nice/marker/TimeLockedTopography/p1',
+        'nice/marker/TimeLockedTopography/p3a',
+        'nice/marker/TimeLockedTopography/p3b',
+        'nice/marker/TimeLockedContrast/LSGS-LDGD',
+        'nice/marker/TimeLockedContrast/LSGD-LDGS',
+        'nice/marker/TimeLockedContrast/LD-LS',
+        'nice/marker/TimeLockedContrast/mmn',
+        'nice/marker/TimeLockedContrast/p3a',
+        'nice/marker/TimeLockedContrast/GD-GS',
+        'nice/marker/TimeLockedContrast/p3b',
+        'nice/marker/WindowDecoding/local',
+        'nice/marker/WindowDecoding/global',
+    ]
+
+    # The "A" reduction variant to filter on in the baseline CSV.
+    BASELINE_CSV_REDUCTION_A = 'icm/lg/egi256/trim_mean80'
+
+    # Mapping from internal marker names (_A variant, as returned by
+    # ``get_marker_names()``) to the actual key names used inside the
+    # reconstructed scalars npz files.  Only markers that exist as scalar
+    # values in the npz files are included — absolute power, PSD summary,
+    # and TimeLockedContrast markers are absent from the npz scalars.
+    INTERNAL_TO_NPZ_KEY_MAP = {
+        'delta_relative_spectralpower_A': 'deltan_spectralpower_spectralpower_A',
+        'theta_relative_spectralpower_A': 'thetan_spectralpower_spectralpower_A',
+        'alpha_relative_spectralpower_A': 'alphan_spectralpower_spectralpower_A',
+        'beta_relative_spectralpower_A': 'betan_spectralpower_spectralpower_A',
+        'gamma_relative_spectralpower_A': 'gamman_spectralpower_spectralpower_A',
+        'spectral_entropy_spectralpower_A': 'summary_se_spectralpower_spectralpower_A',
+        'pe_theta_permutationentropy_A': 'pe_theta_permutationentropy_A',
+        'wsmi_theta_symbolicmutualinformation_A': 'wsmi_theta_symbolicmutualinformation_A',
+        'kolmogorov_complexity_kolmogorovcomplexity_A': 'kolmogorov_complexity_kolmogorovcomplexity_A',
+        'cnv_detailed_cnvslope_A': 'cnv_detailed_cnvslope_A',
+        'p1_topography_timelockedtopo_A': 'p1_topography_timelockedtopo_A',
+        'p3a_topography_timelockedtopo_A': 'p3a_topography_timelockedtopo_A',
+        'p3b_topography_timelockedtopo_A': 'p3b_topography_timelockedtopo_A',
+        'window_decoding_local_windowdecoding_A': 'window_decoding_local_windowdecoding_A',
+        'window_decoding_global_windowdecoding_A': 'window_decoding_global_windowdecoding_A',
+    }
+
+    def __init__(self, data_dir, patient_labels_file, marker_type='scalar',
+                 output_dir=None, random_state=42, orig_data_dir=None,
+                 baseline_csv=None, use_subject_intersection=False,
+                 full_cv=False):
         """
         Initialize the cross-data classifier.
-        
+
         Parameters
         ----------
         data_dir : str
-            Path to results directory containing subject data
-        patient_labels_file : str  
-            Path to CSV file with patient labels
+            Path to results directory containing subject data (reconstructed).
+        patient_labels_file : str
+            Path to CSV file with patient labels.
         marker_type : str
-            'scalar' or 'topo' - type of markers to use
+            'scalar' or 'topo' - type of markers to use.
         output_dir : str
-            Output directory for results
+            Output directory for results.
         random_state : int
-            Random state for reproducibility (ensures same train/test splits across runs)
+            Random state for reproducibility.
+        orig_data_dir : str, optional
+            Path to a *separate* directory tree that holds the original (non-
+            reconstructed) scalar/topo files.  When provided, ``data_dir`` is
+            treated as the reconstructed tree and ``orig_data_dir`` as the
+            original tree.  The intersection of subject/sessions found in both
+            trees is used.
+        baseline_csv : str, optional
+            Path to a baseline CSV file containing pre-computed original scalar
+            markers (e.g. baseline_stable_20210128_scalars.csv).  When set,
+            this CSV is used as the source of "original" data instead of npz
+            files.  The CSV must be semicolon-delimited with columns matching
+            ``BASELINE_CSV_MARKER_COLUMNS``, a ``Reduction`` column, and a
+            ``Subject`` column with ``{id}_{ses_num}`` format.
+        use_subject_intersection : bool
+            When True, restrict the subject pool to the intersection of
+            subjects available in both the original source (baseline CSV or
+            orig_data_dir) and the reconstructed data.  This ensures the
+            same subjects are used across all model runs for fair comparison.
+        full_cv : bool
+            When True, run full 5-fold StratifiedGroupKFold cross-validation
+            over the entire dataset instead of a single train/test split.
+            Predictions from all held-out folds are concatenated to compute
+            AUC-ROC, accuracy, and balanced accuracy over all subjects.
         """
         self.data_dir = data_dir
+        self.orig_data_dir = orig_data_dir
+        self.baseline_csv = baseline_csv
+        self.use_subject_intersection = use_subject_intersection
+        self.full_cv = full_cv
         self.patient_labels_file = patient_labels_file
         self.marker_type = marker_type
         self.output_dir = output_dir or f"results/svm/{marker_type}"
@@ -1853,9 +1953,10 @@ class CrossDataClassifier:
             print(f"   ✓ Using {len(marker_names)} standard topo marker names (will be expanded per channel)")
             return marker_names, abbreviated_names
     
-    def load_subject_data_both(self, subject_session_path, orig_filepath=None, recon_filepath=None):
+    def load_subject_data_both(self, subject_session_path, orig_filepath=None,
+                               recon_filepath=None, marker_names=None):
         """Load both original and reconstructed marker data for a single subject/session.
-        
+
         Parameters
         ----------
         subject_session_path : str
@@ -1864,7 +1965,11 @@ class CrossDataClassifier:
             Explicit path to original data file (for new directory structure)
         recon_filepath : str, optional
             Explicit path to reconstructed data file (for new directory structure)
-            
+        marker_names : list of str, optional
+            Explicit list of marker keys to load.  When provided this overrides
+            the hardcoded ``get_marker_names()`` list, enabling cross-dataset
+            loading where key names differ between data sources.
+
         Returns
         -------
         tuple or (None, None)
@@ -1883,9 +1988,10 @@ class CrossDataClassifier:
                 return None, None
             
             try:
-                # Get marker names to filter
-                marker_names, _ = self.get_marker_names()
-                
+                # Use caller-supplied marker names or fall back to hardcoded list
+                if marker_names is None:
+                    marker_names, _ = self.get_marker_names()
+
                 # Load data from explicit file paths with filtering
                 def _load_array_filtered(path, marker_names):
                     if path.endswith('.npz'):
@@ -2067,8 +2173,552 @@ class CrossDataClassifier:
             print(f"   Error loading data from {subject_session_path}: {e}")
             return None, None, []  # Return 3-tuple for consistency
     
+    def collect_data_split_dirs(self):
+        """Collect data when orig and recon live in separate directory trees.
+
+        Reconstructed files are looked up under ``self.data_dir``::
+
+            <data_dir>/sub-{ID}/ses-{N}/recon/scalars_*.npz
+
+        Original files are looked up under ``self.orig_data_dir``::
+
+            <orig_data_dir>/sub-{ID}/ses-{N}/orig/scalars_*.npz
+
+        Only subject/session pairs that exist in *both* trees are used.
+        """
+        print(f"🔍 Collecting {self.marker_type} data from split directories...")
+        print(f"   Recon directory : {self.data_dir}")
+        print(f"   Orig  directory : {self.orig_data_dir}")
+
+        labels_dict, _ = self.load_patient_labels()
+        self.feature_names, self.feature_names_abbreviated = self.load_feature_names()
+
+        def _scan_dir(base_dir, side):
+            """Return dict {(subject_id, ses_dir): filepath} for scalars_*.npz.
+
+            Parameters
+            ----------
+            side : 'recon' or 'orig'
+                Determines which subdirectory names and filename suffixes to
+                prefer.  For 'orig', both ``orig/`` and ``original/`` are
+                tried; files ending in ``_original.npz`` are preferred.  For
+                'recon', ``recon/`` is used and ``_recon.npz`` is preferred.
+            """
+            subdir_candidates = ['recon'] if side == 'recon' else ['orig', 'original']
+            preferred_suffix = '_recon.npz' if side == 'recon' else '_original.npz'
+
+            found = {}
+            if not op.isdir(base_dir):
+                return found
+            for sub_dir in sorted(os.listdir(base_dir)):
+                if not sub_dir.startswith('sub-'):
+                    continue
+                subject_id = sub_dir[4:]
+                sub_path = op.join(base_dir, sub_dir)
+                if not op.isdir(sub_path):
+                    continue
+                for ses_dir in sorted(os.listdir(sub_path)):
+                    if not ses_dir.startswith('ses-'):
+                        continue
+                    # Try each candidate subdir name in order
+                    for subdir_name in subdir_candidates:
+                        target_dir = op.join(sub_path, ses_dir, subdir_name)
+                        if not op.isdir(target_dir):
+                            continue
+                        npz_files = [
+                            f for f in os.listdir(target_dir)
+                            if f.startswith('scalars_') and f.endswith('.npz')
+                        ]
+                        if not npz_files:
+                            continue
+                        preferred = [f for f in npz_files if preferred_suffix in f]
+                        chosen = preferred[0] if preferred else npz_files[0]
+                        found[(subject_id, ses_dir)] = op.join(target_dir, chosen)
+                        break  # stop at first subdir that has files
+            return found
+
+        recon_files = _scan_dir(self.data_dir, 'recon')
+        orig_files = _scan_dir(self.orig_data_dir, 'orig')
+
+        common_keys = sorted(set(recon_files) & set(orig_files))
+        print(f"   Recon subjects/sessions : {len(recon_files)}")
+        print(f"   Orig  subjects/sessions : {len(orig_files)}")
+        print(f"   Intersection            : {len(common_keys)}")
+
+        # Determine the effective marker names from the *actual* key intersection
+        # of the two data sources (the hardcoded get_marker_names() list may not
+        # match across datasets with different naming conventions).
+        effective_marker_names = None
+        if common_keys:
+            import zipfile as _zf
+            first_recon_fp = recon_files[common_keys[0]]
+            first_orig_fp = orig_files[common_keys[0]]
+            try:
+                with _zf.ZipFile(first_recon_fp) as z:
+                    recon_keys = {n.replace('.npy', '') for n in z.namelist()}
+                with _zf.ZipFile(first_orig_fp) as z:
+                    orig_keys = {n.replace('.npy', '') for n in z.namelist()}
+                candidate_keys = sorted(recon_keys & orig_keys)
+
+                # Drop keys that are NaN/Inf in the first sample file.
+                # _C and _D variants use std(ddof=1) across epochs, which is NaN
+                # when a subject has only 1 epoch. Excluding those keys here
+                # avoids discarding entire subjects just because of these variants.
+                import struct as _struct, re as _re, math as _math
+                def _has_nan_in_npz_key(filepath, key):
+                    with _zf.ZipFile(filepath) as z:
+                        with z.open(key + '.npy') as f:
+                            raw = f.read()
+                    major = raw[6]
+                    hlen = _struct.unpack('<H', raw[8:10])[0] if major == 1 else _struct.unpack('<I', raw[8:12])[0]
+                    hstart = 10 if major == 1 else 12
+                    header = raw[hstart:hstart+hlen].decode('latin1')
+                    dm = _re.search(r"'descr':\s*'([^']+)'", header)
+                    dtype_str = dm.group(1) if dm else '<f8'
+                    itemsize = 4 if '4' in dtype_str else 8
+                    arr_bytes = raw[hstart + hlen:]
+                    for i in range(0, len(arr_bytes) - itemsize + 1, itemsize):
+                        v = _struct.unpack('f' if itemsize == 4 else 'd', arr_bytes[i:i+itemsize])[0]
+                        if _math.isnan(v) or _math.isinf(v):
+                            return True
+                    return False
+
+                finite_keys = []
+                nan_keys = []
+                for k in candidate_keys:
+                    if _has_nan_in_npz_key(first_recon_fp, k) or _has_nan_in_npz_key(first_orig_fp, k):
+                        nan_keys.append(k)
+                    else:
+                        finite_keys.append(k)
+
+                if nan_keys:
+                    print(f"   ⚠️  Dropped {len(nan_keys)} keys with NaN/Inf in first sample "
+                          f"(std across epochs undefined — likely single-epoch subjects):")
+                    print(f"      e.g. {nan_keys[:4]}{'...' if len(nan_keys) > 4 else ''}")
+
+                effective_marker_names = finite_keys
+                print(f"   Effective marker keys   : {len(effective_marker_names)} "
+                      f"(intersection of both file key sets, NaN keys excluded)")
+                print(f"   Keys: {effective_marker_names[:5]}{'...' if len(effective_marker_names) > 5 else ''}")
+                # Update stored feature names so downstream plotting uses the right labels
+                self.feature_names = effective_marker_names
+                self.feature_names_abbreviated = effective_marker_names
+            except Exception as e:
+                print(f"   Warning: could not determine key intersection ({e}); "
+                      f"falling back to get_marker_names()")
+
+        subject_data_orig = []
+        subject_data_recon = []
+        subject_labels = []
+        collected_subjects = []
+        subjects_processed = 0
+        subjects_skipped = 0
+        discarded_subjects = []
+
+        for subject_id, ses_dir in common_keys:
+            subject_session_key = f"{subject_id}_{ses_dir}"
+
+            if subject_session_key not in labels_dict:
+                print(f"    Skipping {subject_session_key}: no label found")
+                subjects_skipped += 1
+                continue
+
+            orig_fp = orig_files[(subject_id, ses_dir)]
+            recon_fp = recon_files[(subject_id, ses_dir)]
+
+            marker_data_orig, marker_data_recon, _ = self.load_subject_data_both(
+                None, orig_filepath=orig_fp, recon_filepath=recon_fp,
+                marker_names=effective_marker_names
+            )
+
+            if marker_data_orig is None or marker_data_recon is None:
+                print(f"   ⏭️  Skipping {subject_session_key}: failed to load data")
+                discarded_subjects.append(subject_session_key)
+                subjects_skipped += 1
+                continue
+
+            if subject_data_orig:
+                if marker_data_orig.shape != subject_data_orig[0].shape:
+                    print(
+                        f"   ⚠️  Skipping {subject_session_key}: orig shape mismatch "
+                        f"({marker_data_orig.shape} vs {subject_data_orig[0].shape})"
+                    )
+                    subjects_skipped += 1
+                    continue
+                if marker_data_recon.shape != subject_data_recon[0].shape:
+                    print(
+                        f"   ⚠️  Skipping {subject_session_key}: recon shape mismatch "
+                        f"({marker_data_recon.shape} vs {subject_data_recon[0].shape})"
+                    )
+                    subjects_skipped += 1
+                    continue
+
+            subject_data_orig.append(marker_data_orig)
+            subject_data_recon.append(marker_data_recon)
+            subject_labels.append(labels_dict[subject_session_key])
+            collected_subjects.append(subject_session_key)
+            subjects_processed += 1
+            print(
+                f"   ✓ Loaded {subject_session_key}: "
+                f"orig={marker_data_orig.shape}, recon={marker_data_recon.shape}, "
+                f"state={labels_dict[subject_session_key]}"
+            )
+
+        if discarded_subjects:
+            print(f"\n⚠️  Discarded {len(discarded_subjects)} subjects:")
+            for s in discarded_subjects:
+                print(f"    - {s}")
+
+        print("\n📊 DATA COLLECTION SUMMARY:")
+        print(f"    Successfully loaded: {subjects_processed} subject/sessions")
+        print(f"    Skipped: {subjects_skipped} subject/sessions")
+
+        if subjects_processed == 0:
+            raise ValueError("No subjects could be loaded!")
+
+        if len(subject_data_orig) > 1:
+            first_shape_orig = subject_data_orig[0].shape
+            first_shape_recon = subject_data_recon[0].shape
+            if not all(d.shape == first_shape_orig for d in subject_data_orig) or \
+               not all(d.shape == first_shape_recon for d in subject_data_recon):
+                raise ValueError(
+                    f"Shape inconsistency!\n"
+                    f"  Orig  shapes: {set(d.shape for d in subject_data_orig)}\n"
+                    f"  Recon shapes: {set(d.shape for d in subject_data_recon)}"
+                )
+            print(f"    ✓ All data validated: {first_shape_orig[0]} features per subject")
+
+        self.X_original = np.array(subject_data_orig)
+        self.X_reconstructed = np.array(subject_data_recon)
+        self.y = np.array(subject_labels)
+        self.subjects = collected_subjects
+        self.y_encoded = self.label_encoder.fit_transform(self.y)
+        self.class_names = self.label_encoder.classes_
+
+        print(f"   Final dataset: {self.X_original.shape[0]} subjects × {self.X_original.shape[1]} features")
+        print(f"   Classes: {list(self.class_names)}")
+
+        unique, counts = np.unique(self.y, return_counts=True)
+        for class_name, count in zip(unique, counts):
+            print(f"      {class_name}: {count} subjects")
+
+        return self.X_original, self.X_reconstructed, self.y_encoded, self.subjects
+
+    def _get_effective_baseline_markers(self, sample_npz_path):
+        """Determine the intersection of markers available in both the
+        baseline CSV and the reconstructed npz files.
+
+        Parameters
+        ----------
+        sample_npz_path : str
+            Path to a sample npz file used to discover available keys.
+
+        Returns
+        -------
+        effective_internal_names : list[str]
+            Internal marker names (``get_marker_names()`` order) that are
+            present in both the CSV and npz.
+        effective_csv_cols : list[str]
+            Corresponding CSV column names (same order).
+        effective_npz_keys : list[str]
+            Corresponding npz key names (same order).
+        """
+        marker_names_A, _ = self.get_marker_names()
+        csv_cols = self.BASELINE_CSV_MARKER_COLUMNS
+        npz_map = self.INTERNAL_TO_NPZ_KEY_MAP
+
+        # Read available keys from the sample npz file
+        npz_available = set(np.load(sample_npz_path).keys())
+
+        effective_internal = []
+        effective_csv = []
+        effective_npz = []
+
+        for internal_name, csv_col in zip(marker_names_A, csv_cols):
+            npz_key = npz_map.get(internal_name)
+            if npz_key is not None and npz_key in npz_available:
+                effective_internal.append(internal_name)
+                effective_csv.append(csv_col)
+                effective_npz.append(npz_key)
+
+        return effective_internal, effective_csv, effective_npz
+
+    def load_original_from_baseline_csv(self, effective_csv_cols=None):
+        """Load original scalar markers from a baseline CSV file.
+
+        The CSV is semicolon-delimited.  Only the "A" reduction variant
+        (``icm/lg/egi256/trim_mean80``) is used.  The ``Subject`` column
+        has format ``{id}_{ses_num}`` (e.g. ``AA079_1``), which is converted
+        to the internal ``{id}_ses-{ses_num:02d}`` key.
+
+        Parameters
+        ----------
+        effective_csv_cols : list[str], optional
+            Subset of CSV columns to load.  If None, loads all 30 columns
+            from ``BASELINE_CSV_MARKER_COLUMNS``.
+
+        Returns
+        -------
+        dict
+            ``{subject_session_key: np.ndarray}`` feature vectors.
+        """
+        print(f"📄 Loading original scalars from baseline CSV: {self.baseline_csv}")
+
+        df = pd.read_csv(self.baseline_csv, sep=';')
+
+        # Filter to "A" reduction only
+        df = df[df['Reduction'] == self.BASELINE_CSV_REDUCTION_A].copy()
+        print(f"   Filtered to Reduction='{self.BASELINE_CSV_REDUCTION_A}': {len(df)} rows")
+
+        marker_cols = effective_csv_cols or self.BASELINE_CSV_MARKER_COLUMNS
+        missing_cols = [c for c in marker_cols if c not in df.columns]
+        if missing_cols:
+            raise ValueError(
+                f"Baseline CSV missing expected columns: {missing_cols}"
+            )
+
+        data_dict = {}
+        skipped_nan = 0
+
+        for _, row in df.iterrows():
+            subject_raw = str(row['Subject'])  # e.g. "AA079_1" or "OLD_NH034_1"
+            # Session number is always the last _-separated token
+            parts = subject_raw.rsplit('_', 1)
+            if len(parts) != 2:
+                continue
+            subject_id, ses_num_str = parts
+            try:
+                ses_num = int(ses_num_str)
+            except ValueError:
+                continue
+            subject_session_key = f"{subject_id}_ses-{ses_num:02d}"
+
+            values = row[marker_cols].values.astype(float)
+            if np.any(np.isnan(values)) or np.any(np.isinf(values)):
+                skipped_nan += 1
+                continue
+
+            data_dict[subject_session_key] = values
+
+        print(f"   ✓ Loaded {len(data_dict)} subject/sessions from baseline CSV")
+        if skipped_nan:
+            print(f"   ⚠️  Skipped {skipped_nan} rows with NaN/Inf values")
+
+        return data_dict
+
+    def _scan_recon_npz_files(self):
+        """Scan ``self.data_dir`` for reconstructed scalars_*.npz files.
+
+        Returns
+        -------
+        dict
+            ``{subject_session_key: filepath}`` for each found .npz file.
+        """
+        found = {}
+        if not op.isdir(self.data_dir):
+            return found
+
+        for sub_dir in sorted(os.listdir(self.data_dir)):
+            if not sub_dir.startswith('sub-'):
+                continue
+            sub_path = op.join(self.data_dir, sub_dir)
+            if not op.isdir(sub_path):
+                continue
+
+            # Handle flat structure: sub-{ID}/ses-{N}/recon/scalars_*.npz
+            for ses_dir in sorted(os.listdir(sub_path)):
+                if not ses_dir.startswith('ses-'):
+                    continue
+                ses_path = op.join(sub_path, ses_dir)
+                if not op.isdir(ses_path):
+                    continue
+
+                subject_id = sub_dir[4:]  # strip 'sub-'
+                subject_session_key = f"{subject_id}_{ses_dir}"
+
+                # Check recon subdir
+                recon_dir = op.join(ses_path, 'recon')
+                if op.isdir(recon_dir):
+                    npz_files = [
+                        f for f in os.listdir(recon_dir)
+                        if f.startswith('scalars_') and f.endswith('.npz')
+                    ]
+                    if npz_files:
+                        found[subject_session_key] = op.join(recon_dir, npz_files[0])
+                        continue
+
+                # Fallback: check session dir directly
+                npz_files = [
+                    f for f in os.listdir(ses_path)
+                    if f.startswith('scalars_') and f.endswith('.npz')
+                      and ('recon' in f or 'reconstructed' in f)
+                ]
+                if npz_files:
+                    found[subject_session_key] = op.join(ses_path, npz_files[0])
+
+        return found
+
+    def collect_data_baseline_csv(self):
+        """Collect data using the baseline CSV for original and npz for recon.
+
+        Dynamically determines the intersection of markers available in both
+        sources (using ``INTERNAL_TO_NPZ_KEY_MAP`` to translate between the
+        CSV/internal naming convention and the npz key names).  Only the
+        shared markers are used as features.
+
+        Returns
+        -------
+        tuple
+            ``(X_original, X_reconstructed, y_encoded, subjects)``
+        """
+        print(f"🔍 Collecting data: original from baseline CSV, reconstructed from npz...")
+        print(f"   Baseline CSV : {self.baseline_csv}")
+        print(f"   Recon dir    : {self.data_dir}")
+
+        # Scan reconstructed npz files first — we need a sample to discover keys
+        recon_files = self._scan_recon_npz_files()
+        print(f"   Recon subjects/sessions : {len(recon_files)}")
+
+        if not recon_files:
+            raise ValueError("No reconstructed npz files found!")
+
+        # Determine effective marker intersection using a sample npz
+        sample_npz_path = next(iter(recon_files.values()))
+        effective_internal, effective_csv, effective_npz = \
+            self._get_effective_baseline_markers(sample_npz_path)
+
+        all_marker_names_A, all_abbreviated = self.get_marker_names()
+        print(f"   Effective markers: {len(effective_internal)} / "
+              f"{len(all_marker_names_A)} (markers present in both CSV and npz)")
+        for iname, npzk in zip(effective_internal, effective_npz):
+            if iname != npzk:
+                print(f"      {iname} → {npzk}")
+
+        # Build abbreviated names for the effective subset
+        abbrev_lookup = dict(zip(all_marker_names_A, all_abbreviated))
+        self.feature_names = effective_internal
+        self.feature_names_abbreviated = [
+            abbrev_lookup.get(n, n) for n in effective_internal
+        ]
+
+        # Load original data from CSV (only effective columns)
+        orig_data_dict = self.load_original_from_baseline_csv(
+            effective_csv_cols=effective_csv
+        )
+        print(f"   Orig  subjects/sessions : {len(orig_data_dict)}")
+
+        # Compute intersection
+        common_keys = sorted(set(orig_data_dict.keys()) & set(recon_files.keys()))
+        print(f"   Intersection            : {len(common_keys)}")
+
+        if not common_keys:
+            raise ValueError(
+                "No common subjects found between baseline CSV and "
+                "reconstructed npz files!"
+            )
+
+        # Load labels
+        labels_dict, _ = self.load_patient_labels()
+
+        subject_data_orig = []
+        subject_data_recon = []
+        subject_labels = []
+        collected_subjects = []
+        subjects_skipped = 0
+
+        for subject_session_key in common_keys:
+            if subject_session_key not in labels_dict:
+                print(f"    Skipping {subject_session_key}: no label found")
+                subjects_skipped += 1
+                continue
+
+            # Original data from CSV (already filtered to effective columns)
+            orig_values = orig_data_dict[subject_session_key]
+
+            # Reconstructed data from npz — use effective_npz keys
+            recon_fp = recon_files[subject_session_key]
+            try:
+                recon_npz = np.load(recon_fp)
+                vals = []
+                missing = []
+                for npz_key in effective_npz:
+                    if npz_key in recon_npz:
+                        vals.append(float(recon_npz[npz_key]))
+                    else:
+                        missing.append(npz_key)
+                if missing:
+                    print(f"    Skipping {subject_session_key}: recon missing "
+                          f"{len(missing)} markers: {missing[:3]}...")
+                    subjects_skipped += 1
+                    continue
+                recon_values = np.array(vals)
+            except Exception as e:
+                print(f"    Skipping {subject_session_key}: error loading recon: {e}")
+                subjects_skipped += 1
+                continue
+
+            if np.any(np.isnan(recon_values)) or np.any(np.isinf(recon_values)):
+                print(f"    Skipping {subject_session_key}: NaN/Inf in recon data")
+                subjects_skipped += 1
+                continue
+
+            # Shape validation
+            if orig_values.shape != recon_values.shape:
+                print(f"    Skipping {subject_session_key}: shape mismatch "
+                      f"orig={orig_values.shape} vs recon={recon_values.shape}")
+                subjects_skipped += 1
+                continue
+
+            subject_data_orig.append(orig_values)
+            subject_data_recon.append(recon_values)
+            subject_labels.append(labels_dict[subject_session_key])
+            collected_subjects.append(subject_session_key)
+            print(f"   ✓ Loaded {subject_session_key}: {orig_values.shape[0]} features, "
+                  f"state={labels_dict[subject_session_key]}")
+
+        print(f"\n📊 DATA COLLECTION SUMMARY:")
+        print(f"    Successfully loaded: {len(collected_subjects)} subject/sessions")
+        print(f"    Skipped: {subjects_skipped} subject/sessions")
+
+        if not collected_subjects:
+            raise ValueError("No subjects could be loaded!")
+
+        self.X_original = np.array(subject_data_orig)
+        self.X_reconstructed = np.array(subject_data_recon)
+        self.y = np.array(subject_labels)
+        self.subjects = collected_subjects
+        self.y_encoded = self.label_encoder.fit_transform(self.y)
+        self.class_names = self.label_encoder.classes_
+
+        print(f"   Final dataset: {self.X_original.shape[0]} subjects × "
+              f"{self.X_original.shape[1]} features")
+        print(f"   Classes: {list(self.class_names)}")
+        unique, counts = np.unique(self.y, return_counts=True)
+        for class_name, count in zip(unique, counts):
+            print(f"      {class_name}: {count} subjects")
+
+        # Save intersection subject list for reproducibility
+        intersection_file = op.join(self.output_dir, 'subject_intersection.json')
+        with open(intersection_file, 'w') as f:
+            json.dump({
+                'subjects': collected_subjects,
+                'n_subjects': len(collected_subjects),
+                'n_effective_markers': len(effective_internal),
+                'effective_markers': effective_internal,
+                'baseline_csv': str(self.baseline_csv),
+                'recon_dir': str(self.data_dir),
+            }, f, indent=2)
+        print(f"   ✓ Subject intersection saved to: {intersection_file}")
+
+        return self.X_original, self.X_reconstructed, self.y_encoded, self.subjects
+
     def collect_data(self):
         """Collect both original and reconstructed data from all available subjects."""
+        if self.baseline_csv is not None:
+            return self.collect_data_baseline_csv()
+        if self.orig_data_dir is not None:
+            return self.collect_data_split_dirs()
+
         print(f"🔍 Collecting {self.marker_type} data (both original and reconstructed) from subjects...")
         print(f"   Data directory: {self.data_dir}")
         
@@ -2497,8 +3147,17 @@ class CrossDataClassifier:
         print(f"   CV strategy: {cv_strategy}")
         print(f"   Test size: {test_size:.0%}")
         print(f"   Random state: {self.random_state}")
+        print(f"   Full CV mode: {self.full_cv}")
         print()
-        
+
+        # Dispatch to full-CV mode if requested
+        if self.full_cv:
+            return self.run_cross_data_full_cv(cv_strategy, n_splits, test_size)
+
+        # Classic single-split results go into a dedicated subfolder
+        self.output_dir = op.join(self.output_dir, 'classic_split')
+        os.makedirs(self.output_dir, exist_ok=True)
+
         try:
             # Step 1: Collect data
             X_orig, X_recon, y_encoded, subjects = self.collect_data()
@@ -2776,7 +3435,348 @@ class CrossDataClassifier:
             print(f"   Labels file exists: {op.exists(self.patient_labels_file)}")
             print(f"   Output directory: {self.output_dir}")
             raise
-    
+
+    def run_cross_data_full_cv(self, cv_strategy='stratified', n_splits=4,
+                               test_size=0.2):
+        """Run full 5-fold cross-validation over the entire dataset.
+
+        Instead of a single train/test split, this method:
+        1. Splits all subjects into 5 folds (StratifiedGroupKFold)
+        2. For each fold: trains Model A (original) and Model B (reconstructed)
+           on the 4 training folds, predicts the held-out fold
+        3. Concatenates all held-out predictions
+        4. Computes final metrics (AUC-ROC, accuracy, balanced accuracy)
+
+        The 4-way cross-testing design is preserved for each fold.
+
+        Returns
+        -------
+        dict
+            Cross-data classification results with full-CV metrics.
+        """
+        n_cv_folds = 5
+
+        # Nested CV results go into a dedicated subfolder
+        self.output_dir = op.join(self.output_dir, 'nested_cv')
+        os.makedirs(self.output_dir, exist_ok=True)
+
+        print("=" * 80)
+        print(f"FULL {n_cv_folds}-FOLD CROSS-VALIDATION MODE")
+        print("=" * 80)
+        print()
+
+        try:
+            # Step 1: Collect data
+            X_orig, X_recon, y_encoded, subjects = self.collect_data()
+
+            # Subject groups for no-leakage splitting
+            subject_groups = np.array([
+                subj.split('_ses-')[0] for subj in subjects
+            ])
+            n_unique = len(np.unique(subject_groups))
+            print(f"\n   Found {n_unique} unique subjects across {len(subjects)} sessions")
+
+            # Create the 5-fold splitter
+            effective_folds = min(n_cv_folds, n_unique)
+            if effective_folds < 2:
+                raise ValueError(
+                    f"Only {n_unique} unique subjects -- cannot perform "
+                    f"{n_cv_folds}-fold CV"
+                )
+            sgkf = StratifiedGroupKFold(
+                n_splits=effective_folds, shuffle=True,
+                random_state=self.random_state
+            )
+
+            # Accumulators for each of the 4 scenarios
+            scenario_keys = [
+                'model_A_orig_test', 'model_A_recon_test',
+                'model_B_orig_test', 'model_B_recon_test',
+            ]
+            accum = {k: {'y_true': [], 'y_pred': [], 'y_proba': [],
+                         'subjects': []}
+                     for k in scenario_keys}
+
+            # Collect per-fold feature importances for averaging
+            fold_importances_A = []
+            fold_importances_B = []
+
+            for fold_idx, (train_idx, test_idx) in enumerate(
+                sgkf.split(X_orig, y_encoded, groups=subject_groups)
+            ):
+                print(f"\n{'─' * 60}")
+                print(f"  FOLD {fold_idx + 1}/{effective_folds}")
+                print(f"{'─' * 60}")
+
+                X_orig_train = X_orig[train_idx]
+                X_orig_test = X_orig[test_idx]
+                X_recon_train = X_recon[train_idx]
+                X_recon_test = X_recon[test_idx]
+                y_train = y_encoded[train_idx]
+                y_test = y_encoded[test_idx]
+                subjects_test = [subjects[i] for i in test_idx]
+                groups_train = subject_groups[train_idx]
+
+                # Verify no leakage
+                train_subj = set(subject_groups[train_idx])
+                test_subj = set(subject_groups[test_idx])
+                overlap = train_subj & test_subj
+                if overlap:
+                    raise ValueError(
+                        f"Fold {fold_idx}: subject leakage detected: {overlap}"
+                    )
+                print(f"   Train: {len(train_subj)} subjects ({X_orig_train.shape[0]} sessions)")
+                print(f"   Test : {len(test_subj)} subjects ({X_orig_test.shape[0]} sessions)")
+
+                # Grid search + train Model A (original)
+                print(f"   Grid search for Model A (original)...")
+                best_A = self._grid_search_hyperparameters(
+                    X_orig_train, y_train, groups_train, cv_strategy, n_splits
+                )
+                pipeline_A = self.create_pipeline(
+                    C=best_A['C'], kernel=best_A['kernel'], gamma=best_A['gamma']
+                )
+                pipeline_A.fit(X_orig_train, y_train)
+
+                # Grid search + train Model B (reconstructed)
+                print(f"   Grid search for Model B (reconstructed)...")
+                best_B = self._grid_search_hyperparameters(
+                    X_recon_train, y_train, groups_train, cv_strategy, n_splits
+                )
+                pipeline_B = self.create_pipeline(
+                    C=best_B['C'], kernel=best_B['kernel'], gamma=best_B['gamma']
+                )
+                pipeline_B.fit(X_recon_train, y_train)
+
+                # Collect feature importances (linear kernel)
+                if best_A['kernel'] == 'linear':
+                    fold_importances_A.append(
+                        np.abs(pipeline_A.named_steps['svc'].coef_[0])
+                    )
+                if best_B['kernel'] == 'linear':
+                    fold_importances_B.append(
+                        np.abs(pipeline_B.named_steps['svc'].coef_[0])
+                    )
+
+                # Predict held-out fold -- 4 scenarios
+                preds = {
+                    'model_A_orig_test': (pipeline_A, X_orig_test),
+                    'model_A_recon_test': (pipeline_A, X_recon_test),
+                    'model_B_orig_test': (pipeline_B, X_orig_test),
+                    'model_B_recon_test': (pipeline_B, X_recon_test),
+                }
+                for sk, (pipe, X_te) in preds.items():
+                    proba = pipe.predict_proba(X_te)
+                    pred = np.argmax(proba, axis=1)
+                    accum[sk]['y_true'].append(y_test)
+                    accum[sk]['y_pred'].append(pred)
+                    accum[sk]['y_proba'].append(proba)
+                    accum[sk]['subjects'].extend(subjects_test)
+
+                # Fold summary
+                ba_A_orig = balanced_accuracy_score(
+                    y_test, np.argmax(
+                        pipeline_A.predict_proba(X_orig_test), axis=1
+                    )
+                )
+                ba_B_recon = balanced_accuracy_score(
+                    y_test, np.argmax(
+                        pipeline_B.predict_proba(X_recon_test), axis=1
+                    )
+                )
+                print(f"   Fold {fold_idx + 1} balanced accuracy: "
+                      f"A→orig={ba_A_orig:.3f}, B→recon={ba_B_recon:.3f}")
+
+            # Concatenate across folds
+            print(f"\n{'=' * 60}")
+            print("AGGREGATING RESULTS ACROSS ALL FOLDS")
+            print(f"{'=' * 60}")
+
+            results = {}
+            for sk in scenario_keys:
+                y_true_all = np.concatenate(accum[sk]['y_true'])
+                y_pred_all = np.concatenate(accum[sk]['y_pred'])
+                y_proba_all = np.concatenate(accum[sk]['y_proba'], axis=0)
+
+                results[sk] = self._compute_metrics(
+                    y_true_all, y_pred_all, y_proba_all, sk
+                )
+                results[sk]['subjects'] = accum[sk]['subjects']
+
+            # Average feature importances
+            results['feature_importances_A'] = (
+                np.mean(fold_importances_A, axis=0)
+                if fold_importances_A else None
+            )
+            results['feature_importances_B'] = (
+                np.mean(fold_importances_B, axis=0)
+                if fold_importances_B else None
+            )
+
+            results['class_names'] = self.class_names
+            results['n_features'] = X_orig.shape[1]
+            results['n_train_subjects'] = len(subjects)  # all used via CV
+            results['n_test_subjects'] = len(subjects)
+            results['y_test'] = np.concatenate(
+                accum['model_A_orig_test']['y_true']
+            )
+            results['test_subjects'] = accum['model_A_orig_test']['subjects']
+            results['train_subjects'] = list(subjects)  # all subjects train at some point
+            results['cv_scores_A'] = np.array([
+                results['model_A_orig_test']['balanced_accuracy']
+            ])
+            results['cv_scores_B'] = np.array([
+                results['model_B_recon_test']['balanced_accuracy']
+            ])
+            results['best_params'] = {
+                'model_A': {'kernel': 'linear', 'C': 'per-fold'},
+                'model_B': {'kernel': 'linear', 'C': 'per-fold'},
+            }
+            results['metadata'] = {
+                'full_cv': True,
+                'n_folds': effective_folds,
+                'random_state': self.random_state,
+            }
+
+            # Save results
+            self._save_full_cv_results(results)
+
+            # Generate plots (same as classic_split)
+            self._plot_combined_confusion_matrices(results)
+            self._plot_auc_heatmap(results)
+            self._plot_combined_roc_curves(results)
+            self._plot_subject_probabilities(results)
+            self._plot_model_A_probabilities(results)
+            self._plot_model_B_probabilities(results)
+            self._plot_comparison_grid(results)
+            self._plot_difference_boxplots_with_stats(results)
+
+            # Summary
+            print(f"\n{'=' * 80}")
+            print(f"FULL {effective_folds}-FOLD CV SUMMARY")
+            print(f"{'=' * 80}")
+            print(f"   Total subjects: {len(subjects)}")
+            print(f"   Features: {X_orig.shape[1]}")
+            for sk in scenario_keys:
+                r = results[sk]
+                auc_str = f"{r['auc_score']:.3f}" if r['auc_score'] else "N/A"
+                print(f"   {sk}:")
+                print(f"      Accuracy={r['accuracy']:.3f}, "
+                      f"Balanced Acc={r['balanced_accuracy']:.3f}, "
+                      f"AUC-ROC={auc_str}")
+            print(f"\n   Results saved to: {self.output_dir}")
+            print("=" * 80)
+
+            return results
+
+        except Exception as e:
+            print(f"\nFull-CV classification failed: {e}")
+            raise
+
+    def _save_full_cv_results(self, results):
+        """Save full cross-validation results to disk.
+
+        Results are written into ``self.output_dir`` which already points
+        to the ``nested_cv/`` subfolder.
+        """
+        print("\n💾 Saving full-CV results...")
+
+        scenario_keys = [
+            'model_A_orig_test', 'model_A_recon_test',
+            'model_B_orig_test', 'model_B_recon_test',
+        ]
+
+        # Save per-scenario results
+        for sk in scenario_keys:
+            folder = sk.replace('model_A_', 'Model_A_').replace(
+                'model_B_', 'Model_B_'
+            ).replace('_test', '_Test').replace('orig', 'Original').replace(
+                'recon', 'Reconstructed'
+            )
+            scenario_dir = op.join(self.output_dir, folder)
+            os.makedirs(scenario_dir, exist_ok=True)
+
+            r = results[sk]
+            json_results = {
+                'experiment_info': {
+                    'marker_type': self.marker_type,
+                    'full_cv': True,
+                    'n_folds': results['metadata']['n_folds'],
+                    'n_subjects': len(r.get('subjects', [])),
+                    'n_features': results['n_features'],
+                    'class_names': results['class_names'].tolist(),
+                    'timestamp': datetime.now().isoformat(),
+                },
+                'performance_metrics': {
+                    'accuracy': float(r['accuracy']),
+                    'balanced_accuracy': float(r['balanced_accuracy']),
+                    'auc_score': float(r['auc_score']) if r['auc_score'] else None,
+                },
+                'class_metrics': {
+                    'precision': r['precision'].tolist(),
+                    'recall': r['recall'].tolist(),
+                    'f1_score': r['f1_score'].tolist(),
+                    'support': r['support'].tolist(),
+                },
+                'confusion_matrix': r['confusion_matrix'].tolist(),
+                'classification_report': r['classification_report'],
+            }
+
+            with open(op.join(scenario_dir, 'classification_results.json'), 'w') as f:
+                json.dump(json_results, f, indent=2)
+
+            # Subject predictions CSV
+            subj_list = r.get('subjects', results.get('test_subjects', []))
+            y_true_for_csv = results.get('y_test', np.zeros(len(r['y_pred']), dtype=int))
+            if subj_list and len(subj_list) == len(r['y_pred']):
+                pred_df = pd.DataFrame({
+                    'subject_session': subj_list,
+                    'true_state': [self.class_names[i] for i in y_true_for_csv],
+                    'predicted_state': [self.class_names[i] for i in r['y_pred']],
+                })
+                pred_df['correct_prediction'] = (
+                    pred_df['true_state'] == pred_df['predicted_state']
+                )
+                for ci, cn in enumerate(self.class_names):
+                    pred_df[f'prob_{cn}'] = r['y_proba'][:, ci]
+                pred_df.to_csv(
+                    op.join(scenario_dir, 'subject_predictions.csv'),
+                    index=False
+                )
+
+            # Feature importances
+            imp_key = 'feature_importances_A' if 'model_A' in sk else 'feature_importances_B'
+            importances = results.get(imp_key)
+            if importances is not None and self.feature_names and \
+               len(self.feature_names) == len(importances):
+                fi_df = pd.DataFrame({
+                    'feature_name': self.feature_names,
+                    'feature_name_abbreviated': self.feature_names_abbreviated,
+                    'importance': importances,
+                }).sort_values('importance', ascending=False)
+                fi_df.to_csv(
+                    op.join(scenario_dir, 'feature_importances.csv'),
+                    index=False
+                )
+
+            print(f"   ✓ {sk} saved to {scenario_dir}")
+
+        # Consolidated JSON
+        consolidated = {}
+        for sk in scenario_keys:
+            r = results[sk]
+            consolidated[sk] = {
+                'accuracy': float(r['accuracy']),
+                'balanced_accuracy': float(r['balanced_accuracy']),
+                'auc_score': float(r['auc_score']) if r['auc_score'] else None,
+            }
+        consolidated['metadata'] = results['metadata']
+        consolidated['n_subjects'] = len(results.get('test_subjects', []))
+
+        with open(op.join(self.output_dir, 'cross_data_results_full_cv.json'), 'w') as f:
+            json.dump(consolidated, f, indent=2)
+        print(f"   ✓ Consolidated results: {self.output_dir}/cross_data_results_full_cv.json")
+
     def _compute_metrics(self, y_true, y_pred, y_proba, description):
         """Compute classification metrics for a single test scenario."""
         print(f"   Computing metrics for {description}...")
@@ -4278,11 +5278,46 @@ def main():
                        help='Random state for reproducibility')
     parser.add_argument('--test-size', type=float, default=0.2,
                        help='Fraction of data to hold out for testing (default: 0.2)')
-    parser.add_argument('--cross-data', action='store_true', default=True, 
+    parser.add_argument('--cross-data', action='store_true', default=True,
                        help='Run cross-data classification (train on both original and reconstructed, test on both)')
-    
+    parser.add_argument('--orig-data-dir', default=None,
+                       help=(
+                           'Path to a separate directory tree containing the ORIGINAL '
+                           '(non-reconstructed) scalar/topo files '
+                           '(sub-{ID}/ses-{N}/orig/scalars_*.npz). '
+                           'When set, --data-dir is treated as the reconstructed tree '
+                           'and only the intersection of subject/sessions found in both '
+                           'trees is used.'
+                       ))
+    parser.add_argument('--baseline-csv', default=None,
+                       help=(
+                           'Path to a baseline CSV file (semicolon-delimited) with '
+                           'pre-computed original scalar markers. When set, this CSV '
+                           'is used as the source of "original" data instead of npz '
+                           'files. Default: '
+                           '/data/project/eeg_foundation/data/original_DoC/'
+                           'baseline_stable_20210128_scalars.csv'
+                       ))
+    parser.add_argument('--use-subject-intersection', action='store_true',
+                       default=False,
+                       help=(
+                           'Restrict the subject pool to the intersection of '
+                           'subjects available in both the original source '
+                           '(baseline CSV or orig-data-dir) and the '
+                           'reconstructed data. Ensures the same subjects are '
+                           'used across all model runs.'
+                       ))
+    parser.add_argument('--full-cv', action='store_true', default=False,
+                       help=(
+                           'Run full 5-fold StratifiedGroupKFold cross-validation '
+                           'over the entire dataset instead of a single train/test '
+                           'split. Predictions from all held-out folds are '
+                           'concatenated to compute AUC-ROC, accuracy, and '
+                           'balanced accuracy over all subjects.'
+                       ))
+
     args = parser.parse_args()
-    
+
     # Run classification
     try:
         if args.cross_data:
@@ -4293,9 +5328,13 @@ def main():
                 patient_labels_file=args.patient_labels,
                 marker_type=args.marker_type,
                 output_dir=args.output_dir,
-                random_state=args.random_state
+                random_state=args.random_state,
+                orig_data_dir=args.orig_data_dir,
+                baseline_csv=args.baseline_csv,
+                use_subject_intersection=args.use_subject_intersection,
+                full_cv=args.full_cv,
             )
-            
+
             classifier.run_cross_data_classification(
                 cv_strategy=args.cv_strategy,
                 n_splits=args.n_splits,
