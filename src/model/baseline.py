@@ -253,13 +253,18 @@ class BaselineClassifier:
         )
         return features_dict, feature_names, groups_dict
 
-    def load_labels_for_target(self, target):
+    def load_labels_for_target(self, target, binary_outcome=False):
         """Load labels for a given prediction target from patient_labels.csv.
 
         Parameters
         ----------
         target : str
             One of 'crs', 'etiology', 'cs_6m', 'cs_1y', 'cs_2y'.
+        binary_outcome : bool
+            If True and target is an outcome score (cs_6m/cs_1y/cs_2y),
+            collapse classes to binary VS vs MCS:
+            VS / VS/MCS → VS; MCS+ / MCS- / MCS / CONSCIOUS → MCS;
+            DEATH and all others are skipped.
 
         Returns
         -------
@@ -311,6 +316,8 @@ class BaselineClassifier:
             is_binary = True
 
         elif target in ("cs_6m", "cs_1y", "cs_2y"):
+            _VS_STATES = {"VS", "VS/MCS"}
+            _MCS_STATES = {"MCS+", "MCS-", "MCS", "CONSCIOUS"}
             for _, row in df.iterrows():
                 subject = row["subject"]
                 session = f"ses-{int(row['session']):02d}"
@@ -318,10 +325,17 @@ class BaselineClassifier:
                 if pd.isna(val) or str(val).strip().lower() in ("n/a", ""):
                     continue
                 label = str(val).strip()
+                if binary_outcome:
+                    if label in _VS_STATES:
+                        label = "VS"
+                    elif label in _MCS_STATES:
+                        label = "MCS"
+                    else:
+                        continue  # skip DEATH and other unresolvable states
                 key = f"{subject}_{session}"
                 labels_dict[key] = label
                 available_states.add(label)
-            is_binary = False
+            is_binary = binary_outcome
 
         else:
             raise ValueError(f"Unknown target: {target!r}")
@@ -334,12 +348,15 @@ class BaselineClassifier:
         )
         return labels_dict, class_names, is_binary
 
-    def collect_data(self, target):
+    def collect_data(self, target, binary_outcome=False):
         """Build X, y, subjects arrays for a given prediction target.
 
         Parameters
         ----------
         target : str
+        binary_outcome : bool
+            Passed through to ``load_labels_for_target``; collapses outcome
+            classes to binary VS/MCS when True.
 
         Returns
         -------
@@ -351,12 +368,20 @@ class BaselineClassifier:
         print("Collecting data ...", flush=True)
 
         features_dict, feature_names, groups_dict = self.load_scalars()
-        labels_dict, class_names, is_binary = self.load_labels_for_target(target)
+        labels_dict, class_names, is_binary = self.load_labels_for_target(
+            target, binary_outcome=binary_outcome
+        )
 
         self.feature_names = feature_names
         self.is_binary = is_binary
 
         common_keys = sorted(set(features_dict) & set(labels_dict))
+        print(
+            f"   Scalars: {len(features_dict)} sessions | "
+            f"Labels ({target}): {len(labels_dict)} sessions | "
+            f"Intersection: {len(common_keys)} sessions",
+            flush=True,
+        )
         if not common_keys:
             raise ValueError(
                 f"No subjects matched between scalars CSV and labels for "
@@ -667,15 +692,19 @@ class BaselineClassifier:
                 except Exception:
                     pass
 
+        all_labels = list(range(len(self.class_names)))
         test_precision, test_recall, test_f1, test_support = (
             precision_recall_fscore_support(
-                y_test, test_preds, average=None, zero_division=0
+                y_test, test_preds,
+                labels=all_labels,
+                average=None, zero_division=0,
             )
         )
-        test_conf = confusion_matrix(y_test, test_preds)
+        test_conf = confusion_matrix(y_test, test_preds, labels=all_labels)
         test_report = classification_report(
             y_test,
             test_preds,
+            labels=all_labels,
             target_names=list(self.class_names),
             output_dict=True,
             zero_division=0,
@@ -708,17 +737,20 @@ class BaselineClassifier:
     # Single-split classification
     # ------------------------------------------------------------------
 
-    def run_classification(self, target, test_size=0.2):
+    def run_classification(self, target, test_size=0.2, binary_outcome=False):
         """Classic single-split: GroupShuffleSplit outer, inner grid search.
 
         Parameters
         ----------
         target : str
         test_size : float
+        binary_outcome : bool
+            If True, collapses outcome classes to binary VS/MCS.
         """
+        mode_tag = " [binary]" if binary_outcome else ""
         print("=" * 80, flush=True)
         print(
-            f"MARKER BASELINE — Classic Split | target={target} | "
+            f"MARKER BASELINE — Classic Split | target={target}{mode_tag} | "
             f"reduction={self.reduction_letter}",
             flush=True,
         )
@@ -726,7 +758,7 @@ class BaselineClassifier:
 
         np.random.seed(self.random_state)
 
-        X, y, subjects, groups = self.collect_data(target)
+        X, y, subjects, groups = self.collect_data(target, binary_outcome=binary_outcome)
 
         unique_groups = np.unique(groups)
         print(
@@ -903,18 +935,21 @@ class BaselineClassifier:
     # Nested CV classification
     # ------------------------------------------------------------------
 
-    def run_full_cv(self, target):
+    def run_full_cv(self, target, binary_outcome=False):
         """Nested CV: StratifiedGroupKFold / GroupKFold outer loop.
 
         Parameters
         ----------
         target : str
+        binary_outcome : bool
+            If True, collapses outcome classes to binary VS/MCS.
         """
         n_folds = self.n_cv_folds
+        mode_tag = " [binary]" if binary_outcome else ""
 
         print("=" * 80, flush=True)
         print(
-            f"MARKER BASELINE — {n_folds}-Fold Nested CV | target={target} | "
+            f"MARKER BASELINE — {n_folds}-Fold Nested CV | target={target}{mode_tag} | "
             f"reduction={self.reduction_letter}",
             flush=True,
         )
@@ -922,7 +957,7 @@ class BaselineClassifier:
 
         np.random.seed(self.random_state)
 
-        X, y, subjects, groups = self.collect_data(target)
+        X, y, subjects, groups = self.collect_data(target, binary_outcome=binary_outcome)
 
         unique_groups = np.unique(groups)
         n_unique = len(unique_groups)
@@ -1087,10 +1122,12 @@ class BaselineClassifier:
     def run_all_targets(self, test_size=0.2):
         """Run classification for all 5 targets.
 
-        For each target, runs the configured CV mode (classic_split or
-        nested_cv) and saves results under
-        ``{self.output_dir}/{target}/``.
+        For binary targets (crs, etiology) the existing single run is used.
+        For outcome targets (cs_6m, cs_1y, cs_2y) two runs are performed:
+          - ``{target}/multiclass/`` — full multi-class classification
+          - ``{target}/binary/``     — VS vs MCS binary collapse
         """
+        _OUTCOME_TARGETS = {"cs_6m", "cs_1y", "cs_2y"}
         base_output_dir = self.output_dir
 
         for target in TARGETS:
@@ -1098,19 +1135,33 @@ class BaselineClassifier:
             print(f"TARGET: {target}", flush=True)
             print(f"{'=' * 80}", flush=True)
 
-            self.output_dir = op.join(base_output_dir, target)
-            os.makedirs(self.output_dir, exist_ok=True)
-
-            try:
-                if self.full_cv:
-                    self.run_full_cv(target)
-                else:
-                    self.run_classification(target, test_size)
-            except ValueError as exc:
-                print(
-                    f"   Skipping target '{target}': {exc}", flush=True
-                )
-                continue
+            if target in _OUTCOME_TARGETS:
+                for mode, binary_outcome in [("multiclass", False), ("binary", True)]:
+                    print(f"\n--- {target} / {mode} ---", flush=True)
+                    self.output_dir = op.join(base_output_dir, target, mode)
+                    os.makedirs(self.output_dir, exist_ok=True)
+                    try:
+                        if self.full_cv:
+                            self.run_full_cv(target, binary_outcome=binary_outcome)
+                        else:
+                            self.run_classification(
+                                target, test_size, binary_outcome=binary_outcome
+                            )
+                    except ValueError as exc:
+                        print(
+                            f"   Skipping target '{target}' ({mode}): {exc}",
+                            flush=True,
+                        )
+            else:
+                self.output_dir = op.join(base_output_dir, target)
+                os.makedirs(self.output_dir, exist_ok=True)
+                try:
+                    if self.full_cv:
+                        self.run_full_cv(target)
+                    else:
+                        self.run_classification(target, test_size)
+                except ValueError as exc:
+                    print(f"   Skipping target '{target}': {exc}", flush=True)
 
         self.output_dir = base_output_dir
 
@@ -1429,8 +1480,20 @@ Reduction map:
         n_cv_folds=args.n_cv_folds,
     )
 
+    _OUTCOME_TARGETS = {"cs_6m", "cs_1y", "cs_2y"}
+
     if args.target == "all":
         classifier.run_all_targets(test_size=args.test_size)
+    elif args.target in _OUTCOME_TARGETS:
+        for mode, binary_outcome in [("multiclass", False), ("binary", True)]:
+            classifier.output_dir = op.join(output_dir, args.target, mode)
+            os.makedirs(classifier.output_dir, exist_ok=True)
+            if args.full_cv:
+                classifier.run_full_cv(args.target, binary_outcome=binary_outcome)
+            else:
+                classifier.run_classification(
+                    args.target, args.test_size, binary_outcome=binary_outcome
+                )
     else:
         classifier.output_dir = op.join(output_dir, args.target)
         os.makedirs(classifier.output_dir, exist_ok=True)
