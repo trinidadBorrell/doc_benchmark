@@ -26,12 +26,43 @@ The pipeline (`cookbooks/pipeline.py`) orchestrates 5 independent phases, each r
 | Phase | Flag | Module | Purpose |
 |-------|------|--------|---------|
 | A. GENERAL_METRICS | `--general-metrics-only` | `src/general_metrics/compute_metrics.py` | MAPE, Pearson correlation, FFT between original & reconstructed EEG |
-| B. MLP_EMBEDDING | `--mlp-embedding-only` | `src/model/mlp_embedding_classifier.py` | MLP classification on foundation model embeddings |
+| B. MLP_EMBEDDING | `--mlp-embedding-only` | `src/model/mlp_embedding_classifier.py` | MLP/RF/KernelRidge classification on foundation model embeddings; also supports marker regression and full clinical target prediction |
 | C. DECODER | `--decoder-only` | `src/decoder/decoder.py` | Temporal decoding with SlidingEstimator + LogisticRegression |
 | D. MARKERS | `--markers-only` | `src/markers/compute_markers_with_junifer.py` | Junifer feature extraction -> HDF5 -> 120 scalars + topographies |
 | E. MODEL | `--model-only` | `src/model/support_vector_machine.py` | SVM binary classification (VS vs MCS) |
 
 Skip individual phases with `--skip-general-metrics`, `--skip-decoder`, etc.
+
+### MLP_EMBEDDING Modes (Phase B)
+
+`mlp_embedding_classifier.py` supports three operating modes:
+
+```bash
+# Standard binary VS vs MCS classification (single split)
+python src/model/mlp_embedding_classifier.py \
+    --data-dir /path/to/embeddings \
+    --patient-labels /path/to/patient_labels_with_controls.csv \
+    --output-dir /path/to/out
+
+# 5-fold nested CV
+python src/model/mlp_embedding_classifier.py ... --full-cv --n-cv-folds 5
+
+# Marker regression: predict each scalar marker from embeddings (Ridge)
+python src/model/mlp_embedding_classifier.py ... \
+    --marker-regression \
+    --marker-csv /data/original_DoC/baseline_stable_20210128_scalars.csv \
+    --marker-reduction A
+
+# Full clinical target prediction (crs, etiology, cs_6m, cs_1y, cs_2y)
+python src/model/mlp_embedding_classifier.py ... \
+    --full-metric-prediction \
+    --patient-labels-full /data/metadata/patient_labels.csv
+
+# Subject intersection across two foundation models
+python src/model/mlp_embedding_classifier.py ... \
+    --use-subject-intersection \
+    --embedding-dirs TOTEM=/path/to/totem CBraMod=/path/to/cbramod
+```
 
 ### Markers Phase Detail (D1-D4)
 
@@ -246,7 +277,10 @@ condor_tail -f <cluster_id>.<process>     # live output
 ```
 results/{results-subdir}/
 ├── GENERAL_METRICS/       # metrics.json, plots
-├── MLP_EMBEDDING/         # classification_report.json, roc_curve.png
+├── MLP_EMBEDDING/         # {classic_split,nested_cv}/{mlp,random_forest,kernel_ridge}/
+│                          # classification_results.json, roc_curve.png
+│                          # regressor_results/  (--marker-regression)
+│                          # {crs,etiology,cs_6m,cs_1y,cs_2y}/  (--full-metric-prediction)
 ├── DECODER/               # decoding_results.pkl, accuracy plots, topographies
 ├── MARKERS/
 │   └── sub-{ID}/
@@ -260,11 +294,64 @@ results/{results-subdir}/
 │               ├── icm_complete_features.h5
 │               ├── scalars_{ID}_ses-{NUM}_recon.npz
 │               └── topos_{ID}_ses-{NUM}_recon.npz
+├── MARKER_BASELINE/       # standalone baseline.py output
+│   └── {crs,etiology,cs_6m,cs_1y,cs_2y}/
+│       ├── classic_split/
+│       │   └── {svm,random_forest,kernel_ridge}/
+│       │       ├── classification_results.json
+│       │       ├── classification_results.png
+│       │       └── subject_predictions.csv
+│       └── nested_cv/
+│           └── {svm,random_forest,kernel_ridge}/...
 ├── MODEL/                 # classification_report.json, confusion_matrix.png
 └── logs/
     ├── pipeline_{timestamp}.log
     └── timing_{timestamp}.csv            # (when --save-time is used)
 ```
+
+## Marker Baseline Classifier (standalone)
+
+`src/model/baseline.py` is a standalone script that trains SVM, Random Forest, and Kernel Ridge classifiers directly on pre-computed neurophysiological scalar markers (not on foundation model embeddings). It is the classical marker-based baseline for comparison.
+
+**Prediction targets** — all five run in sequence:
+
+| Target | Description |
+|--------|-------------|
+| `crs` | Binary VS vs MCS (UWS→VS, MCS+/MCS-→MCS) |
+| `etiology` | Binary acute vs chronic |
+| `cs_6m` | Outcome score at 6 months (multiclass + binary collapse) |
+| `cs_1y` | Outcome score at 1 year (multiclass + binary collapse) |
+| `cs_2y` | Outcome score at 2 years (multiclass + binary collapse) |
+
+For outcome targets (`cs_6m/cs_1y/cs_2y`) both a multiclass run and a binary (VS vs MCS) collapse run are saved under `{target}/multiclass/` and `{target}/binary/`.
+
+**Usage:**
+
+```bash
+# Classic split (default), all 5 targets, reduction A
+python src/model/baseline.py \
+    --original-metadata /data/project/eeg_foundation/data/original_DoC/baseline_stable_20210128_scalars.csv \
+    --patient-labels /data/project/eeg_foundation/data/metadata/patient_labels.csv \
+    --main-path /data/project/eeg_foundation/data/benchmark_results/new_results
+
+# 5-fold nested CV, reduction B
+python src/model/baseline.py \
+    --original-metadata /path/to/scalars.csv \
+    --patient-labels /path/to/patient_labels.csv \
+    --main-path /path/to/results \
+    --full-cv --n-cv-folds 5 --marker-reduction B
+```
+
+**Reduction map** (`--marker-reduction`):
+
+| Letter | Path |
+|--------|------|
+| A (default) | `icm/lg/egi256/trim_mean80` |
+| B | `icm/lg/egi256/std` |
+| C | `icm/lg/egi256gfp/trim_mean80` |
+| D | `icm/lg/egi256gfp/std` |
+
+**Output** lands in `{main-path}/MARKER_BASELINE/{target}/{classic_split,nested_cv}/{svm,random_forest,kernel_ridge}/`.
 
 ## Development
 
@@ -282,6 +369,10 @@ pytest tests/ -v
 pytest tests/test_compute_metrics.py -v
 pytest tests/test_compute_markers_hdf5.py -v
 ```
+
+## Acknowledgements
+
+This project is supported by [Paris Brain Institute America](https://parisbraininstitute-america.org/).
 
 ### Data Source Auto-Detection
 
