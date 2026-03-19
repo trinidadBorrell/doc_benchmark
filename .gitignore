@@ -14,8 +14,6 @@ src/analysis/__init__.py
 src/analysis/ntbk.ipynb
 src/decoder/res
 src/decoder/analysis/peak_analysis.py
-src/model/multiple_seeds_analysis.py
-src/model/seed_differences_analysis.py
 src/model/extratrees.py
 src/analysis/results
 src/ground_truth/
@@ -27,7 +25,7 @@ src/markers/text_for_trini.txt
 src/global_analysis/global_analysis.py
 src/global_analysis/README_SCRIPTS.txt
 src/report_completed_results.py
-src/model/run_mlp_embedding.txt
+src/model/txt/
 
 .ruff_cache/
 .vscode/
@@ -37,6 +35,7 @@ src/model/run_mlp_embedding.txt
 .venv_n/
 
 PIPELINE_CHANGES_EXPLANATION.txt
+
 cookbooks/pipeline.py.backup
 
 .claude/

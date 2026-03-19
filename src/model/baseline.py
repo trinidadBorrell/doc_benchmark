@@ -93,6 +93,8 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.kernel_ridge import KernelRidge
 from sklearn.svm import SVC
 from sklearn.pipeline import Pipeline
+from sklearn.inspection import permutation_importance
+from sklearn.metrics import r2_score
 
 warnings.filterwarnings("ignore")
 
@@ -316,8 +318,11 @@ class BaselineClassifier:
             is_binary = True
 
         elif target in ("cs_6m", "cs_1y", "cs_2y"):
+            # Multiclass (4 classes): VS/VS/MCS → VS, MCS+/MCS-/MCS → MCS,
+            #   CONSCIOUS → CONSCIOUS, DEATH → DEATH.
+            # Binary: keep only VS and MCS (exclude CONSCIOUS and DEATH).
             _VS_STATES = {"VS", "VS/MCS"}
-            _MCS_STATES = {"MCS+", "MCS-", "MCS", "CONSCIOUS"}
+            _MCS_STATES = {"MCS+", "MCS-", "MCS"}
             for _, row in df.iterrows():
                 subject = row["subject"]
                 session = f"ses-{int(row['session']):02d}"
@@ -325,13 +330,15 @@ class BaselineClassifier:
                 if pd.isna(val) or str(val).strip().lower() in ("n/a", ""):
                     continue
                 label = str(val).strip()
-                if binary_outcome:
-                    if label in _VS_STATES:
-                        label = "VS"
-                    elif label in _MCS_STATES:
-                        label = "MCS"
-                    else:
-                        continue  # skip DEATH and other unresolvable states
+                if label in _VS_STATES:
+                    label = "VS"
+                elif label in _MCS_STATES:
+                    label = "MCS"
+                elif label in ("CONSCIOUS", "DEATH"):
+                    if binary_outcome:
+                        continue  # exclude from binary run
+                else:
+                    continue  # skip anything unrecognised
                 key = f"{subject}_{session}"
                 labels_dict[key] = label
                 available_states.add(label)
@@ -659,6 +666,72 @@ class BaselineClassifier:
         return probs, preds
 
     # ------------------------------------------------------------------
+    # Feature importance (permutation, R² scorer)
+    # ------------------------------------------------------------------
+
+    def _compute_permutation_importance(
+        self, model, model_type, X_test, y_test, n_repeats=10
+    ):
+        """Compute permutation feature importance using R² as the scorer.
+
+        For binary targets the scorer is R²(y_true, predicted_probability).
+        For multiclass the scorer falls back to balanced accuracy.
+
+        Parameters
+        ----------
+        model : fitted estimator
+        model_type : str
+            One of 'svm', 'random_forest', 'kernel_ridge'.
+        X_test : np.ndarray
+        y_test : np.ndarray
+        n_repeats : int
+
+        Returns
+        -------
+        dict
+            Mapping ``marker_full_path -> {"mean": float, "std": float,
+            "short_name": str}``.
+        """
+        is_binary = self.is_binary
+
+        if model_type in ("svm", "random_forest"):
+            def _scorer(m, X, y):
+                proba = m.predict_proba(X)
+                if is_binary:
+                    return r2_score(y.astype(float), proba[:, 1])
+                else:
+                    return balanced_accuracy_score(y, np.argmax(proba, axis=1))
+        else:  # kernel_ridge
+            def _scorer(m, X, y):
+                raw = m.predict(X)
+                if is_binary:
+                    proba = np.clip(raw, 0, 1)
+                    return r2_score(y.astype(float), proba)
+                else:
+                    preds = np.argmax(raw, axis=1)
+                    return balanced_accuracy_score(y, preds)
+
+        result = permutation_importance(
+            model,
+            X_test,
+            y_test,
+            scoring=_scorer,
+            n_repeats=n_repeats,
+            random_state=self.random_state,
+            n_jobs=-1,
+        )
+
+        importance = {}
+        for i, fname in enumerate(self.feature_names):
+            short_name = "_".join(fname.split("/")[-2:])
+            importance[fname] = {
+                "mean": float(result.importances_mean[i]),
+                "std": float(result.importances_std[i]),
+                "short_name": short_name,
+            }
+        return importance
+
+    # ------------------------------------------------------------------
     # Metrics
     # ------------------------------------------------------------------
 
@@ -829,10 +902,14 @@ class BaselineClassifier:
             "reduction": self.reduction_str,
             "target": target,
         })
+        print("   Computing SVM permutation importance ...", flush=True)
+        svm_fi = self._compute_permutation_importance(
+            svm_model, "svm", X_test, y_test
+        )
         svm_dir = op.join(split_dir, "svm")
         os.makedirs(svm_dir, exist_ok=True)
         self._save_results(svm_results, svm_dir, model=svm_model,
-                           model_type="svm")
+                           model_type="svm", feature_importance=svm_fi)
         self._plot_results(svm_results, "SVM", svm_dir,
                            best_params=svm_params,
                            n_samples=len(X_trainval),
@@ -861,10 +938,14 @@ class BaselineClassifier:
             "reduction": self.reduction_str,
             "target": target,
         })
+        print("   Computing RF permutation importance ...", flush=True)
+        rf_fi = self._compute_permutation_importance(
+            rf_model, "random_forest", X_test, y_test
+        )
         rf_dir = op.join(split_dir, "random_forest")
         os.makedirs(rf_dir, exist_ok=True)
         self._save_results(rf_results, rf_dir, model=rf_model,
-                           model_type="random_forest")
+                           model_type="random_forest", feature_importance=rf_fi)
         self._plot_results(rf_results, "Random Forest", rf_dir,
                            best_params=rf_params,
                            n_samples=len(X_trainval),
@@ -893,10 +974,14 @@ class BaselineClassifier:
             "reduction": self.reduction_str,
             "target": target,
         })
+        print("   Computing KR permutation importance ...", flush=True)
+        kr_fi = self._compute_permutation_importance(
+            kr_model, "kernel_ridge", X_test, y_test
+        )
         kr_dir = op.join(split_dir, "kernel_ridge")
         os.makedirs(kr_dir, exist_ok=True)
         self._save_results(kr_results, kr_dir, model=kr_model,
-                           model_type="kernel_ridge")
+                           model_type="kernel_ridge", feature_importance=kr_fi)
         self._plot_results(kr_results, "Kernel Ridge", kr_dir,
                            best_params=kr_params,
                            n_samples=len(X_trainval),
@@ -983,7 +1068,10 @@ class BaselineClassifier:
             sgkf = GroupKFold(n_splits=effective_folds)
 
         accum = {
-            mk: {"y_true": [], "y_pred": [], "y_proba": [], "subjects": []}
+            mk: {
+                "y_true": [], "y_pred": [], "y_proba": [], "subjects": [],
+                "fi_means": [],  # per-fold importance arrays (n_features,)
+            }
             for mk in MODEL_CONFIGS
         }
 
@@ -1009,6 +1097,15 @@ class BaselineClassifier:
                     f"Fold {fold_idx}: subject leakage: "
                     f"{train_subj & test_subj}"
                 )
+            # Save fold split for SHAP reproducibility
+            _splits_dir = op.join(self.output_dir, "nested_cv", "fold_splits")
+            os.makedirs(_splits_dir, exist_ok=True)
+            with open(op.join(_splits_dir, f"fold_{fold_idx:02d}.json"), "w") as _f:
+                json.dump({
+                    "train_subjects": [subjects[i] for i in train_idx],
+                    "test_subjects": subjects_test_fold,
+                }, _f, indent=2)
+
             print(
                 f"   Train: {len(train_subj)} subjects "
                 f"({len(train_idx)} sessions)",
@@ -1025,11 +1122,20 @@ class BaselineClassifier:
             svm_model, _ = self._grid_search_svm(
                 X_train_fold, y_train_fold, groups_train_fold
             )
+            _fold_dir = op.join(self.output_dir, "nested_cv", "svm")
+            os.makedirs(_fold_dir, exist_ok=True)
+            joblib.dump(svm_model, op.join(_fold_dir, f"fold_{fold_idx:02d}_model.joblib"))
             svm_probs, svm_preds = self._predict_svm(svm_model, X_test_fold)
             accum["svm"]["y_true"].append(y_test_fold)
             accum["svm"]["y_pred"].append(svm_preds)
             accum["svm"]["y_proba"].append(svm_probs)
             accum["svm"]["subjects"].extend(subjects_test_fold)
+            svm_fi_fold = self._compute_permutation_importance(
+                svm_model, "svm", X_test_fold, y_test_fold, n_repeats=5
+            )
+            accum["svm"]["fi_means"].append(
+                [svm_fi_fold[f]["mean"] for f in self.feature_names]
+            )
             print(
                 f"   SVM fold bal_acc: "
                 f"{balanced_accuracy_score(y_test_fold, svm_preds):.3f}",
@@ -1041,11 +1147,20 @@ class BaselineClassifier:
             rf_model, _ = self._grid_search_rf(
                 X_train_fold, y_train_fold, groups_train_fold
             )
+            _fold_dir = op.join(self.output_dir, "nested_cv", "random_forest")
+            os.makedirs(_fold_dir, exist_ok=True)
+            joblib.dump(rf_model, op.join(_fold_dir, f"fold_{fold_idx:02d}_model.joblib"))
             rf_probs, rf_preds = self._predict_rf(rf_model, X_test_fold)
             accum["random_forest"]["y_true"].append(y_test_fold)
             accum["random_forest"]["y_pred"].append(rf_preds)
             accum["random_forest"]["y_proba"].append(rf_probs)
             accum["random_forest"]["subjects"].extend(subjects_test_fold)
+            rf_fi_fold = self._compute_permutation_importance(
+                rf_model, "random_forest", X_test_fold, y_test_fold, n_repeats=5
+            )
+            accum["random_forest"]["fi_means"].append(
+                [rf_fi_fold[f]["mean"] for f in self.feature_names]
+            )
             print(
                 f"   RF fold bal_acc: "
                 f"{balanced_accuracy_score(y_test_fold, rf_preds):.3f}",
@@ -1057,11 +1172,20 @@ class BaselineClassifier:
             kr_model, _ = self._grid_search_kr(
                 X_train_fold, y_train_fold, groups_train_fold
             )
+            _fold_dir = op.join(self.output_dir, "nested_cv", "kernel_ridge")
+            os.makedirs(_fold_dir, exist_ok=True)
+            joblib.dump(kr_model, op.join(_fold_dir, f"fold_{fold_idx:02d}_model.joblib"))
             kr_probs, kr_preds = self._predict_kr(kr_model, X_test_fold)
             accum["kernel_ridge"]["y_true"].append(y_test_fold)
             accum["kernel_ridge"]["y_pred"].append(kr_preds)
             accum["kernel_ridge"]["y_proba"].append(kr_probs)
             accum["kernel_ridge"]["subjects"].extend(subjects_test_fold)
+            kr_fi_fold = self._compute_permutation_importance(
+                kr_model, "kernel_ridge", X_test_fold, y_test_fold, n_repeats=5
+            )
+            accum["kernel_ridge"]["fi_means"].append(
+                [kr_fi_fold[f]["mean"] for f in self.feature_names]
+            )
             print(
                 f"   KR fold bal_acc: "
                 f"{balanced_accuracy_score(y_test_fold, kr_preds):.3f}",
@@ -1095,9 +1219,25 @@ class BaselineClassifier:
                 "target": target,
             })
 
+            # Aggregate per-fold feature importance (mean across folds)
+            fi_matrix = np.array(accum[mk]["fi_means"])  # (n_folds, n_features)
+            fi_mean = fi_matrix.mean(axis=0)
+            fi_std = fi_matrix.std(axis=0)
+            cv_fi = {
+                fname: {
+                    "mean": float(fi_mean[i]),
+                    "std": float(fi_std[i]),
+                    "short_name": "_".join(fname.split("/")[-2:]),
+                }
+                for i, fname in enumerate(self.feature_names)
+            }
+
             model_dir = op.join(cv_dir, mk)
             os.makedirs(model_dir, exist_ok=True)
-            self._save_results(results, model_dir, model=None, model_type=mk)
+            self._save_results(
+                results, model_dir, model=None, model_type=mk,
+                feature_importance=cv_fi,
+            )
             self._plot_results(results, cfg["name"], model_dir)
 
             auc_str = (
@@ -1169,12 +1309,26 @@ class BaselineClassifier:
     # Saving & plotting
     # ------------------------------------------------------------------
 
-    def _save_results(self, results, output_dir, model=None, model_type="svm"):
-        """Save JSON results, trained model, and predictions CSV."""
+    def _save_results(
+        self,
+        results,
+        output_dir,
+        model=None,
+        model_type="svm",
+        feature_importance=None,
+    ):
+        """Save JSON results, trained model, predictions CSV, and feature importance."""
         results_file = op.join(output_dir, "classification_results.json")
         with open(results_file, "w") as f:
             json.dump(results, f, indent=2)
         print(f"   Results saved to: {results_file}", flush=True)
+
+        # Save feature importance
+        if feature_importance is not None:
+            fi_file = op.join(output_dir, "feature_importance.json")
+            with open(fi_file, "w") as f:
+                json.dump(feature_importance, f, indent=2)
+            print(f"   Feature importance saved to: {fi_file}", flush=True)
 
         # Save model (single split only)
         if model is not None:

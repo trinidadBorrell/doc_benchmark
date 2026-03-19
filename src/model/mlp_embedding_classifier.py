@@ -250,7 +250,6 @@ class EmbeddingClassifier:
         use_subject_intersection=False,
         embedding_dirs=None,
         allowed_subjects=None,
-        pooled_embeddings_dir=None,
     ):
         """
         Parameters
@@ -284,11 +283,6 @@ class EmbeddingClassifier:
             Mapping {model_name: path} for subject intersection computation
         allowed_subjects : list
             Pre-computed list of allowed subject keys (from intersection)
-        pooled_embeddings_dir : str or None
-            If set, cache pooled (mean-pooled) embeddings as NPZ files under
-            ``{pooled_embeddings_dir}/sub-{id}/ses-{num}/embedding.npz``.
-            On subsequent runs the cached file is loaded directly, skipping
-            re-pooling of raw embedding arrays.
         """
         self.data_dir = data_dir
         self.patient_labels_file = patient_labels_file
@@ -304,7 +298,9 @@ class EmbeddingClassifier:
         self.use_subject_intersection = use_subject_intersection
         self.embedding_dirs = embedding_dirs
         self.allowed_subjects = allowed_subjects
-        self.pooled_embeddings_dir = pooled_embeddings_dir
+        # Pooled embeddings are always cached under {output_dir}/pooled_embeddings/
+        # so they are co-located with the model results and never shared across runs.
+        self.pooled_embeddings_dir = op.join(self.output_dir, "pooled_embeddings")
 
         os.makedirs(self.output_dir, exist_ok=True)
 
@@ -447,7 +443,7 @@ class EmbeddingClassifier:
         print(f"   Available states: {sorted(available_states)}", flush=True)
         return labels_dict, sorted(available_states)
 
-    def load_patient_labels_for_target(self, labels_file, target):
+    def load_patient_labels_for_target(self, labels_file, target, binary_outcome=False):
         """Load patient labels for a given prediction target.
 
         Parameters
@@ -457,6 +453,9 @@ class EmbeddingClassifier:
             plus target-specific columns).
         target : str
             One of 'crs', 'etiology', 'cs_6m', 'cs_1y', 'cs_2y'.
+        binary_outcome : bool
+            If True and target is an outcome score (cs_6m/cs_1y/cs_2y),
+            collapse to binary VS vs MCS (excludes DEATH and CONSCIOUS).
 
         Returns
         -------
@@ -506,6 +505,11 @@ class EmbeddingClassifier:
             is_binary = True
 
         elif target in ("cs_6m", "cs_1y", "cs_2y"):
+            # Multiclass (4 classes): VS/VS/MCS → VS, MCS+/MCS-/MCS → MCS,
+            #   CONSCIOUS → CONSCIOUS, DEATH → DEATH.
+            # Binary: keep only VS and MCS (exclude CONSCIOUS and DEATH).
+            _VS_STATES = {"VS", "VS/MCS"}
+            _MCS_STATES = {"MCS+", "MCS-", "MCS"}
             for _, row in df.iterrows():
                 subject = row["subject"]
                 session = f"ses-{int(row['session']):02d}"
@@ -513,10 +517,19 @@ class EmbeddingClassifier:
                 if pd.isna(val) or str(val).strip().lower() in ("n/a", ""):
                     continue
                 label = str(val).strip()
+                if label in _VS_STATES:
+                    label = "VS"
+                elif label in _MCS_STATES:
+                    label = "MCS"
+                elif label in ("CONSCIOUS", "DEATH"):
+                    if binary_outcome:
+                        continue  # exclude from binary run
+                else:
+                    continue  # skip anything unrecognised
                 key = f"{subject}_{session}"
                 labels_dict[key] = label
                 available_states.add(label)
-            is_binary = False
+            is_binary = binary_outcome
 
         else:
             raise ValueError(f"Unknown target: {target!r}")
@@ -667,6 +680,7 @@ class EmbeddingClassifier:
         embedding_suffix="_embedding.npy",
         target="crs",
         labels_file=None,
+        binary_outcome=False,
     ):
         """Match embeddings with labels and build feature / label arrays.
 
@@ -698,10 +712,18 @@ class EmbeddingClassifier:
         else:
             lf = labels_file or self.patient_labels_file
             labels_dict, available_states, self.is_binary = (
-                self.load_patient_labels_for_target(lf, target)
+                self.load_patient_labels_for_target(lf, target, binary_outcome=binary_outcome)
             )
 
         embeddings = self.load_embeddings(embedding_suffix)
+
+        intersection_keys = set(embeddings) & set(labels_dict)
+        print(
+            f"   Embeddings: {len(embeddings)} sessions | "
+            f"Labels ({target}): {len(labels_dict)} sessions | "
+            f"Intersection: {len(intersection_keys)} sessions",
+            flush=True,
+        )
 
         X_list, y_list, subjects_list = [], [], []
 
@@ -1292,15 +1314,19 @@ class EmbeddingClassifier:
                 except Exception:
                     pass
 
+        all_labels = list(range(len(self.class_names)))
         test_precision, test_recall, test_f1, test_support = (
             precision_recall_fscore_support(
-                y_test, test_preds, average=None, zero_division=0
+                y_test, test_preds,
+                labels=all_labels,
+                average=None, zero_division=0,
             )
         )
-        test_conf = confusion_matrix(y_test, test_preds)
+        test_conf = confusion_matrix(y_test, test_preds, labels=all_labels)
         test_report = classification_report(
             y_test,
             test_preds,
+            labels=all_labels,
             target_names=list(self.class_names),
             output_dict=True,
             zero_division=0,
@@ -1331,7 +1357,14 @@ class EmbeddingClassifier:
     # Single-split classification (all 3 models)
     # ------------------------------------------------------------------
 
-    def run_classification(self, test_size=0.2, val_size=0.2):
+    def run_classification(
+        self,
+        test_size=0.2,
+        val_size=0.2,
+        target="crs",
+        labels_file=None,
+        binary_outcome=False,
+    ):
         """Run classification with all 3 models on the same train/test split.
 
         Steps
@@ -1343,11 +1376,12 @@ class EmbeddingClassifier:
         5. Evaluate each on held-out test set
         6. Save results + plots per model
         """
+        mode_tag = f" [{target}{'  binary' if binary_outcome else ''}]"
         print("=" * 80, flush=True)
-        print("EMBEDDING CLASSIFICATION (VS vs MCS) — 3 MODELS", flush=True)
+        print(f"EMBEDDING CLASSIFICATION{mode_tag} — 3 MODELS", flush=True)
         print("=" * 80, flush=True)
         print(f"Data directory: {self.data_dir}", flush=True)
-        print(f"Labels file: {self.patient_labels_file}", flush=True)
+        print(f"Labels file: {labels_file or self.patient_labels_file}", flush=True)
         print(f"Output directory: {self.output_dir}", flush=True)
         print(f"Device: {self.device}", flush=True)
         print(
@@ -1360,7 +1394,9 @@ class EmbeddingClassifier:
         np.random.seed(self.random_state)
 
         # 1. Collect data
-        X, y, subjects = self.collect_data()
+        X, y, subjects = self.collect_data(
+            target=target, labels_file=labels_file, binary_outcome=binary_outcome
+        )
 
         # 2. Subject groups (prevent leakage)
         groups = np.array([s.split("_ses-")[0] for s in subjects])
@@ -1606,7 +1642,12 @@ class EmbeddingClassifier:
     # Full cross-validation (all 3 models)
     # ------------------------------------------------------------------
 
-    def run_full_cv(self):
+    def run_full_cv(
+        self,
+        target="crs",
+        labels_file=None,
+        binary_outcome=False,
+    ):
         """Run 5-fold StratifiedGroupKFold CV with all 3 models.
 
         For each fold:
@@ -1618,10 +1659,11 @@ class EmbeddingClassifier:
         All predict on the same held-out fold.
         """
         n_folds = self.n_cv_folds
+        mode_tag = f" [{target}{'  binary' if binary_outcome else ''}]"
 
         print("=" * 80, flush=True)
         print(
-            f"FULL {n_folds}-FOLD CV EMBEDDING CLASSIFICATION (VS vs MCS) — 3 MODELS",
+            f"FULL {n_folds}-FOLD CV EMBEDDING CLASSIFICATION{mode_tag} — 3 MODELS",
             flush=True,
         )
         print("=" * 80, flush=True)
@@ -1633,7 +1675,9 @@ class EmbeddingClassifier:
         np.random.seed(self.random_state)
 
         # 1. Collect data
-        X, y, subjects = self.collect_data()
+        X, y, subjects = self.collect_data(
+            target=target, labels_file=labels_file, binary_outcome=binary_outcome
+        )
 
         # Subject groups
         groups = np.array([s.split("_ses-")[0] for s in subjects])
@@ -1722,6 +1766,23 @@ class EmbeddingClassifier:
                 )
             )
             mlp_fold_curves.append((train_losses, val_losses, train_errors, val_errors))
+            # Save per-fold MLP model for later SHAP analysis
+            mlp_fold_dir = op.join(self.output_dir, "nested_cv", "mlp")
+            os.makedirs(mlp_fold_dir, exist_ok=True)
+            torch.save(
+                mlp_model.state_dict(),
+                op.join(mlp_fold_dir, f"fold_{fold_idx:02d}_model.pt"),
+            )
+            with open(
+                op.join(mlp_fold_dir, f"fold_{fold_idx:02d}_config.json"), "w"
+            ) as f:
+                json.dump(
+                    {
+                        "input_dim": int(X.shape[1]),
+                        "n_classes": int(n_classes_mlp),
+                    },
+                    f,
+                )
             mlp_probs, mlp_preds = self._predict(mlp_model, X_test_fold)
             accum["mlp"]["y_true"].append(y_test_fold)
             accum["mlp"]["y_pred"].append(mlp_preds)
@@ -1736,6 +1797,13 @@ class EmbeddingClassifier:
             rf_model, _ = self._grid_search_rf(
                 X_train_fold, y_train_fold, groups_train_fold
             )
+            # Save per-fold RF model
+            rf_fold_dir = op.join(self.output_dir, "nested_cv", "random_forest")
+            os.makedirs(rf_fold_dir, exist_ok=True)
+            joblib.dump(
+                rf_model,
+                op.join(rf_fold_dir, f"fold_{fold_idx:02d}_model.joblib"),
+            )
             rf_probs, rf_preds = self._predict_sklearn(rf_model, X_test_fold)
             accum["random_forest"]["y_true"].append(y_test_fold)
             accum["random_forest"]["y_pred"].append(rf_preds)
@@ -1749,6 +1817,13 @@ class EmbeddingClassifier:
             print("   Training Kernel Ridge ...", flush=True)
             kr_model, _ = self._grid_search_kr(
                 X_train_fold, y_train_fold, groups_train_fold
+            )
+            # Save per-fold KR model
+            kr_fold_dir = op.join(self.output_dir, "nested_cv", "kernel_ridge")
+            os.makedirs(kr_fold_dir, exist_ok=True)
+            joblib.dump(
+                kr_model,
+                op.join(kr_fold_dir, f"fold_{fold_idx:02d}_model.joblib"),
             )
             kr_probs, kr_preds = self._predict_sklearn(kr_model, X_test_fold)
             accum["kernel_ridge"]["y_true"].append(y_test_fold)
@@ -2053,7 +2128,11 @@ class EmbeddingClassifier:
         """Run MLP+RF+KR classification for 5 prediction targets.
 
         Targets: crs, etiology, cs_6m, cs_1y, cs_2y.
-        Results are saved under {output_dir}/{target}/.
+
+        For crs and etiology results land under {output_dir}/{target}/.
+        For outcome targets (cs_6m, cs_1y, cs_2y) two runs are performed:
+          - {output_dir}/{target}/multiclass/  — 4-class (VS, MCS, CONSCIOUS, DEATH)
+          - {output_dir}/{target}/binary/      — VS vs MCS only
 
         Parameters
         ----------
@@ -2062,6 +2141,7 @@ class EmbeddingClassifier:
         test_size : float
         val_size : float
         """
+        _OUTCOME_TARGETS = {"cs_6m", "cs_1y", "cs_2y"}
         targets = ["crs", "etiology", "cs_6m", "cs_1y", "cs_2y"]
         base_output_dir = self.output_dir
 
@@ -2070,27 +2150,37 @@ class EmbeddingClassifier:
             print(f"FULL METRIC PREDICTION: target={target}", flush=True)
             print(f"{'=' * 80}", flush=True)
 
-            self.output_dir = op.join(base_output_dir, target)
-            os.makedirs(self.output_dir, exist_ok=True)
-
-            try:
-                self.collect_data(target=target, labels_file=patient_labels_full)
-            except ValueError as e:
-                print(f"   Skipping {target}: {e}", flush=True)
-                continue
-
-            if len(np.unique(self.y_encoded)) < 2:
-                print(
-                    f"   Skipping {target}: only one class present "
-                    f"({np.unique(self.y_encoded)})",
-                    flush=True,
-                )
-                continue
-
-            if self.full_cv:
-                self.run_full_cv()
+            if target in _OUTCOME_TARGETS:
+                modes = [("multiclass", False), ("binary", True)]
             else:
-                self.run_classification(test_size, val_size)
+                modes = [("", False)]  # single run, no subfolder
+
+            for mode, binary_outcome in modes:
+                if mode:
+                    print(f"\n--- {target} / {mode} ---", flush=True)
+                    self.output_dir = op.join(base_output_dir, target, mode)
+                else:
+                    self.output_dir = op.join(base_output_dir, target)
+                os.makedirs(self.output_dir, exist_ok=True)
+
+                try:
+                    if self.full_cv:
+                        self.run_full_cv(
+                            target=target,
+                            labels_file=patient_labels_full,
+                            binary_outcome=binary_outcome,
+                        )
+                    else:
+                        self.run_classification(
+                            test_size,
+                            val_size,
+                            target=target,
+                            labels_file=patient_labels_full,
+                            binary_outcome=binary_outcome,
+                        )
+                except ValueError as e:
+                    label = f"'{target}'" + (f" ({mode})" if mode else "")
+                    print(f"   Skipping {label}: {e}", flush=True)
 
         self.output_dir = base_output_dir
 
@@ -2110,6 +2200,16 @@ class EmbeddingClassifier:
             if model_type == "mlp":
                 model_file = op.join(output_dir, "trained_model.pt")
                 torch.save(model.state_dict(), model_file)
+                # Save architecture config for later reconstruction (e.g. SHAP loading)
+                config_file = op.join(output_dir, "model_config.json")
+                with open(config_file, "w") as f:
+                    json.dump(
+                        {
+                            "input_dim": int(model.net[0].in_features),
+                            "n_classes": int(model.n_classes),
+                        },
+                        f,
+                    )
             else:
                 model_file = op.join(output_dir, "trained_model.joblib")
                 joblib.dump(model, model_file)
@@ -2559,16 +2659,6 @@ Reduction map for --marker-reduction:
         default=None,
         help="Path to patient_labels.csv (required with --full-metric-prediction)",
     )
-    # Pooled embeddings cache
-    parser.add_argument(
-        "--pooled-embeddings-dir",
-        default=None,
-        help=(
-            "Directory for caching mean-pooled embeddings. "
-            "If set, pooled arrays are saved as "
-            "sub-{id}/ses-{num}/embedding.npz and reloaded on subsequent runs."
-        ),
-    )
 
     args = parser.parse_args()
 
@@ -2618,7 +2708,6 @@ Reduction map for --marker-reduction:
         use_subject_intersection=args.use_subject_intersection,
         embedding_dirs=embedding_dirs_dict,
         allowed_subjects=allowed_subjects,
-        pooled_embeddings_dir=args.pooled_embeddings_dir,
     )
 
     ran_special = False

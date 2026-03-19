@@ -945,10 +945,6 @@ class Pipeline:
                 str(self.mlp_batch_size),
             ]
 
-            # Always pass pooled embeddings cache dir so pooling is done once
-            pooled_dir = mlp_output_dir / "pooled_embeddings"
-            cmd.extend(["--pooled-embeddings-dir", str(pooled_dir)])
-
             if self.emb_full_cv:
                 cmd.append("--full-cv")
 
