@@ -443,7 +443,9 @@ class EmbeddingClassifier:
         print(f"   Available states: {sorted(available_states)}", flush=True)
         return labels_dict, sorted(available_states)
 
-    def load_patient_labels_for_target(self, labels_file, target, binary_outcome=False):
+    def load_patient_labels_for_target(
+        self, labels_file, target, binary_outcome=False, death_binary=False
+    ):
         """Load patient labels for a given prediction target.
 
         Parameters
@@ -456,6 +458,9 @@ class EmbeddingClassifier:
         binary_outcome : bool
             If True and target is an outcome score (cs_6m/cs_1y/cs_2y),
             collapse to binary VS vs MCS (excludes DEATH and CONSCIOUS).
+        death_binary : bool
+            If True and target is an outcome score, collapse to binary
+            DEATH vs NON_DEATH (all subjects included).
 
         Returns
         -------
@@ -517,27 +522,38 @@ class EmbeddingClassifier:
                 if pd.isna(val) or str(val).strip().lower() in ("n/a", ""):
                     continue
                 label = str(val).strip()
-                if label in _VS_STATES:
-                    label = "VS"
-                elif label in _MCS_STATES:
-                    label = "MCS"
-                elif label in ("CONSCIOUS", "DEATH"):
-                    if binary_outcome:
-                        continue  # exclude from binary run
+                if death_binary:
+                    if label == "DEATH":
+                        label = "DEATH"
+                    elif (
+                        label in _VS_STATES
+                        or label in _MCS_STATES
+                        or label == "CONSCIOUS"
+                    ):
+                        label = "NON_DEATH"
+                    else:
+                        continue  # skip anything unrecognised
                 else:
-                    continue  # skip anything unrecognised
+                    if label in _VS_STATES:
+                        label = "VS"
+                    elif label in _MCS_STATES:
+                        label = "MCS"
+                    elif label in ("CONSCIOUS", "DEATH"):
+                        if binary_outcome:
+                            continue  # exclude from binary run
+                    else:
+                        continue  # skip anything unrecognised
                 key = f"{subject}_{session}"
                 labels_dict[key] = label
                 available_states.add(label)
-            is_binary = binary_outcome
+            is_binary = binary_outcome or death_binary
 
         else:
             raise ValueError(f"Unknown target: {target!r}")
 
         class_names = sorted(available_states)
         print(
-            f"   Loaded {len(labels_dict)} subject/sessions, "
-            f"classes: {class_names}",
+            f"   Loaded {len(labels_dict)} subject/sessions, classes: {class_names}",
             flush=True,
         )
         return labels_dict, class_names, is_binary
@@ -681,6 +697,7 @@ class EmbeddingClassifier:
         target="crs",
         labels_file=None,
         binary_outcome=False,
+        death_binary=False,
     ):
         """Match embeddings with labels and build feature / label arrays.
 
@@ -712,7 +729,9 @@ class EmbeddingClassifier:
         else:
             lf = labels_file or self.patient_labels_file
             labels_dict, available_states, self.is_binary = (
-                self.load_patient_labels_for_target(lf, target, binary_outcome=binary_outcome)
+                self.load_patient_labels_for_target(
+                    lf, target, binary_outcome=binary_outcome, death_binary=death_binary
+                )
             )
 
         embeddings = self.load_embeddings(embedding_suffix)
@@ -828,7 +847,8 @@ class EmbeddingClassifier:
         # known metadata names and any unnamed index columns (Unnamed: N).
         meta_cols = {"Subject", "Reduction", "Label"}
         marker_names = [
-            c for c in df_filtered.columns
+            c
+            for c in df_filtered.columns
             if c not in meta_cols
             and not str(c).startswith("Unnamed")
             and pd.api.types.is_numeric_dtype(df_filtered[c])
@@ -846,9 +866,7 @@ class EmbeddingClassifier:
                 key = f"{subject_id}_ses-{int(sesnum):02d}"
             except ValueError:
                 continue
-            markers_dict[key] = np.array(
-                [row[m] for m in marker_names], dtype=float
-            )
+            markers_dict[key] = np.array([row[m] for m in marker_names], dtype=float)
 
         print(
             f"   Loaded markers for {len(markers_dict)} subject/sessions "
@@ -882,17 +900,13 @@ class EmbeddingClassifier:
             common_keys = [k for k in common_keys if k in allowed_set]
 
         if not common_keys:
-            raise ValueError(
-                "No subjects matched between embeddings and marker CSV!"
-            )
+            raise ValueError("No subjects matched between embeddings and marker CSV!")
 
         X_list, Y_list, subjects_list = [], [], []
         for key in common_keys:
             emb = embeddings[key]
             if X_list and emb.shape != X_list[0].shape:
-                print(
-                    f"   Shape mismatch for {key}: skipping", flush=True
-                )
+                print(f"   Shape mismatch for {key}: skipping", flush=True)
                 continue
             X_list.append(emb)
             Y_list.append(markers_dict[key])
@@ -1317,9 +1331,11 @@ class EmbeddingClassifier:
         all_labels = list(range(len(self.class_names)))
         test_precision, test_recall, test_f1, test_support = (
             precision_recall_fscore_support(
-                y_test, test_preds,
+                y_test,
+                test_preds,
                 labels=all_labels,
-                average=None, zero_division=0,
+                average=None,
+                zero_division=0,
             )
         )
         test_conf = confusion_matrix(y_test, test_preds, labels=all_labels)
@@ -1364,6 +1380,7 @@ class EmbeddingClassifier:
         target="crs",
         labels_file=None,
         binary_outcome=False,
+        death_binary=False,
     ):
         """Run classification with all 3 models on the same train/test split.
 
@@ -1376,7 +1393,12 @@ class EmbeddingClassifier:
         5. Evaluate each on held-out test set
         6. Save results + plots per model
         """
-        mode_tag = f" [{target}{'  binary' if binary_outcome else ''}]"
+        mode_tag = f" [{target}"
+        if death_binary:
+            mode_tag += "  binary_death"
+        elif binary_outcome:
+            mode_tag += "  binary"
+        mode_tag += "]"
         print("=" * 80, flush=True)
         print(f"EMBEDDING CLASSIFICATION{mode_tag} — 3 MODELS", flush=True)
         print("=" * 80, flush=True)
@@ -1395,7 +1417,10 @@ class EmbeddingClassifier:
 
         # 1. Collect data
         X, y, subjects = self.collect_data(
-            target=target, labels_file=labels_file, binary_outcome=binary_outcome
+            target=target,
+            labels_file=labels_file,
+            binary_outcome=binary_outcome,
+            death_binary=death_binary,
         )
 
         # 2. Subject groups (prevent leakage)
@@ -1647,6 +1672,7 @@ class EmbeddingClassifier:
         target="crs",
         labels_file=None,
         binary_outcome=False,
+        death_binary=False,
     ):
         """Run 5-fold StratifiedGroupKFold CV with all 3 models.
 
@@ -1659,7 +1685,12 @@ class EmbeddingClassifier:
         All predict on the same held-out fold.
         """
         n_folds = self.n_cv_folds
-        mode_tag = f" [{target}{'  binary' if binary_outcome else ''}]"
+        mode_tag = f" [{target}"
+        if death_binary:
+            mode_tag += "  binary_death"
+        elif binary_outcome:
+            mode_tag += "  binary"
+        mode_tag += "]"
 
         print("=" * 80, flush=True)
         print(
@@ -1676,7 +1707,10 @@ class EmbeddingClassifier:
 
         # 1. Collect data
         X, y, subjects = self.collect_data(
-            target=target, labels_file=labels_file, binary_outcome=binary_outcome
+            target=target,
+            labels_file=labels_file,
+            binary_outcome=binary_outcome,
+            death_binary=death_binary,
         )
 
         # Subject groups
@@ -2001,8 +2035,7 @@ class EmbeddingClassifier:
 
             # Accumulators: {marker_idx: {true: [], pred: [], subjects: []}}
             accum = {
-                i: {"true": [], "pred": [], "subjects": []}
-                for i in range(Y.shape[1])
+                i: {"true": [], "pred": [], "subjects": []} for i in range(Y.shape[1])
             }
 
             for fold_idx, (train_idx, test_idx) in enumerate(
@@ -2023,9 +2056,7 @@ class EmbeddingClassifier:
                     y_pred = model.predict(X[valid_test])
                     accum[i]["true"].extend(y_col[valid_test].tolist())
                     accum[i]["pred"].extend(y_pred.tolist())
-                    accum[i]["subjects"].extend(
-                        [subjects[j] for j in valid_test]
-                    )
+                    accum[i]["subjects"].extend([subjects[j] for j in valid_test])
 
             for i, marker in enumerate(marker_names):
                 if not accum[i]["true"]:
@@ -2086,8 +2117,7 @@ class EmbeddingClassifier:
                     "true_value": preds["true"],
                     "predicted_value": preds["pred"],
                     "squared_error": [
-                        (t - p) ** 2
-                        for t, p in zip(preds["true"], preds["pred"])
+                        (t - p) ** 2 for t, p in zip(preds["true"], preds["pred"])
                     ],
                 }
             )
@@ -2130,9 +2160,10 @@ class EmbeddingClassifier:
         Targets: crs, etiology, cs_6m, cs_1y, cs_2y.
 
         For crs and etiology results land under {output_dir}/{target}/.
-        For outcome targets (cs_6m, cs_1y, cs_2y) two runs are performed:
-          - {output_dir}/{target}/multiclass/  — 4-class (VS, MCS, CONSCIOUS, DEATH)
-          - {output_dir}/{target}/binary/      — VS vs MCS only
+        For outcome targets (cs_6m, cs_1y, cs_2y) three runs are performed:
+          - {output_dir}/{target}/multiclass/    — 4-class (VS, MCS, CONSCIOUS, DEATH)
+          - {output_dir}/{target}/binary/        — VS vs MCS only
+          - {output_dir}/{target}/binary_death/  — DEATH vs NON_DEATH
 
         Parameters
         ----------
@@ -2151,11 +2182,15 @@ class EmbeddingClassifier:
             print(f"{'=' * 80}", flush=True)
 
             if target in _OUTCOME_TARGETS:
-                modes = [("multiclass", False), ("binary", True)]
+                modes = [
+                    ("multiclass", False, False),
+                    ("binary", True, False),
+                    ("binary_death", False, True),
+                ]
             else:
-                modes = [("", False)]  # single run, no subfolder
+                modes = [("", False, False)]  # single run, no subfolder
 
-            for mode, binary_outcome in modes:
+            for mode, binary_outcome, death_binary in modes:
                 if mode:
                     print(f"\n--- {target} / {mode} ---", flush=True)
                     self.output_dir = op.join(base_output_dir, target, mode)
@@ -2169,6 +2204,7 @@ class EmbeddingClassifier:
                             target=target,
                             labels_file=patient_labels_full,
                             binary_outcome=binary_outcome,
+                            death_binary=death_binary,
                         )
                     else:
                         self.run_classification(
@@ -2177,6 +2213,7 @@ class EmbeddingClassifier:
                             target=target,
                             labels_file=patient_labels_full,
                             binary_outcome=binary_outcome,
+                            death_binary=death_binary,
                         )
                 except ValueError as e:
                     label = f"'{target}'" + (f" ({mode})" if mode else "")
@@ -2449,9 +2486,7 @@ class EmbeddingClassifier:
             else:
                 # One OvR curve per class
                 colors = plt.cm.tab10(np.linspace(0, 1, len(self.class_names)))
-                for ci, (cls_name, color) in enumerate(
-                    zip(self.class_names, colors)
-                ):
+                for ci, (cls_name, color) in enumerate(zip(self.class_names, colors)):
                     try:
                         fpr, tpr, _ = roc_curve(
                             (y_true == ci).astype(int), y_probs[:, ci]

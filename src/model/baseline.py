@@ -255,7 +255,7 @@ class BaselineClassifier:
         )
         return features_dict, feature_names, groups_dict
 
-    def load_labels_for_target(self, target, binary_outcome=False):
+    def load_labels_for_target(self, target, binary_outcome=False, death_binary=False):
         """Load labels for a given prediction target from patient_labels.csv.
 
         Parameters
@@ -267,6 +267,9 @@ class BaselineClassifier:
             collapse classes to binary VS vs MCS:
             VS / VS/MCS → VS; MCS+ / MCS- / MCS / CONSCIOUS → MCS;
             DEATH and all others are skipped.
+        death_binary : bool
+            If True and target is an outcome score, collapse to binary
+            DEATH vs NON_DEATH (all subjects included).
 
         Returns
         -------
@@ -276,8 +279,7 @@ class BaselineClassifier:
         is_binary : bool
         """
         print(
-            f"Loading labels for target '{target}' from: "
-            f"{self.patient_labels_file}",
+            f"Loading labels for target '{target}' from: {self.patient_labels_file}",
             flush=True,
         )
         df = pd.read_csv(self.patient_labels_file)
@@ -330,32 +332,43 @@ class BaselineClassifier:
                 if pd.isna(val) or str(val).strip().lower() in ("n/a", ""):
                     continue
                 label = str(val).strip()
-                if label in _VS_STATES:
-                    label = "VS"
-                elif label in _MCS_STATES:
-                    label = "MCS"
-                elif label in ("CONSCIOUS", "DEATH"):
-                    if binary_outcome:
-                        continue  # exclude from binary run
+                if death_binary:
+                    if label == "DEATH":
+                        label = "DEATH"
+                    elif (
+                        label in _VS_STATES
+                        or label in _MCS_STATES
+                        or label == "CONSCIOUS"
+                    ):
+                        label = "NON_DEATH"
+                    else:
+                        continue  # skip anything unrecognised
                 else:
-                    continue  # skip anything unrecognised
+                    if label in _VS_STATES:
+                        label = "VS"
+                    elif label in _MCS_STATES:
+                        label = "MCS"
+                    elif label in ("CONSCIOUS", "DEATH"):
+                        if binary_outcome:
+                            continue  # exclude from binary run
+                    else:
+                        continue  # skip anything unrecognised
                 key = f"{subject}_{session}"
                 labels_dict[key] = label
                 available_states.add(label)
-            is_binary = binary_outcome
+            is_binary = binary_outcome or death_binary
 
         else:
             raise ValueError(f"Unknown target: {target!r}")
 
         class_names = sorted(available_states)
         print(
-            f"   Loaded {len(labels_dict)} subject/sessions, "
-            f"classes: {class_names}",
+            f"   Loaded {len(labels_dict)} subject/sessions, classes: {class_names}",
             flush=True,
         )
         return labels_dict, class_names, is_binary
 
-    def collect_data(self, target, binary_outcome=False):
+    def collect_data(self, target, binary_outcome=False, death_binary=False):
         """Build X, y, subjects arrays for a given prediction target.
 
         Parameters
@@ -364,6 +377,9 @@ class BaselineClassifier:
         binary_outcome : bool
             Passed through to ``load_labels_for_target``; collapses outcome
             classes to binary VS/MCS when True.
+        death_binary : bool
+            Passed through to ``load_labels_for_target``; collapses outcome
+            classes to binary DEATH/NON_DEATH when True.
 
         Returns
         -------
@@ -376,7 +392,7 @@ class BaselineClassifier:
 
         features_dict, feature_names, groups_dict = self.load_scalars()
         labels_dict, class_names, is_binary = self.load_labels_for_target(
-            target, binary_outcome=binary_outcome
+            target, binary_outcome=binary_outcome, death_binary=death_binary
         )
 
         self.feature_names = feature_names
@@ -407,8 +423,7 @@ class BaselineClassifier:
 
         if not X_list:
             raise ValueError(
-                f"No valid samples remain after NaN filtering for target "
-                f"'{target}'!"
+                f"No valid samples remain after NaN filtering for target '{target}'!"
             )
 
         self.X = np.array(X_list)
@@ -461,21 +476,25 @@ class BaselineClassifier:
                 for tr_idx, va_idx in inner_cv.split(
                     X_train, y_train, groups=groups_train
                 ):
-                    svc_kw = dict(C=C, kernel=kernel, class_weight="balanced",
-                                  probability=True,
-                                  random_state=self.random_state,
-                                  max_iter=5000)
+                    svc_kw = dict(
+                        C=C,
+                        kernel=kernel,
+                        class_weight="balanced",
+                        probability=True,
+                        random_state=self.random_state,
+                        max_iter=5000,
+                    )
                     if kernel == "rbf":
                         svc_kw["gamma"] = gamma
-                    pipe = Pipeline([
-                        ("scaler", StandardScaler()),
-                        ("svc", SVC(**svc_kw)),
-                    ])
+                    pipe = Pipeline(
+                        [
+                            ("scaler", StandardScaler()),
+                            ("svc", SVC(**svc_kw)),
+                        ]
+                    )
                     pipe.fit(X_train[tr_idx], y_train[tr_idx])
                     preds = pipe.predict(X_train[va_idx])
-                    scores.append(
-                        balanced_accuracy_score(y_train[va_idx], preds)
-                    )
+                    scores.append(balanced_accuracy_score(y_train[va_idx], preds))
 
                 mean_score = np.mean(scores)
                 if mean_score > best_score:
@@ -483,8 +502,7 @@ class BaselineClassifier:
                     best_params = {"C": C, "kernel": kernel, "gamma": gamma}
 
         print(
-            f"      SVM best params: {best_params} "
-            f"(bal_acc={best_score:.3f})",
+            f"      SVM best params: {best_params} (bal_acc={best_score:.3f})",
             flush=True,
         )
 
@@ -499,10 +517,12 @@ class BaselineClassifier:
         if best_params["kernel"] == "rbf" and best_params["gamma"] is not None:
             svc_kw["gamma"] = best_params["gamma"]
 
-        best_model = Pipeline([
-            ("scaler", StandardScaler()),
-            ("svc", SVC(**svc_kw)),
-        ])
+        best_model = Pipeline(
+            [
+                ("scaler", StandardScaler()),
+                ("svc", SVC(**svc_kw)),
+            ]
+        )
         best_model.fit(X_train, y_train)
         return best_model, best_params
 
@@ -527,9 +547,7 @@ class BaselineClassifier:
             param_grid["n_estimators"], param_grid["max_depth"]
         ):
             scores = []
-            for tr_idx, va_idx in inner_cv.split(
-                X_train, y_train, groups=groups_train
-            ):
+            for tr_idx, va_idx in inner_cv.split(X_train, y_train, groups=groups_train):
                 rf = RandomForestClassifier(
                     n_estimators=n_est,
                     max_depth=max_d,
@@ -539,9 +557,7 @@ class BaselineClassifier:
                 )
                 rf.fit(X_train[tr_idx], y_train[tr_idx])
                 preds = rf.predict(X_train[va_idx])
-                scores.append(
-                    balanced_accuracy_score(y_train[va_idx], preds)
-                )
+                scores.append(balanced_accuracy_score(y_train[va_idx], preds))
 
             mean_score = np.mean(scores)
             if mean_score > best_score:
@@ -591,9 +607,7 @@ class BaselineClassifier:
 
         for alpha, gamma in product(param_grid["alpha"], param_grid["gamma"]):
             scores = []
-            for tr_idx, va_idx in inner_cv.split(
-                X_train, y_train, groups=groups_train
-            ):
+            for tr_idx, va_idx in inner_cv.split(X_train, y_train, groups=groups_train):
                 kr = KernelRidge(kernel="rbf", alpha=alpha, gamma=gamma)
                 if self.is_binary:
                     kr.fit(X_train[tr_idx], y_train[tr_idx])
@@ -603,9 +617,7 @@ class BaselineClassifier:
                     kr.fit(X_train[tr_idx], y_onehot[tr_idx])
                     raw = kr.predict(X_train[va_idx])
                     preds = np.argmax(raw, axis=1)
-                scores.append(
-                    balanced_accuracy_score(y_train[va_idx], preds)
-                )
+                scores.append(balanced_accuracy_score(y_train[va_idx], preds))
 
             mean_score = np.mean(scores)
             if mean_score > best_score:
@@ -695,6 +707,7 @@ class BaselineClassifier:
         is_binary = self.is_binary
 
         if model_type in ("svm", "random_forest"):
+
             def _scorer(m, X, y):
                 proba = m.predict_proba(X)
                 if is_binary:
@@ -702,6 +715,7 @@ class BaselineClassifier:
                 else:
                     return balanced_accuracy_score(y, np.argmax(proba, axis=1))
         else:  # kernel_ridge
+
             def _scorer(m, X, y):
                 raw = m.predict(X)
                 if is_binary:
@@ -735,9 +749,7 @@ class BaselineClassifier:
     # Metrics
     # ------------------------------------------------------------------
 
-    def _compute_test_metrics(
-        self, y_test, test_preds, test_probs, subjects_test
-    ):
+    def _compute_test_metrics(self, y_test, test_preds, test_probs, subjects_test):
         """Compute standard classification metrics on a test set.
 
         Handles both binary (1-D probs) and multiclass (2-D probs).
@@ -768,9 +780,11 @@ class BaselineClassifier:
         all_labels = list(range(len(self.class_names)))
         test_precision, test_recall, test_f1, test_support = (
             precision_recall_fscore_support(
-                y_test, test_preds,
+                y_test,
+                test_preds,
                 labels=all_labels,
-                average=None, zero_division=0,
+                average=None,
+                zero_division=0,
             )
         )
         test_conf = confusion_matrix(y_test, test_preds, labels=all_labels)
@@ -786,9 +800,7 @@ class BaselineClassifier:
         return {
             "test_accuracy": float(test_acc),
             "test_balanced_accuracy": float(test_bal_acc),
-            "test_auc_score": (
-                float(test_auc) if test_auc is not None else None
-            ),
+            "test_auc_score": (float(test_auc) if test_auc is not None else None),
             "test_precision": test_precision.tolist(),
             "test_recall": test_recall.tolist(),
             "test_f1_score": test_f1.tolist(),
@@ -810,7 +822,9 @@ class BaselineClassifier:
     # Single-split classification
     # ------------------------------------------------------------------
 
-    def run_classification(self, target, test_size=0.2, binary_outcome=False):
+    def run_classification(
+        self, target, test_size=0.2, binary_outcome=False, death_binary=False
+    ):
         """Classic single-split: GroupShuffleSplit outer, inner grid search.
 
         Parameters
@@ -819,8 +833,15 @@ class BaselineClassifier:
         test_size : float
         binary_outcome : bool
             If True, collapses outcome classes to binary VS/MCS.
+        death_binary : bool
+            If True, collapses outcome classes to binary DEATH/NON_DEATH.
         """
-        mode_tag = " [binary]" if binary_outcome else ""
+        if death_binary:
+            mode_tag = " [binary_death]"
+        elif binary_outcome:
+            mode_tag = " [binary]"
+        else:
+            mode_tag = ""
         print("=" * 80, flush=True)
         print(
             f"MARKER BASELINE — Classic Split | target={target}{mode_tag} | "
@@ -831,12 +852,13 @@ class BaselineClassifier:
 
         np.random.seed(self.random_state)
 
-        X, y, subjects, groups = self.collect_data(target, binary_outcome=binary_outcome)
+        X, y, subjects, groups = self.collect_data(
+            target, binary_outcome=binary_outcome, death_binary=death_binary
+        )
 
         unique_groups = np.unique(groups)
         print(
-            f"   {len(unique_groups)} unique subjects across "
-            f"{len(subjects)} sessions",
+            f"   {len(unique_groups)} unique subjects across {len(subjects)} sessions",
             flush=True,
         )
 
@@ -862,22 +884,16 @@ class BaselineClassifier:
             )
 
         print(
-            f"   Train: {len(X_trainval)} sessions "
-            f"({len(train_groups_set)} subjects)",
+            f"   Train: {len(X_trainval)} sessions ({len(train_groups_set)} subjects)",
             flush=True,
         )
         print(
-            f"   Test:  {len(X_test)} sessions "
-            f"({len(test_groups_set)} subjects)",
+            f"   Test:  {len(X_test)} sessions ({len(test_groups_set)} subjects)",
             flush=True,
         )
-        for split_name, y_split in [
-            ("Train", y_trainval), ("Test", y_test)
-        ]:
+        for split_name, y_split in [("Train", y_trainval), ("Test", y_test)]:
             u, c = np.unique(y_split, return_counts=True)
-            dist = ", ".join(
-                f"{self.class_names[ci]}: {n}" for ci, n in zip(u, c)
-            )
+            dist = ", ".join(f"{self.class_names[ci]}: {n}" for ci, n in zip(u, c))
             print(f"   {split_name} class distribution: {dist}", flush=True)
 
         split_dir = op.join(self.output_dir, "classic_split")
@@ -892,31 +908,38 @@ class BaselineClassifier:
         svm_results = self._compute_test_metrics(
             y_test, svm_preds, svm_probs, subjects_test
         )
-        svm_results.update({
-            "n_train": len(X_trainval),
-            "n_test": len(X_test),
-            "n_features": int(X.shape[1]),
-            "feature_names": list(self.feature_names),
-            "best_params": svm_params,
-            "subjects_train": subjects_train,
-            "reduction": self.reduction_str,
-            "target": target,
-        })
-        print("   Computing SVM permutation importance ...", flush=True)
-        svm_fi = self._compute_permutation_importance(
-            svm_model, "svm", X_test, y_test
+        svm_results.update(
+            {
+                "n_train": len(X_trainval),
+                "n_test": len(X_test),
+                "n_features": int(X.shape[1]),
+                "feature_names": list(self.feature_names),
+                "best_params": svm_params,
+                "subjects_train": subjects_train,
+                "reduction": self.reduction_str,
+                "target": target,
+            }
         )
+        print("   Computing SVM permutation importance ...", flush=True)
+        svm_fi = self._compute_permutation_importance(svm_model, "svm", X_test, y_test)
         svm_dir = op.join(split_dir, "svm")
         os.makedirs(svm_dir, exist_ok=True)
-        self._save_results(svm_results, svm_dir, model=svm_model,
-                           model_type="svm", feature_importance=svm_fi)
-        self._plot_results(svm_results, "SVM", svm_dir,
-                           best_params=svm_params,
-                           n_samples=len(X_trainval),
-                           n_features=X.shape[1],
-                           class_balance=dict(
-                               zip(*np.unique(y_trainval, return_counts=True))
-                           ))
+        self._save_results(
+            svm_results,
+            svm_dir,
+            model=svm_model,
+            model_type="svm",
+            feature_importance=svm_fi,
+        )
+        self._plot_results(
+            svm_results,
+            "SVM",
+            svm_dir,
+            best_params=svm_params,
+            n_samples=len(X_trainval),
+            n_features=X.shape[1],
+            class_balance=dict(zip(*np.unique(y_trainval, return_counts=True))),
+        )
         all_results["svm"] = svm_results
 
         # ---- Random Forest ----
@@ -928,31 +951,40 @@ class BaselineClassifier:
         rf_results = self._compute_test_metrics(
             y_test, rf_preds, rf_probs, subjects_test
         )
-        rf_results.update({
-            "n_train": len(X_trainval),
-            "n_test": len(X_test),
-            "n_features": int(X.shape[1]),
-            "feature_names": list(self.feature_names),
-            "best_params": rf_params,
-            "subjects_train": subjects_train,
-            "reduction": self.reduction_str,
-            "target": target,
-        })
+        rf_results.update(
+            {
+                "n_train": len(X_trainval),
+                "n_test": len(X_test),
+                "n_features": int(X.shape[1]),
+                "feature_names": list(self.feature_names),
+                "best_params": rf_params,
+                "subjects_train": subjects_train,
+                "reduction": self.reduction_str,
+                "target": target,
+            }
+        )
         print("   Computing RF permutation importance ...", flush=True)
         rf_fi = self._compute_permutation_importance(
             rf_model, "random_forest", X_test, y_test
         )
         rf_dir = op.join(split_dir, "random_forest")
         os.makedirs(rf_dir, exist_ok=True)
-        self._save_results(rf_results, rf_dir, model=rf_model,
-                           model_type="random_forest", feature_importance=rf_fi)
-        self._plot_results(rf_results, "Random Forest", rf_dir,
-                           best_params=rf_params,
-                           n_samples=len(X_trainval),
-                           n_features=X.shape[1],
-                           class_balance=dict(
-                               zip(*np.unique(y_trainval, return_counts=True))
-                           ))
+        self._save_results(
+            rf_results,
+            rf_dir,
+            model=rf_model,
+            model_type="random_forest",
+            feature_importance=rf_fi,
+        )
+        self._plot_results(
+            rf_results,
+            "Random Forest",
+            rf_dir,
+            best_params=rf_params,
+            n_samples=len(X_trainval),
+            n_features=X.shape[1],
+            class_balance=dict(zip(*np.unique(y_trainval, return_counts=True))),
+        )
         all_results["random_forest"] = rf_results
 
         # ---- Kernel Ridge ----
@@ -964,31 +996,40 @@ class BaselineClassifier:
         kr_results = self._compute_test_metrics(
             y_test, kr_preds, kr_probs, subjects_test
         )
-        kr_results.update({
-            "n_train": len(X_trainval),
-            "n_test": len(X_test),
-            "n_features": int(X.shape[1]),
-            "feature_names": list(self.feature_names),
-            "best_params": kr_params,
-            "subjects_train": subjects_train,
-            "reduction": self.reduction_str,
-            "target": target,
-        })
+        kr_results.update(
+            {
+                "n_train": len(X_trainval),
+                "n_test": len(X_test),
+                "n_features": int(X.shape[1]),
+                "feature_names": list(self.feature_names),
+                "best_params": kr_params,
+                "subjects_train": subjects_train,
+                "reduction": self.reduction_str,
+                "target": target,
+            }
+        )
         print("   Computing KR permutation importance ...", flush=True)
         kr_fi = self._compute_permutation_importance(
             kr_model, "kernel_ridge", X_test, y_test
         )
         kr_dir = op.join(split_dir, "kernel_ridge")
         os.makedirs(kr_dir, exist_ok=True)
-        self._save_results(kr_results, kr_dir, model=kr_model,
-                           model_type="kernel_ridge", feature_importance=kr_fi)
-        self._plot_results(kr_results, "Kernel Ridge", kr_dir,
-                           best_params=kr_params,
-                           n_samples=len(X_trainval),
-                           n_features=X.shape[1],
-                           class_balance=dict(
-                               zip(*np.unique(y_trainval, return_counts=True))
-                           ))
+        self._save_results(
+            kr_results,
+            kr_dir,
+            model=kr_model,
+            model_type="kernel_ridge",
+            feature_importance=kr_fi,
+        )
+        self._plot_results(
+            kr_results,
+            "Kernel Ridge",
+            kr_dir,
+            best_params=kr_params,
+            n_samples=len(X_trainval),
+            n_features=X.shape[1],
+            class_balance=dict(zip(*np.unique(y_trainval, return_counts=True))),
+        )
         all_results["kernel_ridge"] = kr_results
 
         # Summary
@@ -1020,7 +1061,7 @@ class BaselineClassifier:
     # Nested CV classification
     # ------------------------------------------------------------------
 
-    def run_full_cv(self, target, binary_outcome=False):
+    def run_full_cv(self, target, binary_outcome=False, death_binary=False):
         """Nested CV: StratifiedGroupKFold / GroupKFold outer loop.
 
         Parameters
@@ -1028,9 +1069,16 @@ class BaselineClassifier:
         target : str
         binary_outcome : bool
             If True, collapses outcome classes to binary VS/MCS.
+        death_binary : bool
+            If True, collapses outcome classes to binary DEATH/NON_DEATH.
         """
         n_folds = self.n_cv_folds
-        mode_tag = " [binary]" if binary_outcome else ""
+        if death_binary:
+            mode_tag = " [binary_death]"
+        elif binary_outcome:
+            mode_tag = " [binary]"
+        else:
+            mode_tag = ""
 
         print("=" * 80, flush=True)
         print(
@@ -1042,7 +1090,9 @@ class BaselineClassifier:
 
         np.random.seed(self.random_state)
 
-        X, y, subjects, groups = self.collect_data(target, binary_outcome=binary_outcome)
+        X, y, subjects, groups = self.collect_data(
+            target, binary_outcome=binary_outcome, death_binary=death_binary
+        )
 
         unique_groups = np.unique(groups)
         n_unique = len(unique_groups)
@@ -1054,8 +1104,7 @@ class BaselineClassifier:
         effective_folds = min(n_folds, n_unique)
         if effective_folds < 2:
             raise ValueError(
-                f"Only {n_unique} unique subjects — cannot perform "
-                f"{n_folds}-fold CV"
+                f"Only {n_unique} unique subjects — cannot perform {n_folds}-fold CV"
             )
 
         if self.is_binary:
@@ -1069,7 +1118,10 @@ class BaselineClassifier:
 
         accum = {
             mk: {
-                "y_true": [], "y_pred": [], "y_proba": [], "subjects": [],
+                "y_true": [],
+                "y_pred": [],
+                "y_proba": [],
+                "subjects": [],
                 "fi_means": [],  # per-fold importance arrays (n_features,)
             }
             for mk in MODEL_CONFIGS
@@ -1094,26 +1146,27 @@ class BaselineClassifier:
             test_subj = set(groups[test_idx])
             if train_subj & test_subj:
                 raise ValueError(
-                    f"Fold {fold_idx}: subject leakage: "
-                    f"{train_subj & test_subj}"
+                    f"Fold {fold_idx}: subject leakage: {train_subj & test_subj}"
                 )
             # Save fold split for SHAP reproducibility
             _splits_dir = op.join(self.output_dir, "nested_cv", "fold_splits")
             os.makedirs(_splits_dir, exist_ok=True)
             with open(op.join(_splits_dir, f"fold_{fold_idx:02d}.json"), "w") as _f:
-                json.dump({
-                    "train_subjects": [subjects[i] for i in train_idx],
-                    "test_subjects": subjects_test_fold,
-                }, _f, indent=2)
+                json.dump(
+                    {
+                        "train_subjects": [subjects[i] for i in train_idx],
+                        "test_subjects": subjects_test_fold,
+                    },
+                    _f,
+                    indent=2,
+                )
 
             print(
-                f"   Train: {len(train_subj)} subjects "
-                f"({len(train_idx)} sessions)",
+                f"   Train: {len(train_subj)} subjects ({len(train_idx)} sessions)",
                 flush=True,
             )
             print(
-                f"   Test:  {len(test_subj)} subjects "
-                f"({len(test_idx)} sessions)",
+                f"   Test:  {len(test_subj)} subjects ({len(test_idx)} sessions)",
                 flush=True,
             )
 
@@ -1124,7 +1177,9 @@ class BaselineClassifier:
             )
             _fold_dir = op.join(self.output_dir, "nested_cv", "svm")
             os.makedirs(_fold_dir, exist_ok=True)
-            joblib.dump(svm_model, op.join(_fold_dir, f"fold_{fold_idx:02d}_model.joblib"))
+            joblib.dump(
+                svm_model, op.join(_fold_dir, f"fold_{fold_idx:02d}_model.joblib")
+            )
             svm_probs, svm_preds = self._predict_svm(svm_model, X_test_fold)
             accum["svm"]["y_true"].append(y_test_fold)
             accum["svm"]["y_pred"].append(svm_preds)
@@ -1149,7 +1204,9 @@ class BaselineClassifier:
             )
             _fold_dir = op.join(self.output_dir, "nested_cv", "random_forest")
             os.makedirs(_fold_dir, exist_ok=True)
-            joblib.dump(rf_model, op.join(_fold_dir, f"fold_{fold_idx:02d}_model.joblib"))
+            joblib.dump(
+                rf_model, op.join(_fold_dir, f"fold_{fold_idx:02d}_model.joblib")
+            )
             rf_probs, rf_preds = self._predict_rf(rf_model, X_test_fold)
             accum["random_forest"]["y_true"].append(y_test_fold)
             accum["random_forest"]["y_pred"].append(rf_preds)
@@ -1174,7 +1231,9 @@ class BaselineClassifier:
             )
             _fold_dir = op.join(self.output_dir, "nested_cv", "kernel_ridge")
             os.makedirs(_fold_dir, exist_ok=True)
-            joblib.dump(kr_model, op.join(_fold_dir, f"fold_{fold_idx:02d}_model.joblib"))
+            joblib.dump(
+                kr_model, op.join(_fold_dir, f"fold_{fold_idx:02d}_model.joblib")
+            )
             kr_probs, kr_preds = self._predict_kr(kr_model, X_test_fold)
             accum["kernel_ridge"]["y_true"].append(y_test_fold)
             accum["kernel_ridge"]["y_pred"].append(kr_preds)
@@ -1208,16 +1267,18 @@ class BaselineClassifier:
             results = self._compute_test_metrics(
                 y_true_all, y_pred_all, y_proba_all, subjects_all
             )
-            results.update({
-                "n_samples": len(X),
-                "n_features": int(X.shape[1]),
-                "feature_names": list(self.feature_names),
-                "n_subjects": int(n_unique),
-                "n_folds": effective_folds,
-                "full_cv": True,
-                "reduction": self.reduction_str,
-                "target": target,
-            })
+            results.update(
+                {
+                    "n_samples": len(X),
+                    "n_features": int(X.shape[1]),
+                    "feature_names": list(self.feature_names),
+                    "n_subjects": int(n_unique),
+                    "n_folds": effective_folds,
+                    "full_cv": True,
+                    "reduction": self.reduction_str,
+                    "target": target,
+                }
+            )
 
             # Aggregate per-fold feature importance (mean across folds)
             fi_matrix = np.array(accum[mk]["fi_means"])  # (n_folds, n_features)
@@ -1235,7 +1296,10 @@ class BaselineClassifier:
             model_dir = op.join(cv_dir, mk)
             os.makedirs(model_dir, exist_ok=True)
             self._save_results(
-                results, model_dir, model=None, model_type=mk,
+                results,
+                model_dir,
+                model=None,
+                model_type=mk,
                 feature_importance=cv_fi,
             )
             self._plot_results(results, cfg["name"], model_dir)
@@ -1263,9 +1327,10 @@ class BaselineClassifier:
         """Run classification for all 5 targets.
 
         For binary targets (crs, etiology) the existing single run is used.
-        For outcome targets (cs_6m, cs_1y, cs_2y) two runs are performed:
-          - ``{target}/multiclass/`` — full multi-class classification
-          - ``{target}/binary/``     — VS vs MCS binary collapse
+        For outcome targets (cs_6m, cs_1y, cs_2y) three runs are performed:
+          - ``{target}/multiclass/``    — full multi-class classification
+          - ``{target}/binary/``        — VS vs MCS binary collapse
+          - ``{target}/binary_death/``  — DEATH vs NON_DEATH binary collapse
         """
         _OUTCOME_TARGETS = {"cs_6m", "cs_1y", "cs_2y"}
         base_output_dir = self.output_dir
@@ -1276,16 +1341,28 @@ class BaselineClassifier:
             print(f"{'=' * 80}", flush=True)
 
             if target in _OUTCOME_TARGETS:
-                for mode, binary_outcome in [("multiclass", False), ("binary", True)]:
+                modes = [
+                    ("multiclass", False, False),
+                    ("binary", True, False),
+                    ("binary_death", False, True),
+                ]
+                for mode, binary_outcome, death_binary in modes:
                     print(f"\n--- {target} / {mode} ---", flush=True)
                     self.output_dir = op.join(base_output_dir, target, mode)
                     os.makedirs(self.output_dir, exist_ok=True)
                     try:
                         if self.full_cv:
-                            self.run_full_cv(target, binary_outcome=binary_outcome)
+                            self.run_full_cv(
+                                target,
+                                binary_outcome=binary_outcome,
+                                death_binary=death_binary,
+                            )
                         else:
                             self.run_classification(
-                                target, test_size, binary_outcome=binary_outcome
+                                target,
+                                test_size,
+                                binary_outcome=binary_outcome,
+                                death_binary=death_binary,
                             )
                     except ValueError as exc:
                         print(
@@ -1340,12 +1417,14 @@ class BaselineClassifier:
         true_labels = [self.class_names[t] for t in results["y_test_true"]]
         probs = results["y_test_probs"]
 
-        df = pd.DataFrame({
-            "subject_session": results["subjects_test"],
-            "true_state": true_labels,
-            "predicted_state": pred_labels,
-            "correct": [t == p for t, p in zip(true_labels, pred_labels)],
-        })
+        df = pd.DataFrame(
+            {
+                "subject_session": results["subjects_test"],
+                "true_state": true_labels,
+                "predicted_state": pred_labels,
+                "correct": [t == p for t, p in zip(true_labels, pred_labels)],
+            }
+        )
 
         # For binary add a single prob column; for multiclass one per class
         if self.is_binary:
@@ -1399,9 +1478,11 @@ class BaselineClassifier:
             for k, v in best_params.items():
                 info_lines.append(f"  {k} = {v}")
         ax.text(
-            0.5, 0.5,
+            0.5,
+            0.5,
             "\n".join(info_lines),
-            ha="center", va="center",
+            ha="center",
+            va="center",
             transform=ax.transAxes,
             fontsize=12,
             family="monospace",
@@ -1418,10 +1499,14 @@ class BaselineClassifier:
         for i in range(conf.shape[0]):
             for j in range(conf.shape[1]):
                 ax.text(
-                    j, i, str(conf[i, j]),
-                    ha="center", va="center",
+                    j,
+                    i,
+                    str(conf[i, j]),
+                    ha="center",
+                    va="center",
                     color="white" if conf[i, j] > thresh else "black",
-                    fontsize=14, fontweight="bold",
+                    fontsize=14,
+                    fontweight="bold",
                 )
         ax.set_xticks(range(len(self.class_names)))
         ax.set_xticklabels(self.class_names)
@@ -1455,9 +1540,11 @@ class BaselineClassifier:
                 )
                 info_lines.append(f"    {cls_name}: {cnt}")
         ax.text(
-            0.5, 0.5,
+            0.5,
+            0.5,
             "\n".join(info_lines),
-            ha="center", va="center",
+            ha="center",
+            va="center",
             transform=ax.transAxes,
             fontsize=12,
             family="monospace",
@@ -1474,26 +1561,27 @@ class BaselineClassifier:
                 fpr, tpr, _ = roc_curve(y_true, y_probs)
                 roc_auc_val = auc(fpr, tpr)
                 ax.plot(
-                    fpr, tpr,
-                    color="darkorange", lw=2,
+                    fpr,
+                    tpr,
+                    color="darkorange",
+                    lw=2,
                     label=f"ROC (AUC = {roc_auc_val:.3f})",
                 )
                 ax.plot([0, 1], [0, 1], "navy", lw=2, ls="--")
                 ax.legend(loc="lower right")
             else:
-                colors = plt.cm.tab10(
-                    np.linspace(0, 1, len(self.class_names))
-                )
-                for ci, (cls_name, color) in enumerate(
-                    zip(self.class_names, colors)
-                ):
+                colors = plt.cm.tab10(np.linspace(0, 1, len(self.class_names)))
+                for ci, (cls_name, color) in enumerate(zip(self.class_names, colors)):
                     try:
                         fpr, tpr, _ = roc_curve(
                             (y_true == ci).astype(int), y_probs[:, ci]
                         )
                         roc_auc_val = auc(fpr, tpr)
                         ax.plot(
-                            fpr, tpr, color=color, lw=1.5,
+                            fpr,
+                            tpr,
+                            color=color,
+                            lw=1.5,
                             label=f"{cls_name} (AUC={roc_auc_val:.2f})",
                         )
                     except Exception:
@@ -1502,8 +1590,12 @@ class BaselineClassifier:
                 ax.legend(loc="lower right", fontsize=8)
         else:
             ax.text(
-                0.5, 0.5, "AUC not available",
-                ha="center", va="center", transform=ax.transAxes,
+                0.5,
+                0.5,
+                "AUC not available",
+                ha="center",
+                va="center",
+                transform=ax.transAxes,
             )
         ax.set_xlabel("False Positive Rate")
         ax.set_ylabel("True Positive Rate")
@@ -1566,16 +1658,12 @@ Reduction map:
     )
     parser.add_argument(
         "--patient-labels",
-        default=(
-            "/data/project/eeg_foundation/data/metadata/patient_labels.csv"
-        ),
+        default=("/data/project/eeg_foundation/data/metadata/patient_labels.csv"),
         help="Path to patient_labels.csv with target columns.",
     )
     parser.add_argument(
         "--main-path",
-        default=(
-            "/data/project/eeg_foundation/data/benchmark_results/new_results"
-        ),
+        default=("/data/project/eeg_foundation/data/benchmark_results/new_results"),
         help="Root results directory. Outputs land in {main-path}/MARKER_BASELINE/.",
     )
     parser.add_argument(
@@ -1600,8 +1688,7 @@ Reduction map:
         "--test-size",
         type=float,
         default=0.2,
-        help="Fraction of subjects for test set in classic-split mode "
-             "(default: 0.2).",
+        help="Fraction of subjects for test set in classic-split mode (default: 0.2).",
     )
     parser.add_argument(
         "--random-state",
@@ -1614,8 +1701,7 @@ Reduction map:
         choices=TARGETS + ["all"],
         default="all",
         help=(
-            "Which target to predict.  'all' (default) runs all 5 targets "
-            "in sequence."
+            "Which target to predict.  'all' (default) runs all 5 targets in sequence."
         ),
     )
 
@@ -1639,14 +1725,26 @@ Reduction map:
     if args.target == "all":
         classifier.run_all_targets(test_size=args.test_size)
     elif args.target in _OUTCOME_TARGETS:
-        for mode, binary_outcome in [("multiclass", False), ("binary", True)]:
+        modes = [
+            ("multiclass", False, False),
+            ("binary", True, False),
+            ("binary_death", False, True),
+        ]
+        for mode, binary_outcome, death_binary in modes:
             classifier.output_dir = op.join(output_dir, args.target, mode)
             os.makedirs(classifier.output_dir, exist_ok=True)
             if args.full_cv:
-                classifier.run_full_cv(args.target, binary_outcome=binary_outcome)
+                classifier.run_full_cv(
+                    args.target,
+                    binary_outcome=binary_outcome,
+                    death_binary=death_binary,
+                )
             else:
                 classifier.run_classification(
-                    args.target, args.test_size, binary_outcome=binary_outcome
+                    args.target,
+                    args.test_size,
+                    binary_outcome=binary_outcome,
+                    death_binary=death_binary,
                 )
     else:
         classifier.output_dir = op.join(output_dir, args.target)
