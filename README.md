@@ -1,6 +1,6 @@
 # doc_benchmark
 
-EEG analysis pipeline for benchmarking neurophysiological markers and classifying consciousness states (VS vs MCS) in Disorders of Consciousness (DoC) patients. Supports CBraMod, TOTEM, LaBram, and standard BIDS formats.
+EEG analysis pipeline for benchmarking neurophysiological markers and classifying consciousness states (VS vs MCS) in Disorders of Consciousness (DoC) patients. 
 
 ## Quick Start
 
@@ -24,7 +24,7 @@ python cookbooks/pipeline.py \
 | Phase | Flag | Purpose |
 |-------|------|---------|
 | A. GENERAL_METRICS | `--general-metrics-only` | MAPE, Pearson correlation, FFT between original & reconstructed EEG |
-| B. MLP_EMBEDDING | `--mlp-embedding-only` | MLP/RF/KernelRidge classification on foundation model embeddings |
+| B. MLP_EMBEDDING | `--mlp-embedding-only` | MLP/RF/KernelRidge classification on foundation model embeddings, linear probing, dimensionality study of embedding space|
 | C. DECODER | `--decoder-only` | Temporal decoding with SlidingEstimator + LogisticRegression |
 | D. MARKERS | `--markers-only` | Junifer feature extraction → HDF5 → 120 scalars + topographies |
 | E. MODEL | `--model-only` | SVM binary classification (VS vs MCS) |
@@ -125,19 +125,6 @@ results/{results-subdir}/
 │   └── {target}/{classic_split,nested_cv}/{svm,random_forest,kernel_ridge}/
 ├── MODEL/
 └── logs/
-```
-
-## Development
-
-```bash
-# Lint
-ruff check src/
-ruff format src/
-
-# Tests
-pytest tests/ -v
-pytest tests/test_compute_metrics.py -v
-pytest tests/test_compute_markers_hdf5.py -v
 ```
 
 ## Acknowledgements
