@@ -537,17 +537,16 @@ def save_rsa_summary(rsa_results_all: Dict[str, Dict], output_dir: str):
         alpha=0.85, capsize=8,
         error_kw={"elinewidth": 2, "capthick": 2},
     )
-    for xi, p, rho in zip(x, p_vals, rho_vals):
-        if p < 0.05:
-            ax.text(xi, rho + 0.02, "*", ha="center", va="bottom", fontsize=14)
+  #  for xi, p, rho in zip(x, p_vals, rho_vals):
+  #      if p < 0.05:
+  #          ax.text(xi, rho + 0.02, "*", ha="center", va="bottom", fontsize=14)
     ax.set_xticks(x)
     ax.set_xticklabels(models)
     ax.set_ylabel("Spearman ρ (RDM upper triangle)")
     ax.set_title(
-        "RSA(DK, FM) per Foundation Model  [95% bootstrap CI]\n"
-        "(* = p < 0.05 permutation test)"
+        "RSA(DK, FM) per Foundation Model"
     )
-    ax.set_ylim(-0.15, 1.05)
+    ax.set_ylim(0, 1.05)
     ax.axhline(0, color="gray", linewidth=0.8, linestyle="--", alpha=0.5)
     ax.grid(True, alpha=0.3, axis="y")
     plt.tight_layout()
@@ -762,7 +761,7 @@ def _plot_cka_bar(results: Dict, fm_model_name: str, plots_dir: str):
     )
     ax.set_ylim(0, 1.05)
     ax.set_ylabel("Linear CKA")
-    ax.set_title(f"CKA(DK, FM)\n{fm_model_name}  [95% bootstrap CI]")
+    ax.set_title(f"CKA(DK, FM)\n{fm_model_name}")
     ax.grid(True, alpha=0.3, axis="y")
     plt.tight_layout()
     save_path = op.join(plots_dir, f"cka_barplot_{fm_model_name}")
@@ -795,7 +794,7 @@ def save_cka_summary(cka_results_all: Dict[str, Dict], output_dir: str):
     ax.set_xticks(x)
     ax.set_xticklabels(models)
     ax.set_ylabel("Linear CKA")
-    ax.set_title("CKA(DK, FM) per Foundation Model [95% CI]")
+    ax.set_title("CKA(DK, FM) per Foundation Model")
     ax.set_ylim(0, 1.05)
     ax.grid(True, alpha=0.3, axis="y")
     plt.tight_layout()

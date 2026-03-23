@@ -90,11 +90,15 @@ from sklearn.metrics import (
     auc,
 )
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.kernel_ridge import KernelRidge
 from sklearn.svm import SVC
 from sklearn.pipeline import Pipeline
 from sklearn.inspection import permutation_importance
 from sklearn.metrics import r2_score
+
+try:
+    from .kernel_ridge_classifier import KernelRidgeClassifier
+except ImportError:
+    from kernel_ridge_classifier import KernelRidgeClassifier
 
 warnings.filterwarnings("ignore")
 
@@ -587,7 +591,7 @@ class BaselineClassifier:
 
         Returns
         -------
-        model : KernelRidge
+        model : KernelRidgeClassifier
         best_params : dict
         """
         param_grid = {
@@ -608,10 +612,10 @@ class BaselineClassifier:
         for alpha, gamma in product(param_grid["alpha"], param_grid["gamma"]):
             scores = []
             for tr_idx, va_idx in inner_cv.split(X_train, y_train, groups=groups_train):
-                kr = KernelRidge(kernel="rbf", alpha=alpha, gamma=gamma)
+                kr = KernelRidgeClassifier(kernel="rbf", alpha=alpha, gamma=gamma)
                 if self.is_binary:
                     kr.fit(X_train[tr_idx], y_train[tr_idx])
-                    raw = kr.predict(X_train[va_idx])
+                    raw = kr.decision_function(X_train[va_idx])
                     preds = (np.clip(raw, 0, 1) >= 0.5).astype(int)
                 else:
                     kr.fit(X_train[tr_idx], y_onehot[tr_idx])
@@ -629,7 +633,7 @@ class BaselineClassifier:
             flush=True,
         )
 
-        best_model = KernelRidge(
+        best_model = KernelRidgeClassifier(
             kernel="rbf",
             alpha=best_params["alpha"],
             gamma=best_params["gamma"],
@@ -667,7 +671,11 @@ class BaselineClassifier:
 
     def _predict_kr(self, model, X):
         """Return (probabilities, predicted_labels) for Kernel Ridge."""
-        raw = model.predict(X)
+        raw = (
+            model.decision_function(X)
+            if hasattr(model, "decision_function")
+            else model.predict(X)
+        )
         if self.is_binary:
             probs = np.clip(raw, 0, 1)
             preds = (probs >= 0.5).astype(int)
@@ -817,6 +825,282 @@ class BaselineClassifier:
                 else list(test_probs)
             ),
         }
+
+    def _compute_macro_average(self, accum_y_true, accum_y_pred, accum_y_proba):
+        """Compute per-fold metrics and return mean +/- std across folds.
+
+        Parameters
+        ----------
+        accum_y_true : list of np.ndarray
+            One array per fold.
+        accum_y_pred : list of np.ndarray
+            One array per fold.
+        accum_y_proba : list of np.ndarray
+            One array per fold.
+
+        Returns
+        -------
+        dict
+            Macro-average metrics with mean, std, and per-fold details.
+        """
+        n_folds = len(accum_y_true)
+        per_fold = []
+        accuracies = []
+        balanced_accuracies = []
+        auc_scores = []
+        n_classes = len(self.class_names)
+        precisions = np.zeros((n_folds, n_classes))
+        recalls = np.zeros((n_folds, n_classes))
+        f1_scores = np.zeros((n_folds, n_classes))
+
+        for i in range(n_folds):
+            y_true_i = accum_y_true[i]
+            y_pred_i = accum_y_pred[i]
+            y_proba_i = accum_y_proba[i]
+            # Reconstruct per-fold subjects (not needed for metrics)
+            dummy_subjects = [f"fold{i}_s{j}" for j in range(len(y_true_i))]
+
+            fold_metrics = self._compute_test_metrics(
+                y_true_i, y_pred_i, y_proba_i, dummy_subjects
+            )
+
+            accuracies.append(fold_metrics["test_accuracy"])
+            balanced_accuracies.append(fold_metrics["test_balanced_accuracy"])
+            auc_scores.append(fold_metrics["test_auc_score"])
+            precisions[i] = fold_metrics["test_precision"]
+            recalls[i] = fold_metrics["test_recall"]
+            f1_scores[i] = fold_metrics["test_f1_score"]
+
+            per_fold.append(
+                {
+                    "fold": i,
+                    "accuracy": fold_metrics["test_accuracy"],
+                    "balanced_accuracy": fold_metrics["test_balanced_accuracy"],
+                    "auc_score": fold_metrics["test_auc_score"],
+                    "precision": fold_metrics["test_precision"],
+                    "recall": fold_metrics["test_recall"],
+                    "f1_score": fold_metrics["test_f1_score"],
+                }
+            )
+
+        # Filter None AUC values
+        valid_aucs = [a for a in auc_scores if a is not None]
+
+        return {
+            "accuracy": {
+                "mean": float(np.mean(accuracies)),
+                "std": float(np.std(accuracies)),
+            },
+            "balanced_accuracy": {
+                "mean": float(np.mean(balanced_accuracies)),
+                "std": float(np.std(balanced_accuracies)),
+            },
+            "auc_score": {
+                "mean": float(np.mean(valid_aucs)) if valid_aucs else None,
+                "std": float(np.std(valid_aucs)) if valid_aucs else None,
+            },
+            "precision": {
+                "mean": precisions.mean(axis=0).tolist(),
+                "std": precisions.std(axis=0).tolist(),
+            },
+            "recall": {
+                "mean": recalls.mean(axis=0).tolist(),
+                "std": recalls.std(axis=0).tolist(),
+            },
+            "f1_score": {
+                "mean": f1_scores.mean(axis=0).tolist(),
+                "std": f1_scores.std(axis=0).tolist(),
+            },
+            "per_fold_metrics": per_fold,
+        }
+
+    def _plot_macro_vs_micro(self, results, model_display_name, output_dir):
+        """Generate a separate PNG comparing micro vs macro evaluation."""
+        macro = results.get("macro_average")
+        if macro is None:
+            return
+
+        fig, axes = plt.subplots(1, 3, figsize=(20, 6))
+
+        cv_tag = ""
+        if results.get("full_cv"):
+            cv_tag = f" ({results['n_folds']}-fold CV)"
+        fig.suptitle(
+            f"{model_display_name} — Micro vs Macro Evaluation{cv_tag}",
+            fontsize=14,
+        )
+
+        # --- Panel 1: Scalar metrics comparison ---
+        ax = axes[0]
+        metric_names = ["Accuracy", "Bal. Accuracy", "AUC"]
+        micro_vals = [
+            results["test_accuracy"],
+            results["test_balanced_accuracy"],
+            results["test_auc_score"] if results["test_auc_score"] is not None else 0,
+        ]
+        macro_means = [
+            macro["accuracy"]["mean"],
+            macro["balanced_accuracy"]["mean"],
+            macro["auc_score"]["mean"] if macro["auc_score"]["mean"] is not None else 0,
+        ]
+        macro_stds = [
+            macro["accuracy"]["std"],
+            macro["balanced_accuracy"]["std"],
+            macro["auc_score"]["std"] if macro["auc_score"]["std"] is not None else 0,
+        ]
+
+        x = np.arange(len(metric_names))
+        width = 0.35
+        bars1 = ax.bar(
+            x - width / 2, micro_vals, width, label="Micro", color="steelblue"
+        )
+        bars2 = ax.bar(
+            x + width / 2,
+            macro_means,
+            width,
+            yerr=macro_stds,
+            label="Macro (mean\u00b1std)",
+            color="darkorange",
+            capsize=4,
+        )
+        ax.set_xticks(x)
+        ax.set_xticklabels(metric_names)
+        ax.set_ylim(0, 1.05)
+        ax.set_ylabel("Score")
+        ax.set_title("Scalar Metrics")
+        ax.legend()
+        # Add value labels
+        for bar in bars1:
+            h = bar.get_height()
+            ax.text(
+                bar.get_x() + bar.get_width() / 2,
+                h + 0.01,
+                f"{h:.3f}",
+                ha="center",
+                va="bottom",
+                fontsize=8,
+            )
+        for bar, std in zip(bars2, macro_stds):
+            h = bar.get_height()
+            ax.text(
+                bar.get_x() + bar.get_width() / 2,
+                h + std + 0.01,
+                f"{h:.3f}\u00b1{std:.3f}",
+                ha="center",
+                va="bottom",
+                fontsize=7,
+            )
+
+        # --- Panel 2: Per-class metrics ---
+        ax = axes[1]
+        class_names = results.get("class_names", self.class_names)
+        n_classes = len(class_names)
+        metric_labels = ["Precision", "Recall", "F1"]
+        micro_class = [
+            results["test_precision"],
+            results["test_recall"],
+            results["test_f1_score"],
+        ]
+        macro_class_mean = [
+            macro["precision"]["mean"],
+            macro["recall"]["mean"],
+            macro["f1_score"]["mean"],
+        ]
+        macro_class_std = [
+            macro["precision"]["std"],
+            macro["recall"]["std"],
+            macro["f1_score"]["std"],
+        ]
+
+        x = np.arange(n_classes)
+        total_width = 0.8
+        bar_width = total_width / (len(metric_labels) * 2)
+        colors_micro = ["#1f77b4", "#2ca02c", "#9467bd"]
+        colors_macro = ["#ff7f0e", "#d62728", "#8c564b"]
+
+        for mi, mlabel in enumerate(metric_labels):
+            offset_micro = (mi * 2) * bar_width - total_width / 2
+            offset_macro = (mi * 2 + 1) * bar_width - total_width / 2
+            ax.bar(
+                x + offset_micro,
+                micro_class[mi],
+                bar_width,
+                label=f"{mlabel} (micro)" if mi == 0 or True else "",
+                color=colors_micro[mi],
+                alpha=0.8,
+            )
+            ax.bar(
+                x + offset_macro,
+                macro_class_mean[mi],
+                bar_width,
+                yerr=macro_class_std[mi],
+                capsize=3,
+                label=f"{mlabel} (macro)" if mi == 0 or True else "",
+                color=colors_macro[mi],
+                alpha=0.8,
+            )
+
+        ax.set_xticks(x)
+        ax.set_xticklabels(class_names)
+        ax.set_ylim(0, 1.15)
+        ax.set_ylabel("Score")
+        ax.set_title("Per-Class Metrics")
+        ax.legend(fontsize=7, ncol=2)
+
+        # --- Panel 3: Per-fold distribution ---
+        ax = axes[2]
+        per_fold = macro["per_fold_metrics"]
+        fold_bal_accs = [f["balanced_accuracy"] for f in per_fold]
+        fold_aucs = [f["auc_score"] for f in per_fold if f["auc_score"] is not None]
+
+        positions = []
+        data = []
+        labels = []
+        if fold_bal_accs:
+            positions.append(1)
+            data.append(fold_bal_accs)
+            labels.append("Bal. Acc")
+        if fold_aucs:
+            positions.append(2)
+            data.append(fold_aucs)
+            labels.append("AUC")
+
+        if data:
+            bp = ax.boxplot(data, positions=positions, widths=0.4, patch_artist=True)
+            colors_box = ["lightblue", "lightsalmon"]
+            for patch, color in zip(bp["boxes"], colors_box[: len(data)]):
+                patch.set_facecolor(color)
+            # Overlay individual fold points
+            for pos, d in zip(positions, data):
+                ax.scatter([pos] * len(d), d, color="black", zorder=3, s=30, alpha=0.7)
+            ax.set_xticks(positions)
+            ax.set_xticklabels(labels)
+            # Add micro reference lines
+            ax.axhline(
+                results["test_balanced_accuracy"],
+                color="steelblue",
+                ls="--",
+                alpha=0.7,
+                label="Micro bal. acc",
+            )
+            if results["test_auc_score"] is not None and fold_aucs:
+                ax.axhline(
+                    results["test_auc_score"],
+                    color="darkorange",
+                    ls="--",
+                    alpha=0.7,
+                    label="Micro AUC",
+                )
+            ax.legend(fontsize=8)
+        ax.set_ylim(0, 1.05)
+        ax.set_ylabel("Score")
+        ax.set_title("Per-Fold Distribution")
+
+        plt.tight_layout()
+        plot_file = op.join(output_dir, "macro_vs_micro_comparison.png")
+        plt.savefig(plot_file, dpi=150, bbox_inches="tight")
+        plt.close()
+        print(f"   Macro vs micro plot saved to: {plot_file}", flush=True)
 
     # ------------------------------------------------------------------
     # Single-split classification
@@ -1293,6 +1577,14 @@ class BaselineClassifier:
                 for i, fname in enumerate(self.feature_names)
             }
 
+            # Macro-average: per-fold metrics, then mean +/- std
+            macro_results = self._compute_macro_average(
+                accum[mk]["y_true"],
+                accum[mk]["y_pred"],
+                accum[mk]["y_proba"],
+            )
+            results["macro_average"] = macro_results
+
             model_dir = op.join(cv_dir, mk)
             os.makedirs(model_dir, exist_ok=True)
             self._save_results(
@@ -1303,16 +1595,26 @@ class BaselineClassifier:
                 feature_importance=cv_fi,
             )
             self._plot_results(results, cfg["name"], model_dir)
+            self._plot_macro_vs_micro(results, cfg["name"], model_dir)
 
-            auc_str = (
+            micro_auc_str = (
                 f"{results['test_auc_score']:.3f}"
                 if results["test_auc_score"] is not None
                 else "N/A"
             )
+            macro_ba = macro_results["balanced_accuracy"]
+            macro_auc = macro_results["auc_score"]
+            macro_auc_str = (
+                f"{macro_auc['mean']:.3f}\u00b1{macro_auc['std']:.3f}"
+                if macro_auc["mean"] is not None
+                else "N/A"
+            )
             print(
                 f"   {cfg['name']:15s}  "
-                f"bal_acc={results['test_balanced_accuracy']:.3f}  "
-                f"AUC={auc_str}",
+                f"micro bal_acc={results['test_balanced_accuracy']:.3f}  "
+                f"macro bal_acc={macro_ba['mean']:.3f}\u00b1{macro_ba['std']:.3f}  "
+                f"micro AUC={micro_auc_str}  "
+                f"macro AUC={macro_auc_str}",
                 flush=True,
             )
 
