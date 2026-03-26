@@ -100,16 +100,13 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-import torch
-import torch.nn as nn
-import torch.optim as optim
-from torch.utils.data import TensorDataset, DataLoader
-
-# Prevent MKL/OpenBLAS segfaults when running as a subprocess
-torch.set_num_threads(1)
-
-from sklearn.preprocessing import LabelEncoder
-from sklearn.model_selection import GroupShuffleSplit, StratifiedGroupKFold, GroupKFold
+from sklearn.preprocessing import LabelEncoder, StandardScaler
+from sklearn.model_selection import (
+    GroupShuffleSplit,
+    StratifiedGroupKFold,
+    GroupKFold,
+    GridSearchCV,
+)
 from sklearn.metrics import (
     classification_report,
     confusion_matrix,
@@ -121,13 +118,14 @@ from sklearn.metrics import (
     auc,
 )
 from sklearn.ensemble import RandomForestClassifier
+from sklearn.neural_network import MLPClassifier
+from sklearn.pipeline import Pipeline
 import joblib
 
 warnings.filterwarnings("ignore")
 
 from sklearn.linear_model import Ridge
 from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
-from sklearn.utils.class_weight import compute_class_weight
 from scipy.stats import pearsonr
 
 try:
@@ -142,6 +140,14 @@ plt.rcParams["legend.fontsize"] = "medium"
 plt.rcParams["axes.labelsize"] = "large"
 
 
+def _safe_auc_score(y_true, y_score, fallback_preds):
+    """AUC with balanced_accuracy fallback for single-class folds."""
+    try:
+        return roc_auc_score(y_true, y_score)
+    except ValueError:
+        return balanced_accuracy_score(y_true, fallback_preds)
+
+
 # ======================================================================
 # Model configurations
 # ======================================================================
@@ -154,53 +160,15 @@ REDUCTION_MAP = {
 }
 
 MODEL_CONFIGS = {
-    "mlp": {"name": "MLP", "needs_val": True, "has_curves": True},
-    "random_forest": {"name": "Random Forest", "needs_val": False, "has_curves": False},
-    "kernel_ridge": {"name": "Kernel Ridge", "needs_val": False, "has_curves": False},
+    "mlp": {"name": "MLP"},
+    "random_forest": {"name": "Random Forest"},
+    "kernel_ridge": {"name": "Kernel Ridge"},
 }
 
 
 # ======================================================================
 # Neural network model
 # ======================================================================
-
-
-class EmbeddingMLP(nn.Module):
-    """Simple MLP for binary or multiclass classification on embeddings.
-
-    Architecture is embedding-size agnostic: input_dim is determined
-    at runtime from the loaded data.
-    """
-
-    def __init__(self, input_dim: int, n_classes: int = 1):
-        """
-        Parameters
-        ----------
-        input_dim : int
-            Dimensionality of the input embeddings.
-        n_classes : int
-            Number of output classes. 1 = binary (BCEWithLogitsLoss),
-            >1 = multiclass (CrossEntropyLoss).
-        """
-        super().__init__()
-        self.n_classes = n_classes
-        out_dim = max(n_classes, 1)
-        self.net = nn.Sequential(
-            #   nn.Linear(input_dim, 128),
-            #   nn.ReLU(),
-            #   nn.BatchNorm1d(128),
-            #   nn.Dropout(0.3),
-            #   nn.Linear(128, 64),
-            #   nn.ReLU(),
-            #   nn.BatchNorm1d(64),
-            #   nn.Dropout(0.3),
-            #   nn.Linear(input_dim, out_dim)
-            nn.Linear(input_dim, out_dim),
-        )
-
-    def forward(self, x):
-        out = self.net(x)
-        return out.squeeze(-1) if self.n_classes == 1 else out
 
 
 # ======================================================================
@@ -244,11 +212,6 @@ class EmbeddingClassifier:
         patient_labels_file,
         output_dir=None,
         random_state=42,
-        n_epochs=500,
-        lr=1e-3,
-        batch_size=32,
-        weight_decay=1e-4,
-        patience=100,
         full_cv=False,
         n_cv_folds=5,
         use_subject_intersection=False,
@@ -267,16 +230,6 @@ class EmbeddingClassifier:
             Output directory for results
         random_state : int
             Random state for reproducibility
-        n_epochs : int
-            Maximum training epochs for MLP
-        lr : float
-            Learning rate for MLP
-        batch_size : int
-            Training batch size for MLP
-        weight_decay : float
-            L2 regularisation strength for MLP
-        patience : int
-            Early stopping patience (epochs without val loss improvement)
         full_cv : bool
             If True, run 5-fold StratifiedGroupKFold cross-validation
         n_cv_folds : int
@@ -292,11 +245,6 @@ class EmbeddingClassifier:
         self.patient_labels_file = patient_labels_file
         self.output_dir = output_dir or "results/mlp_embedding"
         self.random_state = random_state
-        self.n_epochs = n_epochs
-        self.lr = lr
-        self.batch_size = batch_size
-        self.weight_decay = weight_decay
-        self.patience = patience
         self.full_cv = full_cv
         self.n_cv_folds = n_cv_folds
         self.use_subject_intersection = use_subject_intersection
@@ -307,8 +255,6 @@ class EmbeddingClassifier:
         self.pooled_embeddings_dir = op.join(self.output_dir, "pooled_embeddings")
 
         os.makedirs(self.output_dir, exist_ok=True)
-
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         # Data containers
         self.X = None
@@ -426,7 +372,11 @@ class EmbeddingClassifier:
 
         for _, row in df.iterrows():
             subject = row["subject"]
-            session = f"ses-{row['session']:02d}"
+            try:
+                session_num = int(row["session"])
+            except (TypeError, ValueError):
+                continue
+            session = f"ses-{session_num:02d}"
             state = row["diagnostic_crs_final"]
 
             if pd.isna(state) or state == "n/a":
@@ -448,7 +398,13 @@ class EmbeddingClassifier:
         return labels_dict, sorted(available_states)
 
     def load_patient_labels_for_target(
-        self, labels_file, target, binary_outcome=False, death_binary=False
+        self,
+        labels_file,
+        target,
+        binary_outcome=False,
+        death_binary=False,
+        vs_to_mcs=False,
+        mcs_to_conscious=False,
     ):
         """Load patient labels for a given prediction target.
 
@@ -458,13 +414,20 @@ class EmbeddingClassifier:
             Path to patient_labels.csv (must have subject, session columns
             plus target-specific columns).
         target : str
-            One of 'crs', 'etiology', 'cs_6m', 'cs_1y', 'cs_2y'.
+            One of 'crs', 'etiology', 'etiology_code', 'cs_6m', 'cs_1y',
+            'cs_2y'.
         binary_outcome : bool
             If True and target is an outcome score (cs_6m/cs_1y/cs_2y),
             collapse to binary VS vs MCS (excludes DEATH and CONSCIOUS).
         death_binary : bool
             If True and target is an outcome score, collapse to binary
             DEATH vs NON_DEATH (all subjects included).
+        vs_to_mcs : bool
+            If True and target is an outcome score, classify baseline-VS
+            subjects as IMPROVED (outcome MCS/CONSCIOUS) vs OTHER.
+        mcs_to_conscious : bool
+            If True and target is an outcome score, classify baseline-MCS
+            subjects as IMPROVED (outcome CONSCIOUS) vs OTHER.
 
         Returns
         -------
@@ -477,6 +440,8 @@ class EmbeddingClassifier:
         """
         print(f"Loading labels for target '{target}' from: {labels_file}", flush=True)
         df = pd.read_csv(labels_file)
+        # Drop rows where subject or session is missing
+        df = df.dropna(subset=["subject", "session"])
 
         labels_dict = {}
         available_states = set()
@@ -513,10 +478,27 @@ class EmbeddingClassifier:
                 available_states.add(label)
             is_binary = True
 
+        elif target == "etiology_code":
+            col = "etiology_code"
+            for _, row in df.iterrows():
+                subject = row["subject"]
+                session = f"ses-{int(row['session']):02d}"
+                val = row[col]
+                if pd.isna(val) or str(val).strip().lower() in ("n/a", ""):
+                    continue
+                label = str(val).strip().lower()
+                if label == "anoxia":
+                    label = "ANOXIA"
+                elif label == "tbi":
+                    label = "TBI"
+                else:
+                    continue  # skip all other etiology codes
+                key = f"{subject}_{session}"
+                labels_dict[key] = label
+                available_states.add(label)
+            is_binary = True
+
         elif target in ("cs_6m", "cs_1y", "cs_2y"):
-            # Multiclass (4 classes): VS/VS/MCS → VS, MCS+/MCS-/MCS → MCS,
-            #   CONSCIOUS → CONSCIOUS, DEATH → DEATH.
-            # Binary: keep only VS and MCS (exclude CONSCIOUS and DEATH).
             _VS_STATES = {"VS", "VS/MCS"}
             _MCS_STATES = {"MCS+", "MCS-", "MCS"}
             for _, row in df.iterrows():
@@ -526,7 +508,26 @@ class EmbeddingClassifier:
                 if pd.isna(val) or str(val).strip().lower() in ("n/a", ""):
                     continue
                 label = str(val).strip()
-                if death_binary:
+                if vs_to_mcs:
+                    baseline = row.get("diagnostic_crs_final", None)
+                    if pd.isna(baseline) or str(baseline).strip() != "UWS":
+                        continue  # only baseline VS subjects
+                    if label in _MCS_STATES or label == "CONSCIOUS":
+                        label = "IMPROVED"
+                    else:
+                        label = "OTHER"  # stayed VS or DEATH
+                elif mcs_to_conscious:
+                    baseline = row.get("diagnostic_crs_final", None)
+                    if pd.isna(baseline) or str(baseline).strip() not in (
+                        "MCS+",
+                        "MCS-",
+                    ):
+                        continue  # only baseline MCS subjects
+                    if label == "CONSCIOUS":
+                        label = "IMPROVED"
+                    else:
+                        label = "OTHER"  # stayed MCS, went to VS, or DEATH
+                elif death_binary:
                     if label == "DEATH":
                         label = "DEATH"
                     elif (
@@ -536,7 +537,7 @@ class EmbeddingClassifier:
                     ):
                         label = "NON_DEATH"
                     else:
-                        continue  # skip anything unrecognised
+                        continue
                 else:
                     if label in _VS_STATES:
                         label = "VS"
@@ -544,13 +545,13 @@ class EmbeddingClassifier:
                         label = "MCS"
                     elif label in ("CONSCIOUS", "DEATH"):
                         if binary_outcome:
-                            continue  # exclude from binary run
+                            continue
                     else:
-                        continue  # skip anything unrecognised
+                        continue
                 key = f"{subject}_{session}"
                 labels_dict[key] = label
                 available_states.add(label)
-            is_binary = binary_outcome or death_binary
+            is_binary = binary_outcome or death_binary or vs_to_mcs or mcs_to_conscious
 
         else:
             raise ValueError(f"Unknown target: {target!r}")
@@ -702,6 +703,8 @@ class EmbeddingClassifier:
         labels_file=None,
         binary_outcome=False,
         death_binary=False,
+        vs_to_mcs=False,
+        mcs_to_conscious=False,
     ):
         """Match embeddings with labels and build feature / label arrays.
 
@@ -734,7 +737,12 @@ class EmbeddingClassifier:
             lf = labels_file or self.patient_labels_file
             labels_dict, available_states, self.is_binary = (
                 self.load_patient_labels_for_target(
-                    lf, target, binary_outcome=binary_outcome, death_binary=death_binary
+                    lf,
+                    target,
+                    binary_outcome=binary_outcome,
+                    death_binary=death_binary,
+                    vs_to_mcs=vs_to_mcs,
+                    mcs_to_conscious=mcs_to_conscious,
                 )
             )
 
@@ -838,7 +846,7 @@ class EmbeddingClassifier:
             )
         reduction_str = REDUCTION_MAP[reduction_letter]
 
-        df = pd.read_csv(marker_csv, sep=";")
+        df = pd.read_csv(marker_csv, sep=",")
 
         # Filter to requested reduction
         df_filtered = df[df["Reduction"] == reduction_str].copy()
@@ -926,176 +934,60 @@ class EmbeddingClassifier:
         return X, Y, subjects_list, marker_names
 
     # ------------------------------------------------------------------
-    # MLP training
+    # MLP training (sklearn MLPClassifier)
     # ------------------------------------------------------------------
 
-    def _make_loader(self, X, y, shuffle=True, label_dtype=None):
-        if label_dtype is None:
-            label_dtype = torch.float32 if self.is_binary else torch.long
-        ds = TensorDataset(
-            torch.tensor(X, dtype=torch.float32),
-            torch.tensor(y, dtype=label_dtype),
-        )
-        return DataLoader(ds, batch_size=self.batch_size, shuffle=shuffle)
-
-    def _train_model(self, X_train, y_train, X_val, y_val, pos_weight, n_classes=1):
-        """Train an MLP with early stopping on validation loss.
-
-        Additionally tracks balanced error rate (1 - balanced accuracy)
-        on both train and val sets every epoch.
+    def _grid_search_mlp(self, X_train, y_train, groups_train):
+        """Inner GroupKFold grid search for sklearn MLPClassifier.
 
         Returns
         -------
-        model : EmbeddingMLP
-        train_losses : list of float
-        val_losses : list of float
-        train_errors : list of float
-        val_errors : list of float
+        model : Pipeline (StandardScaler + MLPClassifier)
+            Best model refitted on full X_train.
+        best_params : dict
         """
-        input_dim = X_train.shape[1]
-        model = EmbeddingMLP(input_dim, n_classes=n_classes).to(self.device)
-
-        if n_classes == 1:
-            criterion = nn.BCEWithLogitsLoss(
-                pos_weight=torch.tensor([pos_weight], device=self.device)
-            )
-            train_loader = self._make_loader(
-                X_train, y_train, shuffle=True, label_dtype=torch.float32
-            )
-            val_loader = self._make_loader(
-                X_val, y_val, shuffle=False, label_dtype=torch.float32
-            )
-        else:
-            classes = np.arange(n_classes)
-            cw = compute_class_weight("balanced", classes=classes, y=y_train)
-            cw_tensor = torch.tensor(cw, dtype=torch.float32, device=self.device)
-            criterion = nn.CrossEntropyLoss(weight=cw_tensor)
-            train_loader = self._make_loader(
-                X_train, y_train, shuffle=True, label_dtype=torch.long
-            )
-            val_loader = self._make_loader(
-                X_val, y_val, shuffle=False, label_dtype=torch.long
-            )
-
-        optimizer = optim.Adam(
-            model.parameters(), lr=self.lr, weight_decay=self.weight_decay
+        n_unique = len(np.unique(groups_train))
+        inner_cv = GroupKFold(n_splits=min(3, n_unique))
+        pipe = Pipeline(
+            [
+                ("scaler", StandardScaler()),
+                (
+                    "mlp",
+                    MLPClassifier(
+                        max_iter=500,
+                        early_stopping=True,
+                        random_state=self.random_state,
+                    ),
+                ),
+            ]
         )
+        param_grid = {
+            "mlp__hidden_layer_sizes": [(64,), (128,), (64, 32)],
+            "mlp__alpha": [1e-4, 1e-3, 1e-2],
+            "mlp__learning_rate_init": [1e-3, 1e-2],
+        }
+        gs = GridSearchCV(
+            pipe,
+            param_grid,
+            cv=inner_cv,
+            scoring="balanced_accuracy",
+            n_jobs=-1,
+            refit=True,
+        )
+        gs.fit(X_train, y_train, groups=groups_train)
+        print(f"      MLP best params: {gs.best_params_}", flush=True)
+        return gs.best_estimator_, gs.best_params_
 
-        best_val_loss = float("inf")
-        best_state = None
-        epochs_no_improve = 0
+    def _predict_mlp(self, model, X_test):
+        """Return (probabilities, predicted_labels) for sklearn MLP.
 
-        train_losses, val_losses = [], []
-        train_errors, val_errors = [], []
-
-        for epoch in range(self.n_epochs):
-            # --- train ---
-            model.train()
-            epoch_loss = 0.0
-            n_batches = 0
-            all_train_preds, all_train_labels = [], []
-
-            for xb, yb in train_loader:
-                xb, yb = xb.to(self.device), yb.to(self.device)
-                optimizer.zero_grad()
-                logits = model(xb)
-                loss = criterion(logits, yb)
-                loss.backward()
-                optimizer.step()
-                epoch_loss += loss.item()
-                n_batches += 1
-
-                if n_classes == 1:
-                    preds = (torch.sigmoid(logits) >= 0.5).long().cpu().numpy()
-                else:
-                    preds = logits.argmax(dim=-1).cpu().numpy()
-                all_train_preds.append(preds)
-                all_train_labels.append(yb.cpu().numpy().astype(int))
-
-            train_losses.append(epoch_loss / max(n_batches, 1))
-            train_preds = np.concatenate(all_train_preds)
-            train_labels = np.concatenate(all_train_labels)
-            train_errors.append(
-                1.0 - balanced_accuracy_score(train_labels, train_preds)
-            )
-
-            # --- validate ---
-            model.eval()
-            val_loss = 0.0
-            n_val = 0
-            all_val_preds, all_val_labels = [], []
-
-            with torch.no_grad():
-                for xb, yb in val_loader:
-                    xb, yb = xb.to(self.device), yb.to(self.device)
-                    logits = model(xb)
-                    val_loss += criterion(logits, yb).item()
-                    n_val += 1
-
-                    if n_classes == 1:
-                        preds = (torch.sigmoid(logits) >= 0.5).long().cpu().numpy()
-                    else:
-                        preds = logits.argmax(dim=-1).cpu().numpy()
-                    all_val_preds.append(preds)
-                    all_val_labels.append(yb.cpu().numpy().astype(int))
-
-            val_losses.append(val_loss / max(n_val, 1))
-            val_preds = np.concatenate(all_val_preds)
-            val_labels = np.concatenate(all_val_labels)
-            val_errors.append(1.0 - balanced_accuracy_score(val_labels, val_preds))
-
-            # --- epoch log ---
-            if (epoch + 1) % 10 == 0 or epoch == 0:
-                print(
-                    f"      Epoch {epoch + 1:>3d}/{self.n_epochs}  "
-                    f"train_loss={train_losses[-1]:.4f}  "
-                    f"val_loss={val_losses[-1]:.4f}  "
-                    f"train_err={train_errors[-1]:.4f}  "
-                    f"val_err={val_errors[-1]:.4f}",
-                    flush=True,
-                )
-
-            # --- early stopping ---
-            if val_losses[-1] < best_val_loss:
-                best_val_loss = val_losses[-1]
-                best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
-                epochs_no_improve = 0
-            else:
-                epochs_no_improve += 1
-                if epochs_no_improve >= self.patience:
-                    break
-
-        if best_state is not None:
-            model.load_state_dict(best_state)
-        model.eval()
-        return model, train_losses, val_losses, train_errors, val_errors
-
-    @torch.no_grad()
-    def _predict(self, model, X):
-        """Return (probabilities, predicted_labels) for MLP model.
-
-        For binary (n_classes==1): returns 1-D prob array (sigmoid).
-        For multiclass: returns 2-D prob array (softmax) and argmax preds.
+        For binary: returns 1-D prob array (positive class).
+        For multiclass: returns 2-D prob array and argmax preds.
         """
-        model.eval()
-        loader = self._make_loader(
-            X, np.zeros(len(X)), shuffle=False, label_dtype=torch.float32
-        )
-        all_probs = []
-        for xb, _ in loader:
-            xb = xb.to(self.device)
-            logits = model(xb)
-            if model.n_classes == 1:
-                probs = torch.sigmoid(logits).cpu().numpy()
-            else:
-                probs = torch.softmax(logits, dim=-1).cpu().numpy()
-            all_probs.append(probs)
-        probs = np.concatenate(all_probs)
-        if model.n_classes == 1:
-            preds = (probs >= 0.5).astype(int)
-        else:
-            preds = np.argmax(probs, axis=1)
-        return probs, preds
+        probs = model.predict_proba(X_test)
+        if self.is_binary:
+            return probs[:, 1], model.predict(X_test)
+        return probs, np.argmax(probs, axis=1)
 
     # ------------------------------------------------------------------
     # Sklearn model training (RF, KR)
@@ -1118,7 +1010,7 @@ class EmbeddingClassifier:
         inner_cv = GroupKFold(n_splits=3)
 
         best_score = -1
-        best_params = {}
+        best_params = {"n_estimators": 100, "max_depth": None}
 
         for n_est, max_d in product(
             param_grid["n_estimators"], param_grid["max_depth"]
@@ -1133,8 +1025,9 @@ class EmbeddingClassifier:
                     n_jobs=-1,
                 )
                 rf.fit(X_train[tr_idx], y_train[tr_idx])
+                proba = rf.predict_proba(X_train[va_idx])[:, 1]
                 preds = rf.predict(X_train[va_idx])
-                scores.append(balanced_accuracy_score(y_train[va_idx], preds))
+                scores.append(_safe_auc_score(y_train[va_idx], proba, preds))
 
             mean_score = np.mean(scores)
             if mean_score > best_score:
@@ -1142,7 +1035,7 @@ class EmbeddingClassifier:
                 best_params = {"n_estimators": n_est, "max_depth": max_d}
 
         print(
-            f"      RF best params: {best_params} (bal_acc={best_score:.3f})",
+            f"      RF best params: {best_params} (auc={best_score:.3f})",
             flush=True,
         )
 
@@ -1184,7 +1077,7 @@ class EmbeddingClassifier:
             y_onehot = None
 
         best_score = -1
-        best_params = {}
+        best_params = {"alpha": 1.0, "gamma": 0.01}
 
         for alpha, gamma in product(param_grid["alpha"], param_grid["gamma"]):
             scores = []
@@ -1193,12 +1086,14 @@ class EmbeddingClassifier:
                 if self.is_binary:
                     kr.fit(X_train[tr_idx], y_train[tr_idx])
                     raw = kr.decision_function(X_train[va_idx])
-                    preds = (np.clip(raw, 0, 1) >= 0.5).astype(int)
+                    pseudo_proba = np.clip(raw, 0, 1)
+                    preds = (pseudo_proba >= 0.5).astype(int)
+                    scores.append(_safe_auc_score(y_train[va_idx], pseudo_proba, preds))
                 else:
                     kr.fit(X_train[tr_idx], y_onehot[tr_idx])
                     raw = kr.predict(X_train[va_idx])
                     preds = np.argmax(raw, axis=1)
-                scores.append(balanced_accuracy_score(y_train[va_idx], preds))
+                    scores.append(balanced_accuracy_score(y_train[va_idx], preds))
 
             mean_score = np.mean(scores)
             if mean_score > best_score:
@@ -1206,7 +1101,7 @@ class EmbeddingClassifier:
                 best_params = {"alpha": alpha, "gamma": gamma}
 
         print(
-            f"      KR best params: {best_params} (bal_acc={best_score:.3f})",
+            f"      KR best params: {best_params} (auc={best_score:.3f})",
             flush=True,
         )
 
@@ -1655,11 +1550,12 @@ class EmbeddingClassifier:
     def run_classification(
         self,
         test_size=0.2,
-        val_size=0.2,
         target="crs",
         labels_file=None,
         binary_outcome=False,
         death_binary=False,
+        vs_to_mcs=False,
+        mcs_to_conscious=False,
     ):
         """Run classification with all 3 models on the same train/test split.
 
@@ -1667,16 +1563,19 @@ class EmbeddingClassifier:
         -----
         1. Collect data (embeddings + labels)
         2. Outer split: GroupShuffleSplit -> trainval / test (shared)
-        3. Inner split: GroupShuffleSplit -> train / val (shared)
-        4. Train all 3 models on the same splits
-        5. Evaluate each on held-out test set
-        6. Save results + plots per model
+        3. Train all 3 models (inner grid search) on trainval
+        4. Evaluate each on held-out test set
+        5. Save results + plots per model
         """
         mode_tag = f" [{target}"
         if death_binary:
             mode_tag += "  binary_death"
         elif binary_outcome:
             mode_tag += "  binary"
+        elif vs_to_mcs:
+            mode_tag += "  binary_vs_to_mcs"
+        elif mcs_to_conscious:
+            mode_tag += "  binary_mcs_to_conscious"
         mode_tag += "]"
         print("=" * 80, flush=True)
         print(f"EMBEDDING CLASSIFICATION{mode_tag} — 3 MODELS", flush=True)
@@ -1684,14 +1583,8 @@ class EmbeddingClassifier:
         print(f"Data directory: {self.data_dir}", flush=True)
         print(f"Labels file: {labels_file or self.patient_labels_file}", flush=True)
         print(f"Output directory: {self.output_dir}", flush=True)
-        print(f"Device: {self.device}", flush=True)
-        print(
-            f"MLP epochs: {self.n_epochs}, LR: {self.lr}, Batch: {self.batch_size}",
-            flush=True,
-        )
         print(flush=True)
 
-        torch.manual_seed(self.random_state)
         np.random.seed(self.random_state)
 
         # 1. Collect data
@@ -1700,6 +1593,8 @@ class EmbeddingClassifier:
             labels_file=labels_file,
             binary_outcome=binary_outcome,
             death_binary=death_binary,
+            vs_to_mcs=vs_to_mcs,
+            mcs_to_conscious=mcs_to_conscious,
         )
 
         # 2. Subject groups (prevent leakage)
@@ -1720,45 +1615,17 @@ class EmbeddingClassifier:
         y_trainval, y_test = y[trainval_idx], y[test_idx]
         groups_trainval = groups[trainval_idx]
         subjects_test = [subjects[i] for i in test_idx]
+        subjects_trainval = [subjects[i] for i in trainval_idx]
 
-        # 4. Inner split: train / val (shared across all models)
-        gss_inner = GroupShuffleSplit(
-            n_splits=1, test_size=val_size, random_state=self.random_state
-        )
-        train_idx_inner, val_idx_inner = next(
-            gss_inner.split(X_trainval, y_trainval, groups=groups_trainval)
-        )
-
-        X_train = X_trainval[train_idx_inner]
-        y_train = y_trainval[train_idx_inner]
-        X_val = X_trainval[val_idx_inner]
-        y_val = y_trainval[val_idx_inner]
-        groups_train = groups_trainval[train_idx_inner]
-        groups_val = groups_trainval[val_idx_inner]
-
-        subjects_train = [subjects[trainval_idx[i]] for i in train_idx_inner]
-        subjects_val = [subjects[trainval_idx[i]] for i in val_idx_inner]
-
-        # Verify no subject leakage across any pair of splits
-        train_groups_set = set(groups_train)
-        val_groups_set = set(groups_val)
+        train_groups_set = set(groups_trainval)
         test_groups_set = set(groups[test_idx])
-
-        if train_groups_set & val_groups_set:
-            raise ValueError(f"Train/val leakage: {train_groups_set & val_groups_set}")
         if train_groups_set & test_groups_set:
             raise ValueError(
                 f"Train/test leakage: {train_groups_set & test_groups_set}"
             )
-        if val_groups_set & test_groups_set:
-            raise ValueError(f"Val/test leakage: {val_groups_set & test_groups_set}")
 
         print(
-            f"   Train: {len(X_train)} sessions ({len(train_groups_set)} subjects)",
-            flush=True,
-        )
-        print(
-            f"   Val:   {len(X_val)} sessions ({len(val_groups_set)} subjects)",
+            f"   Train: {len(X_trainval)} sessions ({len(train_groups_set)} subjects)",
             flush=True,
         )
         print(
@@ -1766,21 +1633,10 @@ class EmbeddingClassifier:
             flush=True,
         )
 
-        # Class balance info
-        for name, y_split in [("Train", y_train), ("Val", y_val), ("Test", y_test)]:
+        for name, y_split in [("Train", y_trainval), ("Test", y_test)]:
             u, c = np.unique(y_split, return_counts=True)
             dist = ", ".join(f"{self.class_names[ci]}: {n}" for ci, n in zip(u, c))
             print(f"   {name} class distribution: {dist}", flush=True)
-
-        # pos_weight for BCEWithLogitsLoss (binary only)
-        if self.is_binary:
-            n_pos = (y_train == 1).sum()
-            n_neg = (y_train == 0).sum()
-            pos_weight = n_neg / max(n_pos, 1)
-            print(f"   pos_weight (class balance): {pos_weight:.3f}", flush=True)
-        else:
-            pos_weight = 1.0  # ignored for multiclass (CrossEntropyLoss uses weights)
-        n_classes_mlp = 1 if self.is_binary else len(self.class_names)
 
         all_results = {}
 
@@ -1789,38 +1645,21 @@ class EmbeddingClassifier:
         os.makedirs(split_dir, exist_ok=True)
 
         # ---- MLP ----
-        print(
-            f"\n   Training MLP (max {self.n_epochs} epochs, "
-            f"patience {self.patience}) ...",
-            flush=True,
+        print("\n   Training MLP (grid search) ...", flush=True)
+        mlp_model, mlp_best_params = self._grid_search_mlp(
+            X_trainval, y_trainval, groups_trainval
         )
-        mlp_model, train_losses, val_losses, train_errors, val_errors = (
-            self._train_model(
-                X_train, y_train, X_val, y_val, pos_weight, n_classes=n_classes_mlp
-            )
-        )
-        n_trained_epochs = len(train_losses)
-        print(f"   MLP training stopped after {n_trained_epochs} epochs", flush=True)
-
-        val_probs, val_preds = self._predict(mlp_model, X_val)
-        val_bal_acc = balanced_accuracy_score(y_val, val_preds)
-        print(f"   MLP val balanced accuracy: {val_bal_acc:.3f}", flush=True)
-
-        test_probs, test_preds = self._predict(mlp_model, X_test)
+        mlp_probs, mlp_preds = self._predict_mlp(mlp_model, X_test)
         mlp_results = self._compute_test_metrics(
-            y_test, test_preds, test_probs, subjects_test
+            y_test, mlp_preds, mlp_probs, subjects_test
         )
         mlp_results.update(
             {
-                "val_balanced_accuracy": float(val_bal_acc),
-                "val_accuracy": float(accuracy_score(y_val, val_preds)),
-                "n_train": len(X_train),
-                "n_val": len(X_val),
+                "n_train": len(X_trainval),
                 "n_test": len(X_test),
                 "n_features": int(X.shape[1]),
-                "training_epochs": n_trained_epochs,
-                "subjects_train": subjects_train,
-                "subjects_val": subjects_val,
+                "best_params": mlp_best_params,
+                "subjects_train": subjects_trainval,
             }
         )
 
@@ -1831,10 +1670,10 @@ class EmbeddingClassifier:
             mlp_results,
             "MLP",
             mlp_dir,
-            train_losses=train_losses,
-            val_losses=val_losses,
-            train_errors=train_errors,
-            val_errors=val_errors,
+            best_params=mlp_best_params,
+            n_samples=len(X_trainval),
+            n_features=X.shape[1],
+            class_balance=dict(zip(*np.unique(y_trainval, return_counts=True))),
         )
         all_results["mlp"] = mlp_results
 
@@ -1853,7 +1692,7 @@ class EmbeddingClassifier:
                 "n_test": len(X_test),
                 "n_features": int(X.shape[1]),
                 "best_params": rf_best_params,
-                "subjects_train": subjects_train + subjects_val,
+                "subjects_train": subjects_trainval,
             }
         )
 
@@ -1888,7 +1727,7 @@ class EmbeddingClassifier:
                 "n_test": len(X_test),
                 "n_features": int(X.shape[1]),
                 "best_params": kr_best_params,
-                "subjects_train": subjects_train + subjects_val,
+                "subjects_train": subjects_trainval,
             }
         )
 
@@ -1952,16 +1791,13 @@ class EmbeddingClassifier:
         labels_file=None,
         binary_outcome=False,
         death_binary=False,
+        vs_to_mcs=False,
+        mcs_to_conscious=False,
     ):
-        """Run 5-fold StratifiedGroupKFold CV with all 3 models.
+        """Run N-fold StratifiedGroupKFold CV with all 3 models.
 
-        For each fold:
-        - MLP: inner GroupShuffleSplit for train/val, early stopping.
-          Per-fold training curves (loss + balanced error) are collected
-          and overlaid on the final MLP plot.
-        - RF: inner 3-fold GroupKFold grid search, refit on full train fold
-        - KR: inner 3-fold GroupKFold grid search, refit on full train fold
-        All predict on the same held-out fold.
+        For each fold all models use inner GroupKFold grid search and
+        predict on the same held-out fold.
         """
         n_folds = self.n_cv_folds
         mode_tag = f" [{target}"
@@ -1969,6 +1805,10 @@ class EmbeddingClassifier:
             mode_tag += "  binary_death"
         elif binary_outcome:
             mode_tag += "  binary"
+        elif vs_to_mcs:
+            mode_tag += "  binary_vs_to_mcs"
+        elif mcs_to_conscious:
+            mode_tag += "  binary_mcs_to_conscious"
         mode_tag += "]"
 
         print("=" * 80, flush=True)
@@ -1981,7 +1821,6 @@ class EmbeddingClassifier:
         print(f"Output directory: {self.output_dir}", flush=True)
         print(flush=True)
 
-        torch.manual_seed(self.random_state)
         np.random.seed(self.random_state)
 
         # 1. Collect data
@@ -1990,6 +1829,8 @@ class EmbeddingClassifier:
             labels_file=labels_file,
             binary_outcome=binary_outcome,
             death_binary=death_binary,
+            vs_to_mcs=vs_to_mcs,
+            mcs_to_conscious=mcs_to_conscious,
         )
 
         # Subject groups
@@ -2017,9 +1858,6 @@ class EmbeddingClassifier:
             mk: {"y_true": [], "y_pred": [], "y_proba": [], "subjects": []}
             for mk in MODEL_CONFIGS
         }
-
-        # Per-fold MLP training curves for overlay plot
-        mlp_fold_curves = []  # list of (train_losses, val_losses, train_errors, val_errors)
 
         for fold_idx, (train_idx, test_idx) in enumerate(
             sgkf.split(X, y, groups=groups)
@@ -2051,52 +1889,18 @@ class EmbeddingClassifier:
                 flush=True,
             )
 
-            # ---- MLP: inner split for val ----
+            # ---- MLP ----
             print("   Training MLP ...", flush=True)
-            gss_val = GroupShuffleSplit(
-                n_splits=1, test_size=0.2, random_state=self.random_state + fold_idx
+            mlp_model, _ = self._grid_search_mlp(
+                X_train_fold, y_train_fold, groups_train_fold
             )
-            tr_inner, va_inner = next(
-                gss_val.split(X_train_fold, y_train_fold, groups=groups_train_fold)
-            )
-
-            X_tr = X_train_fold[tr_inner]
-            y_tr = y_train_fold[tr_inner]
-            X_va = X_train_fold[va_inner]
-            y_va = y_train_fold[va_inner]
-
-            if self.is_binary:
-                n_pos = (y_tr == 1).sum()
-                n_neg = (y_tr == 0).sum()
-                pos_weight = n_neg / max(n_pos, 1)
-            else:
-                pos_weight = 1.0
-            n_classes_mlp = 1 if self.is_binary else len(self.class_names)
-
-            mlp_model, train_losses, val_losses, train_errors, val_errors = (
-                self._train_model(
-                    X_tr, y_tr, X_va, y_va, pos_weight, n_classes=n_classes_mlp
-                )
-            )
-            mlp_fold_curves.append((train_losses, val_losses, train_errors, val_errors))
-            # Save per-fold MLP model for later SHAP analysis
             mlp_fold_dir = op.join(self.output_dir, "nested_cv", "mlp")
             os.makedirs(mlp_fold_dir, exist_ok=True)
-            torch.save(
-                mlp_model.state_dict(),
-                op.join(mlp_fold_dir, f"fold_{fold_idx:02d}_model.pt"),
+            joblib.dump(
+                mlp_model,
+                op.join(mlp_fold_dir, f"fold_{fold_idx:02d}_model.joblib"),
             )
-            with open(
-                op.join(mlp_fold_dir, f"fold_{fold_idx:02d}_config.json"), "w"
-            ) as f:
-                json.dump(
-                    {
-                        "input_dim": int(X.shape[1]),
-                        "n_classes": int(n_classes_mlp),
-                    },
-                    f,
-                )
-            mlp_probs, mlp_preds = self._predict(mlp_model, X_test_fold)
+            mlp_probs, mlp_preds = self._predict_mlp(mlp_model, X_test_fold)
             accum["mlp"]["y_true"].append(y_test_fold)
             accum["mlp"]["y_pred"].append(mlp_preds)
             accum["mlp"]["y_proba"].append(mlp_probs)
@@ -2110,7 +1914,6 @@ class EmbeddingClassifier:
             rf_model, _ = self._grid_search_rf(
                 X_train_fold, y_train_fold, groups_train_fold
             )
-            # Save per-fold RF model
             rf_fold_dir = op.join(self.output_dir, "nested_cv", "random_forest")
             os.makedirs(rf_fold_dir, exist_ok=True)
             joblib.dump(
@@ -2131,7 +1934,6 @@ class EmbeddingClassifier:
             kr_model, _ = self._grid_search_kr(
                 X_train_fold, y_train_fold, groups_train_fold
             )
-            # Save per-fold KR model
             kr_fold_dir = op.join(self.output_dir, "nested_cv", "kernel_ridge")
             os.makedirs(kr_fold_dir, exist_ok=True)
             joblib.dump(
@@ -2186,17 +1988,7 @@ class EmbeddingClassifier:
             model_dir = op.join(cv_dir, model_key)
             os.makedirs(model_dir, exist_ok=True)
             self._save_results(results, model_dir, model=None, model_type=model_key)
-
-            # MLP gets per-fold training curves overlay
-            if model_key == "mlp":
-                self._plot_results(
-                    results,
-                    cfg["name"],
-                    model_dir,
-                    fold_curves=mlp_fold_curves,
-                )
-            else:
-                self._plot_results(results, cfg["name"], model_dir)
+            self._plot_results(results, cfg["name"], model_dir)
             self._plot_macro_vs_micro(results, cfg["name"], model_dir)
 
             micro_auc_str = (
@@ -2449,28 +2241,27 @@ class EmbeddingClassifier:
     # Full metric prediction (5 targets)
     # ------------------------------------------------------------------
 
-    def run_full_metric_prediction(
-        self, patient_labels_full, test_size=0.2, val_size=0.2
-    ):
-        """Run MLP+RF+KR classification for 5 prediction targets.
+    def run_full_metric_prediction(self, patient_labels_full, test_size=0.2):
+        """Run MLP+RF+KR classification for all prediction targets.
 
-        Targets: crs, etiology, cs_6m, cs_1y, cs_2y.
+        Targets: crs, etiology, etiology_code, cs_6m, cs_1y, cs_2y.
 
-        For crs and etiology results land under {output_dir}/{target}/.
-        For outcome targets (cs_6m, cs_1y, cs_2y) three runs are performed:
-          - {output_dir}/{target}/multiclass/    — 4-class (VS, MCS, CONSCIOUS, DEATH)
-          - {output_dir}/{target}/binary/        — VS vs MCS only
-          - {output_dir}/{target}/binary_death/  — DEATH vs NON_DEATH
+        For crs, etiology, etiology_code results land under {output_dir}/{target}/.
+        For outcome targets (cs_6m, cs_1y, cs_2y) five runs are performed:
+          - {output_dir}/{target}/multiclass/              — 4-class
+          - {output_dir}/{target}/binary/                  — VS vs MCS only
+          - {output_dir}/{target}/binary_death/            — DEATH vs NON_DEATH
+          - {output_dir}/{target}/binary_vs_to_mcs/        — IMPROVED vs OTHER (baseline VS)
+          - {output_dir}/{target}/binary_mcs_to_conscious/ — IMPROVED vs OTHER (baseline MCS)
 
         Parameters
         ----------
         patient_labels_full : str
             Path to patient_labels.csv with all target columns.
         test_size : float
-        val_size : float
         """
         _OUTCOME_TARGETS = {"cs_6m", "cs_1y", "cs_2y"}
-        targets = ["crs", "etiology", "cs_6m", "cs_1y", "cs_2y"]
+        targets = ["crs", "etiology", "etiology_code", "cs_6m", "cs_1y", "cs_2y"]
         base_output_dir = self.output_dir
 
         for target in targets:
@@ -2479,15 +2270,24 @@ class EmbeddingClassifier:
             print(f"{'=' * 80}", flush=True)
 
             if target in _OUTCOME_TARGETS:
+                # (mode_name, binary_outcome, death_binary, vs_to_mcs, mcs_to_conscious)
                 modes = [
-                    ("multiclass", False, False),
-                    ("binary", True, False),
-                    ("binary_death", False, True),
+                    ("multiclass", False, False, False, False),
+                    ("binary", True, False, False, False),
+                    ("binary_death", False, True, False, False),
+                    ("binary_vs_to_mcs", False, False, True, False),
+                    ("binary_mcs_to_conscious", False, False, False, True),
                 ]
             else:
-                modes = [("", False, False)]  # single run, no subfolder
+                modes = [("", False, False, False, False)]
 
-            for mode, binary_outcome, death_binary in modes:
+            for (
+                mode,
+                binary_outcome,
+                death_binary,
+                vs_to_mcs,
+                mcs_to_conscious,
+            ) in modes:
                 if mode:
                     print(f"\n--- {target} / {mode} ---", flush=True)
                     self.output_dir = op.join(base_output_dir, target, mode)
@@ -2502,15 +2302,18 @@ class EmbeddingClassifier:
                             labels_file=patient_labels_full,
                             binary_outcome=binary_outcome,
                             death_binary=death_binary,
+                            vs_to_mcs=vs_to_mcs,
+                            mcs_to_conscious=mcs_to_conscious,
                         )
                     else:
                         self.run_classification(
                             test_size,
-                            val_size,
                             target=target,
                             labels_file=patient_labels_full,
                             binary_outcome=binary_outcome,
                             death_binary=death_binary,
+                            vs_to_mcs=vs_to_mcs,
+                            mcs_to_conscious=mcs_to_conscious,
                         )
                 except ValueError as e:
                     label = f"'{target}'" + (f" ({mode})" if mode else "")
@@ -2531,22 +2334,8 @@ class EmbeddingClassifier:
 
         # Save model (single-split only, not in full CV)
         if model is not None:
-            if model_type == "mlp":
-                model_file = op.join(output_dir, "trained_model.pt")
-                torch.save(model.state_dict(), model_file)
-                # Save architecture config for later reconstruction (e.g. SHAP loading)
-                config_file = op.join(output_dir, "model_config.json")
-                with open(config_file, "w") as f:
-                    json.dump(
-                        {
-                            "input_dim": int(model.net[0].in_features),
-                            "n_classes": int(model.n_classes),
-                        },
-                        f,
-                    )
-            else:
-                model_file = op.join(output_dir, "trained_model.joblib")
-                joblib.dump(model, model_file)
+            model_file = op.join(output_dir, "trained_model.joblib")
+            joblib.dump(model, model_file)
 
         # Subject predictions CSV
         pred_labels = [self.class_names[p] for p in results["y_test_pred"]]
@@ -2568,36 +2357,17 @@ class EmbeddingClassifier:
         results,
         model_display_name,
         output_dir,
-        train_losses=None,
-        val_losses=None,
-        train_errors=None,
-        val_errors=None,
-        fold_curves=None,
         best_params=None,
         n_samples=None,
         n_features=None,
         class_balance=None,
     ):
-        """Generate a 2x2 figure: loss/info, confusion matrix, error/info, ROC.
-
-        Parameters
-        ----------
-        fold_curves : list of tuples, optional
-            Per-fold MLP curves for nested CV overlay. Each element is
-            ``(train_losses, val_losses, train_errors, val_errors)``.
-            When provided, all folds are overlaid on the loss and error
-            axes with low opacity (one color per role: blue=train,
-            orange=val), so fold-to-fold variability is visible.
-        """
+        """Generate a 2x2 figure: info, confusion matrix, dataset info, ROC."""
         fig, axes = plt.subplots(2, 2, figsize=(14, 11))
 
         n_test = len(results["y_test_true"])
         n_train = results.get("n_train", results.get("n_samples", "?"))
-        n_val = results.get("n_val", "")
-        subtitle_parts = [f"Train: {n_train}"]
-        if n_val:
-            subtitle_parts.append(f"Val: {n_val}")
-        subtitle_parts.append(f"Test: {n_test}")
+        subtitle_parts = [f"Train: {n_train}", f"Test: {n_test}"]
 
         cv_tag = ""
         if results.get("full_cv"):
@@ -2609,68 +2379,27 @@ class EmbeddingClassifier:
             fontsize=16,
         )
 
-        # Determine which curve mode we're in
-        has_single_curves = train_losses is not None and val_losses is not None
-        has_fold_curves = fold_curves is not None and len(fold_curves) > 0
-
-        loss_label = "BCEWithLogitsLoss" if self.is_binary else "CrossEntropyLoss"
-
-        # --- (0, 0) Training & validation loss ---
+        # --- (0, 0) Model info ---
         ax = axes[0, 0]
-        if has_fold_curves:
-            n_fc = len(fold_curves)
-            for fi, (tl, vl, _, _) in enumerate(fold_curves):
-                epochs_x = np.arange(len(tl))
-                ax.plot(
-                    epochs_x,
-                    tl,
-                    color="tab:blue",
-                    lw=1.2,
-                    alpha=0.35,
-                    label="Train" if fi == 0 else None,
-                )
-                ax.plot(
-                    epochs_x,
-                    vl,
-                    color="tab:orange",
-                    lw=1.2,
-                    alpha=0.35,
-                    label="Val" if fi == 0 else None,
-                )
-            ax.set_xlabel("Epoch")
-            ax.set_ylabel(f"Loss ({loss_label})")
-            ax.set_title(f"Training & Validation Loss ({n_fc} folds overlaid)")
-            ax.legend(loc="upper right", framealpha=0.9)
-            ax.grid(True, alpha=0.3)
-        elif has_single_curves:
-            epochs_x = np.arange(len(train_losses))
-            ax.plot(epochs_x, train_losses, color="tab:blue", lw=2, label="Train")
-            ax.plot(epochs_x, val_losses, color="tab:orange", lw=2, label="Val")
-            ax.set_xlabel("Epoch")
-            ax.set_ylabel(f"Loss ({loss_label})")
-            ax.set_title("Training & Validation Loss")
-            ax.legend(loc="upper right", framealpha=0.9)
-            ax.grid(True, alpha=0.3)
-        else:
-            ax.axis("off")
-            info_lines = [f"{model_display_name} Model Info"]
-            if best_params:
-                info_lines.append("")
-                info_lines.append("Best hyperparameters:")
-                for k, v in best_params.items():
-                    info_lines.append(f"  {k} = {v}")
-            ax.text(
-                0.5,
-                0.5,
-                "\n".join(info_lines),
-                ha="center",
-                va="center",
-                transform=ax.transAxes,
-                fontsize=13,
-                family="monospace",
-                bbox=dict(boxstyle="round", facecolor="lightyellow", alpha=0.8),
-            )
-            ax.set_title("Model Configuration")
+        ax.axis("off")
+        info_lines = [f"{model_display_name} Model Info"]
+        if best_params:
+            info_lines.append("")
+            info_lines.append("Best hyperparameters:")
+            for k, v in best_params.items():
+                info_lines.append(f"  {k} = {v}")
+        ax.text(
+            0.5,
+            0.5,
+            "\n".join(info_lines),
+            ha="center",
+            va="center",
+            transform=ax.transAxes,
+            fontsize=13,
+            family="monospace",
+            bbox=dict(boxstyle="round", facecolor="lightyellow", alpha=0.8),
+        )
+        ax.set_title("Model Configuration")
 
         # --- (0, 1) Confusion matrix ---
         ax = axes[0, 1]
@@ -2698,70 +2427,35 @@ class EmbeddingClassifier:
         ax.set_ylabel("True")
         ax.set_title("Confusion Matrix (Test Set)")
 
-        # --- (1, 0) Balanced error rate ---
+        # --- (1, 0) Dataset info ---
         ax = axes[1, 0]
-        if has_fold_curves:
-            n_fc = len(fold_curves)
-            for fi, (_, _, te, ve) in enumerate(fold_curves):
-                epochs_x = np.arange(len(te))
-                ax.plot(
-                    epochs_x,
-                    te,
-                    color="tab:blue",
-                    lw=1.2,
-                    alpha=0.35,
-                    label="Train" if fi == 0 else None,
+        ax.axis("off")
+        info_lines = ["Dataset Summary"]
+        if n_samples is not None:
+            info_lines.append(f"  Training samples: {n_samples}")
+        if n_features is not None:
+            info_lines.append(f"  Features: {n_features}")
+        if class_balance:
+            info_lines.append("  Class balance (train):")
+            for cls_idx, cnt in class_balance.items():
+                cls_name = (
+                    self.class_names[cls_idx]
+                    if cls_idx < len(self.class_names)
+                    else str(cls_idx)
                 )
-                ax.plot(
-                    epochs_x,
-                    ve,
-                    color="tab:orange",
-                    lw=1.2,
-                    alpha=0.35,
-                    label="Val" if fi == 0 else None,
-                )
-            ax.set_xlabel("Epoch")
-            ax.set_ylabel("Balanced Error Rate (1 - Bal. Acc.)")
-            ax.set_title(f"Training & Validation Error ({n_fc} folds overlaid)")
-            ax.legend(loc="upper right", framealpha=0.9)
-            ax.grid(True, alpha=0.3)
-        elif has_single_curves:
-            epochs_x = np.arange(len(train_errors))
-            ax.plot(epochs_x, train_errors, color="tab:blue", lw=2, label="Train")
-            ax.plot(epochs_x, val_errors, color="tab:orange", lw=2, label="Val")
-            ax.set_xlabel("Epoch")
-            ax.set_ylabel("Balanced Error Rate (1 - Bal. Acc.)")
-            ax.set_title("Training & Validation Error")
-            ax.legend(loc="upper right", framealpha=0.9)
-            ax.grid(True, alpha=0.3)
-        else:
-            ax.axis("off")
-            info_lines = ["Dataset Summary"]
-            if n_samples is not None:
-                info_lines.append(f"  Training samples: {n_samples}")
-            if n_features is not None:
-                info_lines.append(f"  Features: {n_features}")
-            if class_balance:
-                info_lines.append("  Class balance (train):")
-                for cls_idx, cnt in class_balance.items():
-                    cls_name = (
-                        self.class_names[cls_idx]
-                        if cls_idx < len(self.class_names)
-                        else str(cls_idx)
-                    )
-                    info_lines.append(f"    {cls_name}: {cnt}")
-            ax.text(
-                0.5,
-                0.5,
-                "\n".join(info_lines),
-                ha="center",
-                va="center",
-                transform=ax.transAxes,
-                fontsize=13,
-                family="monospace",
-                bbox=dict(boxstyle="round", facecolor="lightcyan", alpha=0.8),
-            )
-            ax.set_title("Dataset Info")
+                info_lines.append(f"    {cls_name}: {cnt}")
+        ax.text(
+            0.5,
+            0.5,
+            "\n".join(info_lines),
+            ha="center",
+            va="center",
+            transform=ax.transAxes,
+            fontsize=13,
+            family="monospace",
+            bbox=dict(boxstyle="round", facecolor="lightcyan", alpha=0.8),
+        )
+        ax.set_title("Dataset Info")
 
         # --- (1, 1) ROC curve ---
         ax = axes[1, 1]
@@ -2917,21 +2611,8 @@ Reduction map for --marker-reduction:
         help="Path to patient_labels_with_controls.csv",
     )
     parser.add_argument("--output-dir", help="Output directory for results")
-    parser.add_argument("--n-epochs", type=int, default=500)
-    parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--batch-size", type=int, default=32)
-    parser.add_argument("--weight-decay", type=float, default=1e-4)
-    parser.add_argument(
-        "--patience", type=int, default=100, help="Early stopping patience"
-    )
     parser.add_argument(
         "--test-size", type=float, default=0.2, help="Fraction of subjects for test set"
-    )
-    parser.add_argument(
-        "--val-size",
-        type=float,
-        default=0.2,
-        help="Fraction of remaining subjects for validation set",
     )
     parser.add_argument("--random-state", type=int, default=42)
 
@@ -3030,11 +2711,6 @@ Reduction map for --marker-reduction:
         patient_labels_file=args.patient_labels,
         output_dir=args.output_dir,
         random_state=args.random_state,
-        n_epochs=args.n_epochs,
-        lr=args.lr,
-        batch_size=args.batch_size,
-        weight_decay=args.weight_decay,
-        patience=args.patience,
         full_cv=args.full_cv,
         n_cv_folds=args.n_cv_folds,
         use_subject_intersection=args.use_subject_intersection,
@@ -3053,9 +2729,7 @@ Reduction map for --marker-reduction:
     if args.full_metric_prediction:
         if not args.patient_labels_full:
             parser.error("--full-metric-prediction requires --patient-labels-full")
-        classifier.run_full_metric_prediction(
-            args.patient_labels_full, args.test_size, args.val_size
-        )
+        classifier.run_full_metric_prediction(args.patient_labels_full, args.test_size)
         ran_special = True
     if not ran_special:
         if args.full_cv:
@@ -3063,7 +2737,6 @@ Reduction map for --marker-reduction:
         else:
             classifier.run_classification(
                 test_size=args.test_size,
-                val_size=args.val_size,
             )
 
 

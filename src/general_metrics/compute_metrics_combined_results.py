@@ -46,6 +46,7 @@ BASE_DIR = Path(
 )
 OUTPUT_DIR = BASE_DIR / "combined_plots"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+MODEL_ORDER = ["TOTEM", "CBraMod", "LaBram", "NeuroLM"]
 
 
 def load_all_models(base_dir: Path) -> pd.DataFrame:
@@ -70,7 +71,14 @@ def load_all_models(base_dir: Path) -> pd.DataFrame:
                     "fft_mape": entry["fft_mape"],
                 }
             )
-    return pd.DataFrame(rows)
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return df
+
+    # Keep only requested models and enforce plotting order.
+    df = df[df["model"].isin(MODEL_ORDER)].copy()
+    df["model"] = pd.Categorical(df["model"], categories=MODEL_ORDER, ordered=True)
+    return df
 
 
 def make_combined_plot(
@@ -83,7 +91,7 @@ def make_combined_plot(
     """Create a figure with two subplots (correlation | MAPE) as boxplots + swarmplots."""
     fig, axes = plt.subplots(1, 2, figsize=(14, 9))
 
-    models = sorted(df["model"].unique())
+    models = [m for m in MODEL_ORDER if m in set(df["model"].astype(str))]
     palette = dict(zip(models, sns.color_palette("Set2", n_colors=len(models))))
 
     # ── Left subplot: correlation ───────────────────────────────────────────
@@ -93,7 +101,9 @@ def make_combined_plot(
         x="model",
         y=corr_col,
         ax=ax,
+        order=models,
         hue="model",
+        hue_order=models,
         palette=palette,
         fliersize=0,
         legend=False,
@@ -103,7 +113,9 @@ def make_combined_plot(
         x="model",
         y=corr_col,
         ax=ax,
+        order=models,
         hue="model",
+        hue_order=models,
         palette=palette,
         alpha=0.5,
         size=3,
@@ -120,7 +132,9 @@ def make_combined_plot(
         x="model",
         y=mape_col,
         ax=ax,
+        order=models,
         hue="model",
+        hue_order=models,
         palette=palette,
         fliersize=0,
         legend=False,
@@ -130,7 +144,9 @@ def make_combined_plot(
         x="model",
         y=mape_col,
         ax=ax,
+        order=models,
         hue="model",
+        hue_order=models,
         palette=palette,
         alpha=0.5,
         size=3,
