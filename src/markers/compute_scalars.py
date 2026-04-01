@@ -181,7 +181,10 @@ def compute_scalars_from_h5(h5_file, output_file, logger, detect_n_epochs=True):
                             )
                         else:
                             skipped_features.append(
-                                (feature_name, f"Invalid n_epochs from size: {data_size}")
+                                (
+                                    feature_name,
+                                    f"Invalid n_epochs from size: {data_size}",
+                                )
                             )
                     else:
                         skipped_features.append(

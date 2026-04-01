@@ -20,7 +20,7 @@ def plot_markers_topos(
 ):
     """
     Plot markers topographies from pre-computed data.
-    
+
     Parameters
     ----------
     computed_data_path : str or Path
@@ -33,7 +33,7 @@ def plot_markers_topos(
         Figure kwargs
     sns_kwargs : dict
         Seaborn style kwargs
-        
+
     Returns
     -------
     fig : matplotlib.figure.Figure
@@ -52,11 +52,13 @@ def plot_markers_topos(
     # Load computed data from pickle if path provided
     if computed_data is None:
         if computed_data_path is None:
-            raise ValueError("Either computed_data_path or computed_data must be provided")
+            raise ValueError(
+                "Either computed_data_path or computed_data must be provided"
+            )
         logger.info(f"Loading computed data from {computed_data_path}")
         with open(computed_data_path, "rb") as f:
             computed_data = pickle.load(f)
-    
+
     # Extract pre-computed values
     topos = computed_data["topos"]
     marker_names = computed_data["marker_names"]
@@ -66,31 +68,32 @@ def plot_markers_topos(
     vmax = computed_data["vmax"]
     same_scale = computed_data["same_scale"]
     ch_info = computed_data["ch_info"]
-    
+
     # Regenerate sphere and outlines from ch_info (they can't be pickled)
     from .equipments import prepare_layout
+
     sphere, outlines_pickled = prepare_layout(ch_info["description"], info=ch_info)
     markers = computed_data["markers"]
-    
+
     # CRITICAL: Regenerate full outlines with patch function for proper boundary clipping
     # The pickled outlines are missing the 'patch' function which is needed for clipping
     from .equipments import prepare_layout
-    
+
     # Get ch_info from first marker to regenerate outlines properly
     first_marker = list(markers.values())[0] if markers else None
-    equipment_config = 'egi/256'  # Default
+    equipment_config = "egi/256"  # Default
     ch_info = None
-    
-    if first_marker and hasattr(first_marker, 'ch_info_'):
+
+    if first_marker and hasattr(first_marker, "ch_info_"):
         ch_info = first_marker.ch_info_
-        if hasattr(ch_info, 'get'):
-            equipment_config = ch_info.get('description', 'egi/256')
-        elif hasattr(ch_info, '__getitem__'):
+        if hasattr(ch_info, "get"):
+            equipment_config = ch_info.get("description", "egi/256")
+        elif hasattr(ch_info, "__getitem__"):
             try:
-                equipment_config = ch_info['description']
+                equipment_config = ch_info["description"]
             except (KeyError, TypeError):
                 pass
-    
+
     # Regenerate full outlines with patch function for proper clipping
     try:
         sphere_regen, outlines_full = prepare_layout(equipment_config, info=ch_info)
@@ -98,23 +101,25 @@ def plot_markers_topos(
         # Update sphere if it was None
         if sphere is None:
             sphere = sphere_regen
-        logger.info(f"Successfully regenerated outlines with patch for {equipment_config}")
+        logger.info(
+            f"Successfully regenerated outlines with patch for {equipment_config}"
+        )
     except Exception as e:
         logger.warning(f"Could not regenerate outlines with patch: {e}")
         # Fallback to pickled outlines (will have clipping issues)
         outlines = outlines_pickled
-    
+
     # Setup plotting
     n_axes = len(topos)
     if fig_kwargs is None:
         fig_kwargs = dict(figsize=(3 * n_axes if n_axes > 1 else 4, 4))
     if units is None:
         units = [r""] * n_axes
-    
+
     fig, axes = plt.subplots(1, n_axes, **fig_kwargs)
     if n_axes == 1:
         axes = [axes]
-    
+
     mask_params = dict(
         marker="+",
         markerfacecolor="k",
@@ -122,7 +127,7 @@ def plot_markers_topos(
         linewidth=0,
         markersize=1,
     )
-    
+
     # Plot each marker
     for ax, topo, name, unit in zip(axes, topos, marker_names, units):
         # Calculate individual scale if not using same_scale
@@ -132,14 +137,14 @@ def plot_markers_topos(
         else:
             topo_vmin = vmin
             topo_vmax = vmax
-        
+
         # Handle NaN values
         nan_idx = np.isnan(topo)
-        
+
         # Get marker for text mapping
         marker_obj = markers.get(name)
         title = _map_marker_to_text(marker_obj) if marker_obj else name
-        
+
         plot_topomap_multi_cbar(
             topo[~nan_idx],
             pos[~nan_idx],
@@ -155,7 +160,7 @@ def plot_markers_topos(
             vmax=topo_vmax,
             sphere=sphere,  # Add sphere for proper boundary clipping
         )
-    
+
     plt.tight_layout()
     return fig
 
@@ -168,7 +173,7 @@ def plot_marker_topo(
 ):
     """
     Plot single marker topography from pre-computed data.
-    
+
     Parameters
     ----------
     computed_data_path : str or Path
@@ -179,7 +184,7 @@ def plot_marker_topo(
         Unit for the marker
     fig_kwargs : dict
         Figure kwargs
-        
+
     Returns
     -------
     fig : matplotlib.figure.Figure
@@ -273,9 +278,7 @@ def plot_topo_equipment(
     scalp_roi = get_roi(config=equipment, roi_name="scalp")
     non_scalp = get_roi(config=equipment, roi_name="nonscalp")
 
-    sphere, outlines, info = prepare_layout(
-        equipment, info=ch_info, return_info=True
-    )
+    sphere, outlines, info = prepare_layout(equipment, info=ch_info, return_info=True)
     _, pos, _, _, _, _, _ = mne.viz.topomap._prepare_topomap_plot(
         ch_info, "eeg", sphere=sphere
     )

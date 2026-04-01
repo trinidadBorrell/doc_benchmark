@@ -25,14 +25,15 @@ def get_evoked(epochs, condition, method=np.mean, roi_name=None):
 
     if roi_name is not None:
         roi_channels = get_roi_ch_names(
-            config=epochs.info['description'], roi_name=roi_name)
+            config=epochs.info["description"], roi_name=roi_name
+        )
         epochs.pick_channels(roi_channels)
         this_data = epochs.get_data().mean(1, keepdims=True)
-        to_drop = epochs.info['ch_names'][1:]
-        to_rename = epochs.info['ch_names'][0]
+        to_drop = epochs.info["ch_names"][1:]
+        to_rename = epochs.info["ch_names"][0]
         epochs.drop_channels(to_drop)
         epochs._data = this_data
-        epochs.rename_channels({to_rename: 'ROI-MEAN'})
+        epochs.rename_channels({to_rename: "ROI-MEAN"})
 
     evoked = _evoked_apply_method(epochs[condition], method)
     evoked_stderr = _evoked_apply_method(epochs[condition], scipy.stats.sem)
@@ -44,14 +45,14 @@ def get_contrast(computed_data_path=None, computed_data=None):
     """
     Get contrast results from pre-computed data.
     Returns Evoked objects for compatibility with existing code.
-    
+
     Parameters
     ----------
     computed_data_path : str or Path
         Path to pickle file containing computed data
     computed_data : dict
         Pre-computed data dictionary (if not loading from file)
-        
+
     Returns
     -------
     evoked_out : mne.Evoked
@@ -64,14 +65,16 @@ def get_contrast(computed_data_path=None, computed_data=None):
         Statistical results with p_val and mlog10_p_val as Evoked objects
     """
     import pickle
-    
+
     # Load computed data from pickle if path provided
     if computed_data is None:
         if computed_data_path is None:
-            raise ValueError("Either computed_data_path or computed_data must be provided")
+            raise ValueError(
+                "Either computed_data_path or computed_data must be provided"
+            )
         with open(computed_data_path, "rb") as f:
             computed_data = pickle.load(f)
-    
+
     # Extract computed data
     contrast_data = computed_data["contrast_data"]
     evokeds_data = computed_data["evokeds_data"]
@@ -80,17 +83,19 @@ def get_contrast(computed_data_path=None, computed_data=None):
     mlog10_p_val = computed_data["mlog10_p_val"]
     info = computed_data["info"]
     tmin = computed_data["tmin"]
-    
+
     # Create Evoked objects for compatibility
     evoked_out = mne.evoked.EvokedArray(contrast_data, info, tmin)
     evokeds = [mne.evoked.EvokedArray(data, info, tmin) for data in evokeds_data]
-    evokeds_stderr = [mne.evoked.EvokedArray(data, info, tmin) for data in evokeds_stderr_data]
-    
+    evokeds_stderr = [
+        mne.evoked.EvokedArray(data, info, tmin) for data in evokeds_stderr_data
+    ]
+
     # Create stats namedtuple
-    stats = namedtuple('stats', 'p_val mlog10_p_val')
+    stats = namedtuple("stats", "p_val mlog10_p_val")
     stats.p_val = mne.evoked.EvokedArray(p_val, info, tmin)
     stats.mlog10_p_val = mne.evoked.EvokedArray(mlog10_p_val, info, tmin)
-    
+
     return evoked_out, evokeds, evokeds_stderr, stats
 
 
@@ -98,14 +103,14 @@ def get_contrast_1samp(computed_data_path=None, computed_data=None):
     """
     Get one-sample contrast results from pre-computed data.
     Returns Evoked objects for compatibility with existing code.
-    
+
     Parameters
     ----------
     computed_data_path : str or Path
         Path to pickle file containing computed data
     computed_data : dict
         Pre-computed data dictionary (if not loading from file)
-        
+
     Returns
     -------
     evokeds : list of mne.Evoked
@@ -114,24 +119,28 @@ def get_contrast_1samp(computed_data_path=None, computed_data=None):
         Standard errors for each condition
     """
     import pickle
-    
+
     # Load computed data from pickle if path provided
     if computed_data is None:
         if computed_data_path is None:
-            raise ValueError("Either computed_data_path or computed_data must be provided")
+            raise ValueError(
+                "Either computed_data_path or computed_data must be provided"
+            )
         with open(computed_data_path, "rb") as f:
             computed_data = pickle.load(f)
-    
+
     # Extract computed data
     evokeds_data = computed_data["evokeds_data"]
     evokeds_stderr_data = computed_data["evokeds_stderr_data"]
     info = computed_data["info"]
     tmin = computed_data["tmin"]
-    
+
     # Create Evoked objects for compatibility
     evokeds = [mne.evoked.EvokedArray(data, info, tmin) for data in evokeds_data]
-    evokeds_stderr = [mne.evoked.EvokedArray(data, info, tmin) for data in evokeds_stderr_data]
-    
+    evokeds_stderr = [
+        mne.evoked.EvokedArray(data, info, tmin) for data in evokeds_stderr_data
+    ]
+
     return evokeds, evokeds_stderr
 
 
@@ -143,8 +152,8 @@ def fname_regexp_event(fname, regex_map, event_id):
             found = found + 1
             match = evt
     if found == 0:
-        raise ValueError('No regexp match for {}'.format(fname))
+        raise ValueError("No regexp match for {}".format(fname))
     elif found > 1:
-        raise ValueError('More than one match for {}'.format(fname))
+        raise ValueError("More than one match for {}".format(fname))
 
     return event_id[match]

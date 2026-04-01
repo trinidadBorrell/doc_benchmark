@@ -137,9 +137,7 @@ def _prepare_standard_1020_layout(ch_config):
 
     # Sort by angle to create a circular outline
     sorted_indices = np.argsort(angles)
-    perimeter_indices = sorted_indices[
-        radii[sorted_indices] > np.percentile(radii, 75)
-    ]
+    perimeter_indices = sorted_indices[radii[sorted_indices] > np.percentile(radii, 75)]
 
     # Create outline coordinates
     outline_pos = pos[perimeter_indices, :]

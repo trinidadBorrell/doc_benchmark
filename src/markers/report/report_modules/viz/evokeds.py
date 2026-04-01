@@ -22,7 +22,7 @@ def plot_cluster_test(
 ):
     """
     Plot cluster test analysis from pre-computed data.
-    
+
     Parameters
     ----------
     computed_data_path : str or Path
@@ -31,7 +31,7 @@ def plot_cluster_test(
         Pre-computed data dictionary (if not loading from file)
     sns_kwargs : dict
         Seaborn style kwargs
-        
+
     Returns
     -------
     fig : matplotlib.figure.Figure or None
@@ -52,16 +52,18 @@ def plot_cluster_test(
     # Load computed data from pickle if path provided
     if computed_data is None:
         if computed_data_path is None:
-            raise ValueError("Either computed_data_path or computed_data must be provided")
+            raise ValueError(
+                "Either computed_data_path or computed_data must be provided"
+            )
         logger.info(f"Loading computed data from {computed_data_path}")
         with open(computed_data_path, "rb") as f:
             computed_data = pickle.load(f)
-    
+
     # Handle case where no clusters were found
     if computed_data is None:
         logger.info("No clusters found in computed data")
         return None
-    
+
     # Extract pre-computed values
     n_clusters = computed_data["n_clusters"]
     cluster_data = computed_data["cluster_data"]
@@ -69,15 +71,16 @@ def plot_cluster_test(
     labels = computed_data["labels"]
     shift_time = computed_data["shift_time"]
     event_times = computed_data["event_times"]
-    
+
     # Ensure description is set to egi/256 for consistent montage across all topoplots
     if epochs_info.get("description") is None:
         epochs_info["description"] = "egi/256"
-    
+
     # Regenerate sphere and outlines from epochs_info (they can't be pickled)
     from .equipments import prepare_layout
+
     sphere, outlines = prepare_layout("egi/256", info=epochs_info)
-    
+
     # Extract 2D electrode positions (or recompute if not in pickle for backward compatibility)
     if "pos" in computed_data:
         pos = computed_data["pos"]
@@ -85,14 +88,13 @@ def plot_cluster_test(
     else:
         logger.warning("Positions not in pickle - recomputing from epochs_info")
         from mne.viz.topomap import _prepare_topomap_plot
-        _, pos, _, _, _, _, _ = _prepare_topomap_plot(
-            epochs_info, "eeg", sphere=sphere
-        )
-    
+
+        _, pos, _, _, _, _, _ = _prepare_topomap_plot(epochs_info, "eeg", sphere=sphere)
+
     # Create figure
     fig_cluster = plt.figure(figsize=(12, 3 * n_clusters))
     gs = gridspec.GridSpec(n_clusters, 2, width_ratios=[1, 3])
-    
+
     # Plot each cluster
     for i in range(n_clusters):
         cluster = cluster_data[i]
@@ -103,7 +105,7 @@ def plot_cluster_test(
         evokeds_stderr = cluster["evokeds_stderr"]
         sig_mask = cluster["sig_mask"]
         p_value = cluster["p_value"]
-        
+
         # Plot Topo
         ax_topo = plt.subplot(gs[2 * i])
         plot_topomap_multi_cbar(
@@ -165,7 +167,7 @@ def plot_cnv(
 ):
     """
     Plot CNV analysis from pre-computed data.
-    
+
     Parameters
     ----------
     computed_data_path : str or Path
@@ -180,7 +182,7 @@ def plot_cnv(
         Figure kwargs
     sns_kwargs : dict
         Seaborn style kwargs
-        
+
     Returns
     -------
     fig : matplotlib.figure.Figure
@@ -206,11 +208,13 @@ def plot_cnv(
     # Load computed data from pickle if path provided
     if computed_data is None:
         if computed_data_path is None:
-            raise ValueError("Either computed_data_path or computed_data must be provided")
+            raise ValueError(
+                "Either computed_data_path or computed_data must be provided"
+            )
         logger.info(f"Loading computed data from {computed_data_path}")
         with open(computed_data_path, "rb") as f:
             computed_data = pickle.load(f)
-    
+
     # Extract all pre-computed values
     topo_filtered = computed_data["topo_filtered"]
     p_topo = computed_data["p_topo"]
@@ -223,14 +227,18 @@ def plot_cnv(
     pos = computed_data["pos"]
     roi_data = computed_data["roi_data"]
     ch_info = computed_data["ch_info"]
-    
+
     # Regenerate sphere and outlines from ch_info (they can't be pickled)
     from .equipments import prepare_layout
+
     sphere, outlines_pickled = prepare_layout(ch_info["description"], info=ch_info)
-    
+
     # CRITICAL: Regenerate outlines with patch function for proper boundary clipping
     from .equipments import prepare_layout
-    equipment_config = ch_info.get('description', 'egi/256') if hasattr(ch_info, 'get') else 'egi/256'
+
+    equipment_config = (
+        ch_info.get("description", "egi/256") if hasattr(ch_info, "get") else "egi/256"
+    )
     try:
         sphere_regen, outlines = prepare_layout(equipment_config, info=ch_info)
         if sphere is None:
@@ -246,10 +254,10 @@ def plot_cnv(
     stat_pvmax = computed_data["stat_pvmax"]
     vminmax = computed_data["vminmax"]
     ch_info = computed_data["ch_info"]
-    
+
     # Get stat colormap
     stat_cmap = get_stat_colormap(stat_logpsig, stat_vmin, stat_vmax)
-    
+
     # Create figure and grid
     fig = plt.figure(figsize=fig_kwargs.get("figsize", (14, 8)))
     gs = gridspec.GridSpec(1 + len(roi_data), 6)
@@ -362,7 +370,7 @@ def plot_cnv(
         cnv_line = roi_info["cnv_line"]
         evoked = roi_info["evoked"]
         evoked_stderr = roi_info["evoked_stderr"]
-        
+
         if p < 0.05:
             p_color = color
             if p < 1e-4:
@@ -389,8 +397,8 @@ def plot_cnv(
         ax_roi.plot([0, 600], cnv_line, color=p_color, ls="--", linewidth=2)
         ax_roi.axhline(0, color=".5", lw=0.5, ls="--")
         ax_roi.set_xlim([0, 600])
-        ax_roi.set_xlabel('Time (ms)')
-        ax_roi.set_ylabel('Amplitude (µV)')
+        ax_roi.set_xlabel("Time (ms)")
+        ax_roi.set_ylabel("Amplitude (µV)")
 
         lab_erp = mpl.patches.Patch(
             color=color, alpha=0.2, label=r"$ERP\/(\mu \pm SEM)$"
@@ -413,7 +421,7 @@ def plot_cnv(
         )
         lab_p = mpl.patches.Patch(color=p_color, label=p_label)
         ax_hist.legend(handles=[lab_slope, lab_p], loc="upper left")
-    
+
     plt.tight_layout()
     return fig
 
@@ -431,7 +439,7 @@ def plot_gfp(
 ):
     """
     Plot GFP from pre-computed data.
-    
+
     Parameters
     ----------
     computed_data_path : str or Path
@@ -452,7 +460,7 @@ def plot_gfp(
         Figure kwargs
     sns_kwargs : dict
         Seaborn style kwargs
-        
+
     Returns
     -------
     fig : matplotlib.figure.Figure or None
@@ -467,27 +475,29 @@ def plot_gfp(
         sns_kwargs = {}
     sns.set(**sns_kwargs)
     sns.set_color_codes()
-    
+
     fig = None
     if fig_kwargs is None:
         fig_kwargs = {}
     if ax is None:
         fig, ax = plt.subplots(1, 1, **fig_kwargs)
-    
+
     # Load computed data from pickle if path provided
     if computed_data is None:
         if computed_data_path is None:
-            raise ValueError("Either computed_data_path or computed_data must be provided")
+            raise ValueError(
+                "Either computed_data_path or computed_data must be provided"
+            )
         logger.info(f"Loading computed data from {computed_data_path}")
         with open(computed_data_path, "rb") as f:
             computed_data = pickle.load(f)
-    
+
     # Extract pre-computed values
     gfp_data = computed_data["gfp_data"]
     this_times = computed_data["this_times"]
     event_times = computed_data["event_times"]
     shift_time = computed_data["shift_time"]
-    
+
     # Set up colors, linestyles, and labels
     if colors is None:
         colors = [None for _ in gfp_data]
@@ -495,19 +505,17 @@ def plot_gfp(
         linestyles = ["-" for _ in gfp_data]
     if labels is None:
         labels = [None for _ in gfp_data]
-    
+
     # Plot each condition
     for gfp_info, color, ls, label in zip(gfp_data, colors, linestyles, labels):
         if label is None:
             label = gfp_info["condition"]
-        
+
         gfp = gfp_info["gfp"]
         ci1 = gfp_info["ci1"]
         ci2 = gfp_info["ci2"]
-        
-        lines = ax.plot(
-            this_times, gfp * 1e6, color=color, linestyle=ls, label=label
-        )
+
+        lines = ax.plot(this_times, gfp * 1e6, color=color, linestyle=ls, label=label)
 
         ax.fill_between(
             this_times,
@@ -516,17 +524,17 @@ def plot_gfp(
             color=lines[0].get_color(),
             alpha=0.5,
         )
-    
+
     if sig_mask is not None:
         for i in np.where(sig_mask)[0]:
             ax.axvline(this_times[i], alpha=0.5, color="orange")
-    
+
     handles, legend_labels = ax.get_legend_handles_labels()
     for color in np.unique(colors):
         if color is not None:
             sig = mpl.patches.Patch(color=color, alpha=0.5, label=r"$\chi^{2}$ CI")
             handles.append(sig)
-    
+
     if event_times is not None:
         times = this_times * 1e3
         xticks = list(event_times.keys())
@@ -537,7 +545,7 @@ def plot_gfp(
             t += shift_time * 1e3
             ax.axvline(t, color="black", lw=0.5, ls="--")
             ax.text(x=t, y=ax.get_ylim()[1], s=s, horizontalalignment="center")
-    
+
     ax.set_xlim(this_times[[0, -1]])
     ax.set_ylabel(r"Evoked Response ($\mu{V}$)")
     ax.set_xlabel("Time (ms)")
@@ -570,11 +578,11 @@ def plot_evoked(
         fig_kwargs = {}
     if ax is None:
         fig, ax = plt.subplots(1, 1, **fig_kwargs)
-    
+
     # Ensure evokeds is a list
     if not isinstance(evokeds, (list, tuple)):
         evokeds = [evokeds]
-    
+
     if std_errs is None:
         std_errs = [None for x in evokeds]
     if colors is None:
@@ -597,9 +605,7 @@ def plot_evoked(
         if data.ndim > 1:
             data = data.mean(axis=0)
         data = np.squeeze(data)
-        lines = ax.plot(
-            this_times, data * 1e6, color=color, linestyle=ls, label=label
-        )
+        lines = ax.plot(this_times, data * 1e6, color=color, linestyle=ls, label=label)
         this_max_val = np.max(data)
         this_min_val = np.min(data)
         if std_err is not None:
@@ -706,21 +712,17 @@ def plot_butterfly(
 
 def plot_evoked_topomap(evoked, **kwargs):
     t_evoked = evoked.copy()
-    
+
     # Ensure description is set to egi/256 for consistent montage
     if t_evoked.info.get("description") is None:
         t_evoked.info["description"] = "egi/256"
-    
+
     scalp_roi = get_roi(config=t_evoked.info["description"], roi_name="scalp")
-    non_scalp = get_roi(
-        config=t_evoked.info["description"], roi_name="nonscalp"
-    )
+    non_scalp = get_roi(config=t_evoked.info["description"], roi_name="nonscalp")
     if non_scalp is not None and len(non_scalp) > 0:
         t_evoked.data[non_scalp, :] = 0.0
 
-    sphere, outlines = prepare_layout(
-        t_evoked.info["description"], info=t_evoked.info
-    )
+    sphere, outlines = prepare_layout(t_evoked.info["description"], info=t_evoked.info)
     nchans, ntimes = t_evoked.data.shape
     mask = np.in1d(np.arange(nchans), scalp_roi)
     mask = np.tile(mask[:, None], (1, ntimes))
@@ -775,9 +777,7 @@ def plot_ttest(
         for tick in ticks:
             mask = p_val < tick
             time_mask = [
-                np.convolve(
-                    mask[i, :], np.ones((n_times_thresh,)), mode="valid"
-                )
+                np.convolve(mask[i, :], np.ones((n_times_thresh,)), mode="valid")
                 == n_times_thresh
                 for i in range(p_val.shape[0])
             ]

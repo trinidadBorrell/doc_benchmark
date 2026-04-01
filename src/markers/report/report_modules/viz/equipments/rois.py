@@ -5,9 +5,9 @@
 
 from mne.utils import logger
 
-from . montages import get_ch_names
+from .montages import get_ch_names
 
-_roi_names = ['Fz', 'Cz', 'Pz', 'p3a', 'p3b', 'mmn', 'cnv', 'scalp', 'nonscalp']
+_roi_names = ["Fz", "Cz", "Pz", "p3a", "p3b", "mmn", "cnv", "scalp", "nonscalp"]
 
 
 _rois_map = {}
@@ -15,9 +15,9 @@ _rois_map = {}
 
 def define_rois(montage, rois_map):
     if not all(x in rois_map for x in _roi_names):
-        raise ValueError('All ROIS are not defined for {}'.format(montage))
+        raise ValueError("All ROIS are not defined for {}".format(montage))
     if montage in _rois_map:
-        logger.warning('Warning: ROIs already defined for {}'.format(montage))
+        logger.warning("Warning: ROIs already defined for {}".format(montage))
     _rois_map[montage] = rois_map
 
 
@@ -27,11 +27,11 @@ def get_roi(config, roi_name):
         this_rois = _rois_map[config]
         if roi_name not in this_rois:
             raise ValueError(
-                'ROI {} not defined for montage {}'.format(roi_name, config))
+                "ROI {} not defined for montage {}".format(roi_name, config)
+            )
         out = this_rois[roi_name]
     else:
-        raise ValueError(
-            'ROIs not defined for montage {}'.format(config))
+        raise ValueError("ROIs not defined for montage {}".format(config))
 
     return out
 

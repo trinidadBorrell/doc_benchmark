@@ -13,10 +13,12 @@ from mne import concatenate_epochs
 logger = logging.getLogger(__name__)
 
 
-def compute_erp_analysis_data(epochs, skip_clustering=False, output_dir="./tmp_computed_data"):
+def compute_erp_analysis_data(
+    epochs, skip_clustering=False, output_dir="./tmp_computed_data"
+):
     """
     Compute all ERP data and save to pkl files (NO PLOTTING).
-    
+
     Parameters
     ----------
     epochs : mne.Epochs
@@ -25,7 +27,7 @@ def compute_erp_analysis_data(epochs, skip_clustering=False, output_dir="./tmp_c
         Skip cluster permutation tests to speed up computation
     output_dir : str or Path
         Directory to save computed data
-        
+
     Returns
     -------
     dict
@@ -36,9 +38,9 @@ def compute_erp_analysis_data(epochs, skip_clustering=False, output_dir="./tmp_c
     from .contrast import compute_contrast
 
     logger.info("Computing ERP analysis data...")
-    
+
     output_paths = {}
-    
+
     # Local and Global effects using real condition data
     local_conditions = [["LDGS", "LDGD"], ["LSGS", "LSGD"]]
     global_conditions = [["LDGD", "LSGD"], ["LSGS", "LDGS"]]
@@ -56,7 +58,7 @@ def compute_erp_analysis_data(epochs, skip_clustering=False, output_dir="./tmp_c
         event_times=event_times,
         output_path=local_gfp_path,
     )
-    output_paths['local_gfp'] = local_gfp_path
+    output_paths["local_gfp"] = local_gfp_path
 
     # 2. Local Contrast
     logger.info("Computing Local Effect contrast data...")
@@ -67,17 +69,13 @@ def compute_erp_analysis_data(epochs, skip_clustering=False, output_dir="./tmp_c
         method=trim_mean80,
         output_path=local_contrast_path,
     )
-    output_paths['local_contrast'] = local_contrast_path
-    
+    output_paths["local_contrast"] = local_contrast_path
+
     # 3. Local Cluster Test (optional)
     if not skip_clustering:
         logger.info("Computing Local Effect cluster test...")
-        local_deviant_epochs = concatenate_epochs(
-            [epochs["LDGS"], epochs["LDGD"]]
-        )
-        local_standard_epochs = concatenate_epochs(
-            [epochs["LSGS"], epochs["LSGD"]]
-        )
+        local_deviant_epochs = concatenate_epochs([epochs["LDGS"], epochs["LDGD"]])
+        local_standard_epochs = concatenate_epochs([epochs["LSGS"], epochs["LSGD"]])
         combined_epochs = concatenate_epochs(
             [local_deviant_epochs, local_standard_epochs]
         )
@@ -89,7 +87,7 @@ def compute_erp_analysis_data(epochs, skip_clustering=False, output_dir="./tmp_c
         }
         if combined_epochs.info.get("description") is None:
             combined_epochs.info["description"] = "egi/256"
-        
+
         local_cluster_path = Path(output_dir) / "local_cluster_test.pkl"
         compute_cluster_test(
             combined_epochs,
@@ -101,7 +99,7 @@ def compute_erp_analysis_data(epochs, skip_clustering=False, output_dir="./tmp_c
             event_times=event_times,
             output_path=local_cluster_path,
         )
-        output_paths['local_cluster'] = local_cluster_path
+        output_paths["local_cluster"] = local_cluster_path
 
     # ========== GLOBAL EFFECT COMPUTATIONS ==========
     # 4. Global GFP
@@ -114,7 +112,7 @@ def compute_erp_analysis_data(epochs, skip_clustering=False, output_dir="./tmp_c
         event_times=event_times,
         output_path=global_gfp_path,
     )
-    output_paths['global_gfp'] = global_gfp_path
+    output_paths["global_gfp"] = global_gfp_path
 
     # 5. Global Contrast
     logger.info("Computing Global Effect contrast data...")
@@ -125,17 +123,13 @@ def compute_erp_analysis_data(epochs, skip_clustering=False, output_dir="./tmp_c
         method=trim_mean80,
         output_path=global_contrast_path,
     )
-    output_paths['global_contrast'] = global_contrast_path
-    
+    output_paths["global_contrast"] = global_contrast_path
+
     # 6. Global Cluster Test (optional)
     if not skip_clustering:
         logger.info("Computing Global Effect cluster test...")
-        global_standard_epochs = concatenate_epochs(
-            [epochs["LSGS"], epochs["LDGS"]]
-        )
-        global_deviant_epochs = concatenate_epochs(
-            [epochs["LSGD"], epochs["LDGD"]]
-        )
+        global_standard_epochs = concatenate_epochs([epochs["LSGS"], epochs["LDGS"]])
+        global_deviant_epochs = concatenate_epochs([epochs["LSGD"], epochs["LDGD"]])
         global_combined_epochs = concatenate_epochs(
             [global_standard_epochs, global_deviant_epochs]
         )
@@ -145,7 +139,7 @@ def compute_erp_analysis_data(epochs, skip_clustering=False, output_dir="./tmp_c
         }
         global_combined_epochs.events[: len(global_standard_epochs), 2] = 1
         global_combined_epochs.events[len(global_standard_epochs) :, 2] = 2
-        
+
         global_cluster_path = Path(output_dir) / "global_cluster_test.pkl"
         compute_cluster_test(
             global_combined_epochs,
@@ -157,7 +151,7 @@ def compute_erp_analysis_data(epochs, skip_clustering=False, output_dir="./tmp_c
             event_times=event_times,
             output_path=global_cluster_path,
         )
-        output_paths['global_cluster'] = global_cluster_path
+        output_paths["global_cluster"] = global_cluster_path
 
     # ========== ROI ANALYSIS COMPUTATIONS ==========
     rois = ["Fz", "Cz", "Pz"]
@@ -172,8 +166,8 @@ def compute_erp_analysis_data(epochs, skip_clustering=False, output_dir="./tmp_c
             roi_name=roi_name,
             output_path=local_roi_path,
         )
-        output_paths[f'local_roi_{roi_name}'] = local_roi_path
-        
+        output_paths[f"local_roi_{roi_name}"] = local_roi_path
+
         # Global ROI
         logger.info(f"Computing Global Effect contrast for ROI: {roi_name}")
         global_roi_path = Path(output_dir) / f"global_effect_contrast_{roi_name}.pkl"
@@ -184,9 +178,9 @@ def compute_erp_analysis_data(epochs, skip_clustering=False, output_dir="./tmp_c
             roi_name=roi_name,
             output_path=global_roi_path,
         )
-        output_paths[f'global_roi_{roi_name}'] = global_roi_path
-    
+        output_paths[f"global_roi_{roi_name}"] = global_roi_path
+
     logger.info("✅ ERP computations complete. All data saved to pkl files.")
     gc.collect()
-    
+
     return output_paths

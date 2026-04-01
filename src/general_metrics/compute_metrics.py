@@ -31,12 +31,14 @@ import warnings
 from pathlib import Path
 
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
 # Suppress MNE info messages
 import mne
+
 mne.set_log_level("WARNING")
 
 # Plotting style
@@ -50,6 +52,7 @@ plt.rcParams["axes.labelsize"] = "large"
 # ---------------------------------------------------------------------------
 # Metric helpers
 # ---------------------------------------------------------------------------
+
 
 def _align(a: np.ndarray, b: np.ndarray):
     """Trim two arrays to the minimum common shape along all axes."""
@@ -71,7 +74,7 @@ def _vectorized_corr(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     a_m = a - a.mean(axis=-1, keepdims=True)
     b_m = b - b.mean(axis=-1, keepdims=True)
     num = (a_m * b_m).sum(axis=-1)
-    denom = np.sqrt((a_m ** 2).sum(axis=-1) * (b_m ** 2).sum(axis=-1))
+    denom = np.sqrt((a_m**2).sum(axis=-1) * (b_m**2).sum(axis=-1))
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         r = num / (denom + 1e-30)
@@ -121,8 +124,7 @@ def fft_correlation(a: np.ndarray, b: np.ndarray) -> float:
     fa = np.abs(np.fft.rfft(a, axis=-1))
     fb = np.abs(np.fft.rfft(b, axis=-1))
     n_f = fa.shape[-1]
-    r = _vectorized_corr(fa.reshape(n_ep * n_ch, n_f),
-                         fb.reshape(n_ep * n_ch, n_f))
+    r = _vectorized_corr(fa.reshape(n_ep * n_ch, n_f), fb.reshape(n_ep * n_ch, n_f))
     mask = np.isfinite(r)
     return float(np.mean(r[mask])) if mask.any() else float("nan")
 
@@ -143,8 +145,10 @@ def fft_mape(a: np.ndarray, b: np.ndarray) -> float:
 # Data discovery
 # ---------------------------------------------------------------------------
 
-def find_original_file(subject_id: str, session_id: str,
-                       original_data_dirs: list) -> Path | None:
+
+def find_original_file(
+    subject_id: str, session_id: str, original_data_dirs: list
+) -> Path | None:
     """Search through original data directories to find the original .fif file."""
     for orig_dir in original_data_dirs:
         orig_dir = Path(orig_dir)
@@ -153,7 +157,9 @@ def find_original_file(subject_id: str, session_id: str,
         # Check eeg/ sub-directory first (nice_epochs style)
         eeg_dir = ses_dir / "eeg"
         if eeg_dir.exists():
-            candidates = list(eeg_dir.glob(f"sub-{subject_id}_ses-{session_id}_task-*_epo.fif"))
+            candidates = list(
+                eeg_dir.glob(f"sub-{subject_id}_ses-{session_id}_task-*_epo.fif")
+            )
             if candidates:
                 return candidates[0]
 
@@ -169,8 +175,9 @@ def find_original_file(subject_id: str, session_id: str,
     return None
 
 
-def find_reconstructed_file(subject_id: str, session_id: str,
-                            recon_dir: Path) -> Path | None:
+def find_reconstructed_file(
+    subject_id: str, session_id: str, recon_dir: Path
+) -> Path | None:
     """Find the reconstructed .fif file for a subject/session."""
     ses_dir = recon_dir / f"sub-{subject_id}" / f"ses-{session_id}"
     if not ses_dir.exists():
@@ -221,6 +228,7 @@ def discover_subjects_sessions(recon_dir: Path):
 # Plotting
 # ---------------------------------------------------------------------------
 
+
 def _bar_plot(labels, values, title, ylabel, output_path, color="steelblue"):
     """Simple per-subject bar chart with mean line."""
     fig, ax = plt.subplots(figsize=(max(8, len(labels) * 0.35), 5))
@@ -228,8 +236,13 @@ def _bar_plot(labels, values, title, ylabel, output_path, color="steelblue"):
     bars = ax.bar(x, values, color=color, alpha=0.8, edgecolor="white", linewidth=0.5)
 
     mean_val = float(np.nanmean(values))
-    ax.axhline(mean_val, color="crimson", linestyle="--", linewidth=1.5,
-               label=f"mean = {mean_val:.4f}")
+    ax.axhline(
+        mean_val,
+        color="crimson",
+        linestyle="--",
+        linewidth=1.5,
+        label=f"mean = {mean_val:.4f}",
+    )
 
     ax.set_xticks(x)
     ax.set_xticklabels(labels, rotation=90, fontsize=7)
@@ -246,6 +259,7 @@ def _bar_plot(labels, values, title, ylabel, output_path, color="steelblue"):
 # Main
 # ---------------------------------------------------------------------------
 
+
 def compute_all_metrics(base_dirs, original_data_dirs, output_dir):
     """
     Compute reconstruction quality metrics for every subject/session found
@@ -257,8 +271,8 @@ def compute_all_metrics(base_dirs, original_data_dirs, output_dir):
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    subject_metrics = {}   # key = "sub-{id}_ses-{ses}"
-    datadir_metrics = {}   # aggregate per base_dir
+    subject_metrics = {}  # key = "sub-{id}_ses-{ses}"
+    datadir_metrics = {}  # aggregate per base_dir
 
     for recon_dir_str in base_dirs:
         recon_dir = Path(recon_dir_str)
@@ -284,8 +298,12 @@ def compute_all_metrics(base_dirs, original_data_dirs, output_dir):
                 continue
 
             try:
-                orig_epochs = mne.read_epochs(str(orig_file), preload=True, verbose=False)
-                recon_epochs = mne.read_epochs(str(recon_file), preload=True, verbose=False)
+                orig_epochs = mne.read_epochs(
+                    str(orig_file), preload=True, verbose=False
+                )
+                recon_epochs = mne.read_epochs(
+                    str(recon_file), preload=True, verbose=False
+                )
 
                 orig_data = orig_epochs.get_data().astype(np.float32)
                 recon_data = recon_epochs.get_data().astype(np.float32)
@@ -313,8 +331,10 @@ def compute_all_metrics(base_dirs, original_data_dirs, output_dir):
                 dir_fft_corrs.append(fft_corr_val)
                 dir_fft_mapes.append(fft_mape_val)
 
-                print(f"  {key}: corr={corr_val:.4f}  mape={mape_val:.4f}  "
-                      f"fft_corr={fft_corr_val:.4f}  fft_mape={fft_mape_val:.4f}")
+                print(
+                    f"  {key}: corr={corr_val:.4f}  mape={mape_val:.4f}  "
+                    f"fft_corr={fft_corr_val:.4f}  fft_mape={fft_mape_val:.4f}"
+                )
 
             except Exception as e:
                 print(f"  {key}: ERROR - {e}")
@@ -355,36 +375,58 @@ def compute_all_metrics(base_dirs, original_data_dirs, output_dir):
     fft_corrs = [valid[k]["fft_correlation"] for k in labels]
     fft_mapes_vals = [valid[k]["fft_mape"] for k in labels]
 
-    _bar_plot(labels, corrs,
-              "Time-domain Pearson Correlation (Original vs Reconstructed)",
-              "Correlation (r)", output_dir / "correlation_by_subject.png",
-              color="steelblue")
+    _bar_plot(
+        labels,
+        corrs,
+        "Time-domain Pearson Correlation (Original vs Reconstructed)",
+        "Correlation (r)",
+        output_dir / "correlation_by_subject.png",
+        color="steelblue",
+    )
 
-    _bar_plot(labels, mapes_vals,
-              "Time-domain MAPE (Original vs Reconstructed)",
-              "MAPE", output_dir / "mape_by_subject.png",
-              color="darkorange")
+    _bar_plot(
+        labels,
+        mapes_vals,
+        "Time-domain MAPE (Original vs Reconstructed)",
+        "MAPE",
+        output_dir / "mape_by_subject.png",
+        color="darkorange",
+    )
 
-    _bar_plot(labels, fft_corrs,
-              "FFT Pearson Correlation (Original vs Reconstructed)",
-              "Correlation (r)", output_dir / "fft_correlation_by_subject.png",
-              color="teal")
+    _bar_plot(
+        labels,
+        fft_corrs,
+        "FFT Pearson Correlation (Original vs Reconstructed)",
+        "Correlation (r)",
+        output_dir / "fft_correlation_by_subject.png",
+        color="teal",
+    )
 
-    _bar_plot(labels, fft_mapes_vals,
-              "FFT MAPE (Original vs Reconstructed)",
-              "MAPE", output_dir / "fft_mape_by_subject.png",
-              color="indianred")
+    _bar_plot(
+        labels,
+        fft_mapes_vals,
+        "FFT MAPE (Original vs Reconstructed)",
+        "MAPE",
+        output_dir / "fft_mape_by_subject.png",
+        color="indianred",
+    )
 
     # Print summary
-    print(f"\n{'='*60}")
-    print(f"GENERAL METRICS SUMMARY")
-    print(f"{'='*60}")
+    print(f"\n{'=' * 60}")
+    print("GENERAL METRICS SUMMARY")
+    print(f"{'=' * 60}")
     print(f"Subjects analyzed: {len(valid)}")
     print(f"Time-domain correlation: {np.nanmean(corrs):.4f} ± {np.nanstd(corrs):.4f}")
-    print(f"Time-domain MAPE:       {np.nanmean(mapes_vals):.4f} ± {np.nanstd(mapes_vals):.4f}")
-    print(f"FFT correlation:        {np.nanmean(fft_corrs):.4f} ± {np.nanstd(fft_corrs):.4f}")
-    print(f"FFT MAPE:               {np.nanmean(fft_mapes_vals):.4f} ± {np.nanstd(fft_mapes_vals):.4f}")
-    print(f"{'='*60}")
+    print(
+        f"Time-domain MAPE:       {np.nanmean(mapes_vals):.4f} ± {np.nanstd(mapes_vals):.4f}"
+    )
+    print(
+        f"FFT correlation:        {np.nanmean(fft_corrs):.4f} ± {np.nanstd(fft_corrs):.4f}"
+    )
+    print(
+        f"FFT MAPE:               {np.nanmean(fft_mapes_vals):.4f} ± {np.nanstd(fft_mapes_vals):.4f}"
+    )
+    print(f"{'=' * 60}")
 
     return results
 
@@ -392,18 +434,32 @@ def compute_all_metrics(base_dirs, original_data_dirs, output_dir):
 def main():
     parser = argparse.ArgumentParser(
         description="Compute general reconstruction quality metrics (correlation, MAPE) "
-                    "between original and reconstructed EEG epochs."
+        "between original and reconstructed EEG epochs."
     )
-    parser.add_argument("--base_dirs", nargs="+", required=True,
-                        help="Directories containing reconstructed data (sub-*/ses-*/ structure)")
-    parser.add_argument("--original_data_dir", nargs="+", default=[],
-                        help="Directories containing original data for comparison")
-    parser.add_argument("--output_dir", type=str, required=True,
-                        help="Directory to save metrics JSON and plots")
+    parser.add_argument(
+        "--base_dirs",
+        nargs="+",
+        required=True,
+        help="Directories containing reconstructed data (sub-*/ses-*/ structure)",
+    )
+    parser.add_argument(
+        "--original_data_dir",
+        nargs="+",
+        default=[],
+        help="Directories containing original data for comparison",
+    )
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        required=True,
+        help="Directory to save metrics JSON and plots",
+    )
     args = parser.parse_args()
 
     if not args.original_data_dir:
-        print("ERROR: --original_data_dir is required for computing reconstruction metrics.")
+        print(
+            "ERROR: --original_data_dir is required for computing reconstruction metrics."
+        )
         sys.exit(1)
 
     compute_all_metrics(args.base_dirs, args.original_data_dir, args.output_dir)

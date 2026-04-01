@@ -12,10 +12,10 @@ from .erp import compute_erp_analysis_data
 from .spectral import compute_spectral_analysis_data
 
 __all__ = [
-    'compute_cnv_analysis_data',
-    'compute_connectivity_analysis_data',
-    'compute_diagnostic_data',
-    'compute_information_theory_data',
-    'compute_erp_analysis_data',
-    'compute_spectral_analysis_data',
+    "compute_cnv_analysis_data",
+    "compute_connectivity_analysis_data",
+    "compute_diagnostic_data",
+    "compute_information_theory_data",
+    "compute_erp_analysis_data",
+    "compute_spectral_analysis_data",
 ]

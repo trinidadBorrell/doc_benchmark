@@ -53,10 +53,8 @@ warnings.filterwarnings("ignore")
 from sklearn.preprocessing import RobustScaler, StandardScaler, LabelEncoder
 from sklearn.model_selection import (
     cross_val_score,
-    GridSearchCV,
     StratifiedKFold,
     LeaveOneOut,
-    train_test_split,
     GroupShuffleSplit,
     GroupKFold,
     StratifiedGroupKFold,
@@ -882,7 +880,7 @@ class CrossSubjectClassifier:
         subject_groups = np.array([subj.split("_ses-")[0] for subj in self.subjects])
 
         print(
-            f"    🔒 GROUP-BASED SPLITTING: Ensuring all sessions from same subject stay together"
+            "    🔒 GROUP-BASED SPLITTING: Ensuring all sessions from same subject stay together"
         )
         print(
             f"    Found {len(np.unique(subject_groups))} unique subjects across {len(self.subjects)} sessions"
@@ -905,7 +903,7 @@ class CrossSubjectClassifier:
             print(
                 f"   ⚠️  StratifiedGroupKFold failed ({e}), falling back to GroupShuffleSplit"
             )
-            print(f"   ⚠️  Note: Class balance may not be preserved in train/test split")
+            print("   ⚠️  Note: Class balance may not be preserved in train/test split")
             # Fallback to original GroupShuffleSplit
             gss = GroupShuffleSplit(
                 n_splits=1, test_size=test_size, random_state=self.random_state
@@ -965,7 +963,7 @@ class CrossSubjectClassifier:
                 f"   Using Leave-One-Out CV on training set ({n_train_samples} folds)"
             )
             print(
-                f"   ⚠️  WARNING: LOO doesn't respect subject groups - sessions from same subject may be in different folds"
+                "   ⚠️  WARNING: LOO doesn't respect subject groups - sessions from same subject may be in different folds"
             )
         elif cv_strategy == "stratified":
             # Use StratifiedGroupKFold to ensure class balance while keeping subject groups together during CV
@@ -992,14 +990,14 @@ class CrossSubjectClassifier:
                         f"   🔒 Using StratifiedGroupKFold with {effective_n_splits} splits (respects subject groups + class balance)"
                     )
                     print(
-                        f"   This ensures sessions from same subject stay in same CV fold with balanced class distribution"
+                        "   This ensures sessions from same subject stay in same CV fold with balanced class distribution"
                     )
                 except (ImportError, ValueError, AttributeError) as e:
                     print(
                         f"   ⚠️  StratifiedGroupKFold failed ({e}), falling back to GroupKFold for CV"
                     )
                     print(
-                        f"   ⚠️  Note: Class balance may not be preserved in cross-validation folds"
+                        "   ⚠️  Note: Class balance may not be preserved in cross-validation folds"
                     )
                     cv = GroupKFold(n_splits=effective_n_splits)
                     print(
@@ -2631,7 +2629,9 @@ class CrossDataClassifier:
                 # _C and _D variants use std(ddof=1) across epochs, which is NaN
                 # when a subject has only 1 epoch. Excluding those keys here
                 # avoids discarding entire subjects just because of these variants.
-                import struct as _struct, re as _re, math as _math
+                import struct as _struct
+                import re as _re
+                import math as _math
 
                 def _has_nan_in_npz_key(filepath, key):
                     with _zf.ZipFile(filepath) as z:
@@ -2968,7 +2968,7 @@ class CrossDataClassifier:
             ``(X_original, X_reconstructed, y_encoded, subjects)``
         """
         print(
-            f"🔍 Collecting data: original from baseline CSV, reconstructed from npz..."
+            "🔍 Collecting data: original from baseline CSV, reconstructed from npz..."
         )
         print(f"   Baseline CSV : {self.baseline_csv}")
         print(f"   Recon dir    : {self.data_dir}")
@@ -3083,7 +3083,7 @@ class CrossDataClassifier:
                 f"state={labels_dict[subject_session_key]}"
             )
 
-        print(f"\n📊 DATA COLLECTION SUMMARY:")
+        print("\n📊 DATA COLLECTION SUMMARY:")
         print(f"    Successfully loaded: {len(collected_subjects)} subject/sessions")
         print(f"    Skipped: {subjects_skipped} subject/sessions")
 
@@ -3545,7 +3545,7 @@ class CrossDataClassifier:
         # Set up stratified CV
         if cv_strategy == "loo":
             cv = LeaveOneOut()
-            print(f"      Using Leave-One-Out CV")
+            print("      Using Leave-One-Out CV")
         else:
             cv = StratifiedKFold(
                 n_splits=n_splits, shuffle=True, random_state=self.random_state
@@ -3560,7 +3560,7 @@ class CrossDataClassifier:
         }
 
         # Test linear kernel with different C values
-        print(f"\n      Testing LINEAR kernel:")
+        print("\n      Testing LINEAR kernel:")
         for C in C_values:
             pipeline = self.create_pipeline(C=C, kernel="linear")
 
@@ -3642,7 +3642,7 @@ class CrossDataClassifier:
         print("   ✓ Stratified splits to maintain class balance")
         print("   ✓ Grid search for optimal C parameter")
         print()
-        print(f"📁 Configuration:")
+        print("📁 Configuration:")
         print(f"   Data directory: {self.data_dir}")
         print(f"   Labels file: {self.patient_labels_file}")
         print(f"   Marker type: {self.marker_type}")
@@ -3689,7 +3689,7 @@ class CrossDataClassifier:
             subject_groups = np.array([subj.split("_ses-")[0] for subj in subjects])
 
             print(
-                f"\n    🔒 GROUP-BASED SPLITTING: Ensuring all sessions from same subject stay together"
+                "\n    🔒 GROUP-BASED SPLITTING: Ensuring all sessions from same subject stay together"
             )
             print(
                 f"    Found {len(np.unique(subject_groups))} unique subjects across {len(subjects)} sessions"
@@ -3713,7 +3713,7 @@ class CrossDataClassifier:
                     f"   ⚠️  StratifiedGroupKFold failed ({e}), falling back to GroupShuffleSplit"
                 )
                 print(
-                    f"   ⚠️  Note: Class balance may not be preserved in train/test split"
+                    "   ⚠️  Note: Class balance may not be preserved in train/test split"
                 )
                 # Fallback to original GroupShuffleSplit
                 gss = GroupShuffleSplit(
@@ -3808,7 +3808,7 @@ class CrossDataClassifier:
             print("\n   ✓ Training final models with optimal hyperparameters...")
 
             # DEBUG: Check training labels distribution
-            print(f"\n   🔍 DEBUG: Training data check...")
+            print("\n   🔍 DEBUG: Training data check...")
             print(f"      y_train unique values: {np.unique(y_train)}")
             print(f"      y_train distribution: {np.bincount(y_train)}")
             print(f"      self.class_names: {self.class_names}")
@@ -3834,7 +3834,7 @@ class CrossDataClassifier:
             )
 
             # DEBUG: Verify class encoding after training
-            print(f"\n   🔍 DEBUG: Verifying class encoding after training...")
+            print("\n   🔍 DEBUG: Verifying class encoding after training...")
             print(f"      LabelEncoder.classes_: {self.class_names}")
             print(
                 f"      SVC Model A.classes_: {pipeline_A.named_steps['svc'].classes_}"
@@ -3888,13 +3888,13 @@ class CrossDataClassifier:
 
             # DEBUG: Analyze probability distributions
             mcs_idx = np.where(self.class_names == "MCS")[0][0]
-            print(f"\n   🔍 DEBUG: Probability distribution analysis for Model A:")
-            print(f"      P(MCS) statistics - Original test:")
+            print("\n   🔍 DEBUG: Probability distribution analysis for Model A:")
+            print("      P(MCS) statistics - Original test:")
             print(f"         Mean: {np.mean(y_proba_A_on_orig[:, mcs_idx]):.3f}")
             print(f"         Std:  {np.std(y_proba_A_on_orig[:, mcs_idx]):.3f}")
             print(f"         Min:  {np.min(y_proba_A_on_orig[:, mcs_idx]):.3f}")
             print(f"         Max:  {np.max(y_proba_A_on_orig[:, mcs_idx]):.3f}")
-            print(f"      P(MCS) statistics - Reconstructed test:")
+            print("      P(MCS) statistics - Reconstructed test:")
             print(f"         Mean: {np.mean(y_proba_A_on_recon[:, mcs_idx]):.3f}")
             print(f"         Std:  {np.std(y_proba_A_on_recon[:, mcs_idx]):.3f}")
             print(f"         Min:  {np.min(y_proba_A_on_recon[:, mcs_idx]):.3f}")
@@ -3902,7 +3902,7 @@ class CrossDataClassifier:
 
             # DEBUG: Show first few predictions and probabilities
             print(
-                f"\n   🔍 DEBUG: First 3 predictions from Model A on original test (using argmax):"
+                "\n   🔍 DEBUG: First 3 predictions from Model A on original test (using argmax):"
             )
             for i in range(min(3, len(y_test))):
                 true_label = self.class_names[y_test[i]]
@@ -3930,13 +3930,13 @@ class CrossDataClassifier:
             )
 
             # DEBUG: Analyze probability distributions for Model B
-            print(f"\n   🔍 DEBUG: Probability distribution analysis for Model B:")
-            print(f"      P(MCS) statistics - Original test:")
+            print("\n   🔍 DEBUG: Probability distribution analysis for Model B:")
+            print("      P(MCS) statistics - Original test:")
             print(f"         Mean: {np.mean(y_proba_B_on_orig[:, mcs_idx]):.3f}")
             print(f"         Std:  {np.std(y_proba_B_on_orig[:, mcs_idx]):.3f}")
             print(f"         Min:  {np.min(y_proba_B_on_orig[:, mcs_idx]):.3f}")
             print(f"         Max:  {np.max(y_proba_B_on_orig[:, mcs_idx]):.3f}")
-            print(f"      P(MCS) statistics - Reconstructed test:")
+            print("      P(MCS) statistics - Reconstructed test:")
             print(f"         Mean: {np.mean(y_proba_B_on_recon[:, mcs_idx]):.3f}")
             print(f"         Std:  {np.std(y_proba_B_on_recon[:, mcs_idx]):.3f}")
             print(f"         Min:  {np.min(y_proba_B_on_recon[:, mcs_idx]):.3f}")
@@ -4012,7 +4012,7 @@ class CrossDataClassifier:
             print("\n" + "=" * 80)
             print("CROSS-DATA CLASSIFICATION SUMMARY")
             print("=" * 80)
-            print(f"\n📊 Dataset Information:")
+            print("\n📊 Dataset Information:")
             print(f"   Train subjects: {results['n_train_subjects']}")
             print(
                 f"   Test subjects: {results['n_test_subjects']} (SAME for all 4 test scenarios)"
@@ -4020,7 +4020,7 @@ class CrossDataClassifier:
             print(f"   Features: {results['n_features']}")
             print(f"   Classes: {', '.join(results['class_names'])}")
 
-            print(f"\n📈 Cross-Validation Results (on training set):")
+            print("\n📈 Cross-Validation Results (on training set):")
             print(
                 f"   Model A (trained on original): {np.mean(cv_scores_A):.3f} ± {np.std(cv_scores_A):.3f}"
             )
@@ -4028,7 +4028,7 @@ class CrossDataClassifier:
                 f"   Model B (trained on reconstructed): {np.mean(cv_scores_B):.3f} ± {np.std(cv_scores_B):.3f}"
             )
 
-            print(f"\n🔄 Cross-Testing Results (Balanced Accuracy):")
+            print("\n🔄 Cross-Testing Results (Balanced Accuracy):")
             print(
                 f"   Model A (original) → Original test set:        accuracy={results['model_A_orig_test']['accuracy']:.3f}, balanced_accuracy={results['model_A_orig_test']['balanced_accuracy']:.3f}"
             )
@@ -4042,18 +4042,18 @@ class CrossDataClassifier:
                 f"   Model B (reconstructed) → Reconstructed test:  accuracy={results['model_B_recon_test']['accuracy']:.3f}, balanced_accuracy={results['model_B_recon_test']['balanced_accuracy']:.3f}"
             )
 
-            print(f"\n✅ Data Integrity Verification:")
+            print("\n✅ Data Integrity Verification:")
             print(
                 f"   ✓ Same {results['n_test_subjects']} test subjects used for all 4 test scenarios"
             )
-            print(f"   ✓ Train/test subjects completely separate (no data leakage)")
-            print(f"   ✓ Stratified split maintained class balance")
+            print("   ✓ Train/test subjects completely separate (no data leakage)")
+            print("   ✓ Stratified split maintained class balance")
             print(f"   ✓ Random state: {self.random_state} (reproducible splits)")
 
             print(f"\n💾 Results saved to: {self.output_dir}")
-            print(f"   - 4 subdirectories (one per test scenario)")
-            print(f"   - Combined confusion matrices visualization")
-            print(f"   - Subject-level predictions for all scenarios")
+            print("   - 4 subdirectories (one per test scenario)")
+            print("   - Combined confusion matrices visualization")
+            print("   - Subject-level predictions for all scenarios")
             print("=" * 80)
 
             return results
@@ -4165,7 +4165,7 @@ class CrossDataClassifier:
                 )
 
                 # Grid search + train Model A (original)
-                print(f"   Grid search for Model A (original)...")
+                print("   Grid search for Model A (original)...")
                 best_A = self._grid_search_hyperparameters(
                     X_orig_train, y_train, groups_train, cv_strategy, n_splits
                 )
@@ -4175,7 +4175,7 @@ class CrossDataClassifier:
                 pipeline_A.fit(X_orig_train, y_train)
 
                 # Grid search + train Model B (reconstructed)
-                print(f"   Grid search for Model B (reconstructed)...")
+                print("   Grid search for Model B (reconstructed)...")
                 best_B = self._grid_search_hyperparameters(
                     X_recon_train, y_train, groups_train, cv_strategy, n_splits
                 )
@@ -4858,9 +4858,9 @@ class CrossDataClassifier:
                     scenario_dir, "feature_importances.csv"
                 )
                 feature_importance_df.to_csv(feature_importance_file, index=False)
-                print(f"   ✓ Feature importances saved (linear kernel)")
+                print("   ✓ Feature importances saved (linear kernel)")
             else:
-                print(f"   ℹ️  Feature importances not available (non-linear kernel)")
+                print("   ℹ️  Feature importances not available (non-linear kernel)")
 
             # Create plots for this scenario
             self._plot_scenario_results(
@@ -4955,7 +4955,7 @@ class CrossDataClassifier:
 
         print(f"   Class encoding: MCS=index {mcs_idx}, VS=index {vs_idx}")
         print(f"   Plotting P(MCS) from SVC.predict_proba()[:, {mcs_idx}]")
-        print(f"   Note: P(VS) = 1 - P(MCS), sum to 1.0")
+        print("   Note: P(VS) = 1 - P(MCS), sum to 1.0")
 
         # Extract P(MCS) for all 4 scenarios
         proba_OO = results["model_A_orig_test"]["y_proba"][:, mcs_idx]
@@ -6046,9 +6046,9 @@ class CrossDataClassifier:
                     )
                     print(f"      - n_samples={len(diff)}")
                     if p < 0.05:
-                        print(f"      - ✓ SIGNIFICANT (p < 0.05)")
+                        print("      - ✓ SIGNIFICANT (p < 0.05)")
                     else:
-                        print(f"      - ✗ Not significant (p ≥ 0.05)")
+                        print("      - ✗ Not significant (p ≥ 0.05)")
                 except Exception as e:
                     print(f"   WARNING: Wilcoxon test {i + 1} ({name}) failed: {e}")
                     p_values.append(1.0)

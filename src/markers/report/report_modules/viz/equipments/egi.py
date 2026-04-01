@@ -74,9 +74,7 @@ _egi64_rois = {
     "Cz": np.array([4, 7, 16, 21, 41, 51, 54]) - 1,
     "Pz": np.array([34, 33, 36, 38]) - 1,
     "scalp": np.arange(64),  # Include ALL 64 channels as scalp channels
-    "nonscalp": np.array(
-        []
-    ),  # No non-scalp channels for standard 64-channel EEG
+    "nonscalp": np.array([]),  # No non-scalp channels for standard 64-channel EEG
 }
 
 _egi257_rois = {
@@ -617,8 +615,8 @@ def _prepare_egi_layout(ch_config):
         z = pos[:, -1].mean()
         sphere = (x, y, z, radius)
 
-    _, pos, _, _, _, this_sphere, clip_origin = (
-        mne.viz.topomap._prepare_topomap_plot(info, "eeg", sphere=sphere)
+    _, pos, _, _, _, this_sphere, clip_origin = mne.viz.topomap._prepare_topomap_plot(
+        info, "eeg", sphere=sphere
     )
 
     outlines = {}

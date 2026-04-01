@@ -20,19 +20,19 @@ _montage_map = {}
 
 def define_equipment(equipment, montages, ch_names, layout_fun=None):
     """
-        Defines an equipement montage, ch_channels and layout function 
+    Defines an equipement montage, ch_channels and layout function
 
-        Args:
-            equipement (str): The equipement name
-            ch_channels (list(str)): The names of the EEG channels
-            layout_fun (callable([ch_config],)): Optional. A function that consumes a 
-            channels configuration and returns a layout of the channels positions  
+    Args:
+        equipement (str): The equipement name
+        ch_channels (list(str)): The names of the EEG channels
+        layout_fun (callable([ch_config],)): Optional. A function that consumes a
+        channels configuration and returns a layout of the channels positions
     """
-    
+
     if equipment in _montages:
-        logger.warning('{} already defined as equipment'.format(equipment))
+        logger.warning("{} already defined as equipment".format(equipment))
     else:
-        logger.info('Defining {}'.format(equipment))
+        logger.info("Defining {}".format(equipment))
     _montages[equipment] = montages
     _ch_names[equipment] = ch_names
     _layouts[equipment] = layout_fun
@@ -48,9 +48,9 @@ def define_neighbor(montage, fname):
         'neuromag306planar', 'ctf275', 'biosemi64', etc.
     """
     if montage in _neighbors:
-        logger.warning('Neighbors for {} already defined'.format(montage))
+        logger.warning("Neighbors for {} already defined".format(montage))
     else:
-        logger.info('Defining {} neighbors'.format(montage))
+        logger.info("Defining {} neighbors".format(montage))
     _neighbors[montage] = fname
 
 
@@ -61,12 +61,12 @@ def define_map_montage(src, dst, ch_names):
     Args:
         src (str): The name of the source montage to translate from
         dst (str): The name of the final montage where to transle to
-        ch_names (dict(str,str)): The map of channels name from the src montage 
-        to the dst montage  
+        ch_names (dict(str,str)): The map of channels name from the src montage
+        to the dst montage
     """
     if src in _montage_map:
         if dst in _montage_map[src]:
-            logger.warning('{} already translated to {}'.format(src, dst))
+            logger.warning("{} already translated to {}".format(src, dst))
     else:
         _montage_map[src] = {}
     _montage_map[src][dst] = ch_names
@@ -74,7 +74,7 @@ def define_map_montage(src, dst, ch_names):
 
 def map_montage(inst, dst):
     """
-    Translates a source montage according to channels' map and returns only the 
+    Translates a source montage according to channels' map and returns only the
     channels of the new montage.
 
     Args:
@@ -84,38 +84,42 @@ def map_montage(inst, dst):
     Returns:
         montage (instance of DigMontage): A new montage with the destination
         channels translated from the original montage.
-    
+
     Raises:
         ValueError: source montage is not defined in montage maps
         ValueError: source to destination montage map is not defined
     """
 
-    src = inst.info['description']
-    
+    src = inst.info["description"]
+
     # Lao modification: Check if the montage maps is defined
     if src not in _montage_map:
-        raise ValueError(f'There is no montage map for src {src},'
-                          ' the options are:'
-                          '\n\t'.join(['', *_montage_map.keys()]))
-    
+        raise ValueError(
+            f"There is no montage map for src {src}, the options are:\n\t".join(
+                ["", *_montage_map.keys()]
+            )
+        )
+
     if dst not in _montage_map[src]:
-        raise ValueError(f'There is no montage map for dst {dst} in src {src},'
-                          ' the options are:'
-                          '\n\t'.join(['', *_montage_map[src].keys()]))
-    
-    logger.info('Mapping montage from {} to {}'.format(src, dst))
-    
+        raise ValueError(
+            f"There is no montage map for dst {dst} in src {src},"
+            " the options are:"
+            "\n\t".join(["", *_montage_map[src].keys()])
+        )
+
+    logger.info("Mapping montage from {} to {}".format(src, dst))
+
     rename = _montage_map[src][dst]
     to_keep = list(rename.keys())
     translated = inst.copy().pick_channels(to_keep)
     translated.rename_channels(rename)
-    translated.info['description'] = dst
+    translated.info["description"] = dst
     return translated.pick_channels(get_ch_names(dst))
 
 
 def _check_get_eq_config(config):
     """
-    Checks if the equipement defined in config exist or not and return the 
+    Checks if the equipement defined in config exist or not and return the
     equipement name and channels config name.
 
     Args:
@@ -127,10 +131,10 @@ def _check_get_eq_config(config):
     Raises:
         ValueError: equipement not defined
     """
-    equipment = config.split('/')[0]
-    ch_config = config.split('/')[1]
+    equipment = config.split("/")[0]
+    ch_config = config.split("/")[1]
     if equipment not in _montages:
-        raise ValueError('{} not defined as an equipment'.format(equipment))
+        raise ValueError("{} not defined as an equipment".format(equipment))
     return equipment, ch_config
 
 
@@ -160,18 +164,19 @@ def get_montage_name(config):
 
     Args:
         config (str): The montage config formatted as <equipement_name>/<channels_config_name>
-    
+
     Returns:
         name (str): The name of the montage
-    
+
     Raises:
         ValueError: equipment/channels_config_name not a defined montage
     """
     equipment, ch_config = _check_get_eq_config(config)
     eq = _montages[equipment]
     if ch_config not in eq:
-        raise ValueError('Montage not defined for {} with {} '
-                         'config'.format(equipment, ch_config))
+        raise ValueError(
+            "Montage not defined for {} with {} config".format(equipment, ch_config)
+        )
 
     return eq[ch_config]
 
@@ -182,7 +187,7 @@ def get_montage(config):
 
     Args:
         config (str): The montage config formatted as <equipement_name>/<channels_config_name>
-    
+
     Returns:
         montage (instance of DigMontage): A montage created from the config param
     """
@@ -197,7 +202,7 @@ def get_montage(config):
 
 def prepare_layout(config, info=None, return_info=False):
     layout_fun = None
-    if config != 'head':
+    if config != "head":
         equipment, ch_config = _check_get_eq_config(config)
         layout_fun = _layouts[equipment]
     if layout_fun is not None:
@@ -206,7 +211,7 @@ def prepare_layout(config, info=None, return_info=False):
     else:
         # layout = mne.channels.make_eeg_layout(info)
         sphere = None
-        outlines = 'head'
+        outlines = "head"
     # if info is not None:
     #     idx = np.array([layout.names.index(x) for x in info['ch_names'] if
     #                     x not in info['bads']])
@@ -218,23 +223,21 @@ def prepare_layout(config, info=None, return_info=False):
         if info is None:
             ch_names = get_ch_names(config)
             montage = get_montage(config)
-            info = mne.create_info(
-                ch_names, 1, ch_types='eeg', verbose=None)
+            info = mne.create_info(ch_names, 1, ch_types="eeg", verbose=None)
             info.set_montage(montage)
         out = sphere, outlines, info
     return out
 
 
 def get_ch_adjacency(epochs):
-    montage = epochs.info['description']
+    montage = epochs.info["description"]
     if montage in _neighbors:
         fname = _neighbors[montage]
         adjacency, ch_names = mne.channels.read_ch_adjacency(fname)
         picks = [ch_names.index(v) for v in epochs.ch_names if v in ch_names]
-        adjacency, ch_names = mne.channels.read_ch_adjacency(
-            fname, picks=picks)
+        adjacency, ch_names = mne.channels.read_ch_adjacency(fname, picks=picks)
     else:
-        logger.warning(f'Neighbors for {montage} not defined. Using None')
+        logger.warning(f"Neighbors for {montage} not defined. Using None")
         adjacency = None
     return adjacency
 
@@ -245,9 +248,8 @@ def get_ch_adjacency_montage(config, pick_names=None):
         adjacency, ch_names = mne.channels.read_ch_adjacency(fname)
         if pick_names is not None:
             picks = [ch_names.index(v) for v in pick_names if v in ch_names]
-            adjacency, ch_names = mne.channels.read_ch_adjacency(
-                fname, picks=picks)
+            adjacency, ch_names = mne.channels.read_ch_adjacency(fname, picks=picks)
     else:
-        logger.warning(f'Neighbors for {config} not defined. Using None')
+        logger.warning(f"Neighbors for {config} not defined. Using None")
         adjacency = None
     return adjacency

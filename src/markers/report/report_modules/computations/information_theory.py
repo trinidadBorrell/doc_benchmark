@@ -14,10 +14,12 @@ from ..data_io import MarkerDataAdapter, align_data_to_eeg_montage
 logger = logging.getLogger(__name__)
 
 
-def compute_information_theory_data(epochs, report_data, output_dir="./tmp_computed_data"):
+def compute_information_theory_data(
+    epochs, report_data, output_dir="./tmp_computed_data"
+):
     """
     Compute all information theory data and save to pkl (NO PLOTTING).
-    
+
     Parameters
     ----------
     epochs : mne.Epochs
@@ -26,39 +28,39 @@ def compute_information_theory_data(epochs, report_data, output_dir="./tmp_compu
         Report data dictionary
     output_dir : str or Path
         Directory to save computed data
-        
+
     Returns
     -------
     dict
         Dictionary with paths to saved data files
     """
     from .topos import compute_marker_topo
-    
+
     logger.info("Computing information theory analysis data...")
-    
+
     output_paths = {}
-    
+
     try:
         # 1. Compute per-band Permutation Entropy
         pe_path = _compute_per_band_permutation_entropy(epochs, report_data, output_dir)
         if pe_path:
-            output_paths['permutation_entropy'] = pe_path
+            output_paths["permutation_entropy"] = pe_path
 
         # 2. Compute Kolmogorov complexity
         kc_path = _compute_kolmogorov_complexity(epochs, report_data, output_dir)
         if kc_path:
-            output_paths['kolmogorov_complexity'] = kc_path
-        
+            output_paths["kolmogorov_complexity"] = kc_path
+
         # 3. Compute generic per-channel information theory measures
         per_channel_info_theory = {}
         if "kolmogorov_per_channel" in report_data:
-            per_channel_info_theory["kolmogorov_complexity"] = (
-                report_data["kolmogorov_per_channel"]
-            )
+            per_channel_info_theory["kolmogorov_complexity"] = report_data[
+                "kolmogorov_per_channel"
+            ]
         if "permutation_entropy_per_channel" in report_data:
-            per_channel_info_theory["permutation_entropy"] = (
-                report_data["permutation_entropy_per_channel"]
-            )
+            per_channel_info_theory["permutation_entropy"] = report_data[
+                "permutation_entropy_per_channel"
+            ]
 
         if per_channel_info_theory and epochs is not None:
             for measure_name, measure_data in per_channel_info_theory.items():
@@ -70,7 +72,9 @@ def compute_information_theory_data(epochs, report_data, output_dir="./tmp_compu
                             name=measure_name,
                             ch_info=epochs.info,
                         )
-                        measure_path = Path(output_dir) / f"info_theory_{measure_name}.pkl"
+                        measure_path = (
+                            Path(output_dir) / f"info_theory_{measure_name}.pkl"
+                        )
                         compute_marker_topo(
                             adapter,
                             reduction=lambda x: x,
@@ -78,15 +82,16 @@ def compute_information_theory_data(epochs, report_data, output_dir="./tmp_compu
                             output_path=measure_path,
                         )
                         logger.info(f"Computed {measure_name} information theory data")
-                        output_paths[f'info_theory_{measure_name}'] = measure_path
+                        output_paths[f"info_theory_{measure_name}"] = measure_path
                 except Exception as e:
                     logger.warning(f"Could not compute {measure_name} data: {e}")
-        
+
         logger.info("✅ Information theory computations complete")
 
     except Exception as e:
         logger.error(f"Failed to compute information theory data: {e}")
         import traceback
+
         logger.error(f"Error details: {traceback.format_exc()}")
 
     return output_paths
@@ -95,7 +100,7 @@ def compute_information_theory_data(epochs, report_data, output_dir="./tmp_compu
 def _compute_per_band_permutation_entropy(epochs, report_data, output_dir):
     """Compute per-band Permutation Entropy topoplots data."""
     from .topos import compute_markers_topos
-    
+
     try:
         logger.info("Computing per-band Permutation Entropy...")
 
@@ -112,27 +117,35 @@ def _compute_per_band_permutation_entropy(epochs, report_data, output_dir):
         preprocessing_bad_channels = []
         if "metadata" in report_data:
             preprocessing_info = report_data["metadata"].get("preprocessing_info", {})
-            preprocessing_bad_channels = preprocessing_info.get("bad_channels_detected", [])
-            logger.info(f"Using preprocessing bad channels for PE: {preprocessing_bad_channels}")
+            preprocessing_bad_channels = preprocessing_info.get(
+                "bad_channels_detected", []
+            )
+            logger.info(
+                f"Using preprocessing bad channels for PE: {preprocessing_bad_channels}"
+            )
 
         for band_name, marker_name in band_configs:
             pe_key = f"pe_{band_name}"
             if pe_key not in report_data:
                 logger.warning(f"PE data key '{pe_key}' not found in report data")
                 continue
-            
+
             # Convert to numpy array (junifer data comes in correct shape)
             pe_data = np.array(report_data[pe_key])
-            logger.info(f"Found PE {band_name} band data in key '{pe_key}' with shape: {pe_data.shape}")
-            
+            logger.info(
+                f"Found PE {band_name} band data in key '{pe_key}' with shape: {pe_data.shape}"
+            )
+
             # Aggregate across epochs if data is (epochs, channels)
             if pe_data.ndim == 3 and pe_data.shape[0] == 1:
                 # Shape is (1, epochs, channels) - squeeze first dimension
                 pe_data = pe_data.squeeze(0)
-            
+
             if pe_data.ndim == 2:
                 # Data is (epochs, channels) - aggregate across epochs
-                logger.info(f"Aggregating PE {band_name} across {pe_data.shape[0]} epochs")
+                logger.info(
+                    f"Aggregating PE {band_name} across {pe_data.shape[0]} epochs"
+                )
                 pe_data = np.mean(pe_data, axis=0)
                 logger.info(f"Aggregated PE {band_name}: shape {pe_data.shape}")
             elif pe_data.ndim == 1:
@@ -184,7 +197,10 @@ def _compute_per_band_permutation_entropy(epochs, report_data, output_dir):
         # Compute topographies
         pe_path = Path(output_dir) / "permutation_entropy_bands.pkl"
         compute_markers_topos(
-            pe_markers, s_reductions, s_picks, outlines="egi/256",
+            pe_markers,
+            s_reductions,
+            s_picks,
+            outlines="egi/256",
             output_path=pe_path,
         )
         logger.info("✅ Permutation Entropy topographies computed")
@@ -193,6 +209,7 @@ def _compute_per_band_permutation_entropy(epochs, report_data, output_dir):
     except Exception as e:
         logger.error(f"Failed to create per-band PE topoplots: {e}")
         import traceback
+
         logger.error(f"Error details: {traceback.format_exc()}")
         return None
 
@@ -200,7 +217,7 @@ def _compute_per_band_permutation_entropy(epochs, report_data, output_dir):
 def _compute_kolmogorov_complexity(epochs, report_data, output_dir):
     """Compute Kolmogorov complexity topoplot data"""
     from .topos import compute_markers_topos
-    
+
     try:
         logger.info("Computing Kolmogorov complexity...")
 
@@ -217,12 +234,12 @@ def _compute_kolmogorov_complexity(epochs, report_data, output_dir):
         # Convert to numpy array (junifer data comes in correct shape)
         kc_data = np.array(kc_data)
         logger.info(f"Kolmogorov complexity data shape: {kc_data.shape}")
-        
+
         # Aggregate across epochs if data is (epochs, channels)
         if kc_data.ndim == 3 and kc_data.shape[0] == 1:
             # Shape is (1, epochs, channels) - squeeze first dimension
             kc_data = kc_data.squeeze(0)
-        
+
         if kc_data.ndim == 2:
             # Data is (epochs, channels) - aggregate across epochs
             logger.info(f"Aggregating Kolmogorov across {kc_data.shape[0]} epochs")
@@ -273,7 +290,10 @@ def _compute_kolmogorov_complexity(epochs, report_data, output_dir):
         # Compute topography
         kc_path = Path(output_dir) / "kolmogorov_complexity.pkl"
         compute_markers_topos(
-            kc_markers, s_reductions, s_picks, outlines="egi/256",
+            kc_markers,
+            s_reductions,
+            s_picks,
+            outlines="egi/256",
             output_path=kc_path,
         )
         logger.info("✅ Kolmogorov complexity computed")
@@ -282,5 +302,6 @@ def _compute_kolmogorov_complexity(epochs, report_data, output_dir):
     except Exception as e:
         logger.error(f"Failed to create Kolmogorov complexity topoplot: {e}")
         import traceback
+
         logger.error(f"Error details: {traceback.format_exc()}")
         return None

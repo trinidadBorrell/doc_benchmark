@@ -14,10 +14,12 @@ from ..data_io import MarkerDataAdapter, align_data_to_eeg_montage
 logger = logging.getLogger(__name__)
 
 
-def compute_spectral_analysis_data(epochs, report_data, output_dir="./tmp_computed_data"):
+def compute_spectral_analysis_data(
+    epochs, report_data, output_dir="./tmp_computed_data"
+):
     """
     Compute all spectral analysis data and save to pkl (NO PLOTTING).
-    
+
     Parameters
     ----------
     epochs : mne.Epochs
@@ -26,20 +28,20 @@ def compute_spectral_analysis_data(epochs, report_data, output_dir="./tmp_comput
         Report data dictionary
     output_dir : str or Path
         Directory to save computed data
-        
+
     Returns
     -------
     dict
         Dictionary with paths to saved data files
     """
     logger.info("Computing spectral analysis data...")
-    
+
     output_paths = {}
-    
+
     try:
         per_channel_spectral = report_data.get("per_channel_spectral", {})
         normalized_spectral = report_data.get("normalized_spectral", {})
-        
+
         if not per_channel_spectral and not normalized_spectral:
             logger.warning("No spectral data found")
             return output_paths
@@ -51,25 +53,26 @@ def compute_spectral_analysis_data(epochs, report_data, output_dir="./tmp_comput
             epochs, normalized_spectral, preprocessing_bad_channels, output_dir
         )
         if bands_path:
-            output_paths['spectral_bands_normalized'] = bands_path
+            output_paths["spectral_bands_normalized"] = bands_path
 
         # 2. Compute absolute power (log scale)
         absolute_path = _compute_spectral_power_log(
             epochs, per_channel_spectral, preprocessing_bad_channels, output_dir
         )
         if absolute_path:
-            output_paths['spectral_absolute_power'] = absolute_path
+            output_paths["spectral_absolute_power"] = absolute_path
 
         # 3. Compute spectral summaries
         summaries_path = _compute_spectral_summaries(epochs, report_data, output_dir)
         if summaries_path:
-            output_paths['spectral_summaries'] = summaries_path
+            output_paths["spectral_summaries"] = summaries_path
 
         logger.info("✅ Spectral computations complete")
 
     except Exception as e:
         logger.error(f"Failed to compute spectral data: {e}")
         import traceback
+
         logger.error(f"Error details: {traceback.format_exc()}")
 
     return output_paths
@@ -85,33 +88,43 @@ def _get_preprocessing_bad_channels(report_data):
     return preprocessing_bad_channels
 
 
-def _compute_normalized_spectral_bands(epochs, normalized_spectral, preprocessing_bad_channels, output_dir):
+def _compute_normalized_spectral_bands(
+    epochs, normalized_spectral, preprocessing_bad_channels, output_dir
+):
     """Compute normalized spectral bands data.
-    
+
     Note: Data from HDF5 is already in dB scale (10*log10 of relative power),
     so no additional transformation is needed.
     """
     from .topos import compute_markers_topos
-    
+
     try:
         spectral_bands = OrderedDict()
         # Normalized bands have 'n' suffix: deltan, thetan, etc.
-        band_names = ["delta_normalized", "theta_normalized", "alpha_normalized", "beta_normalized", "gamma_normalized"]
+        band_names = [
+            "delta_normalized",
+            "theta_normalized",
+            "alpha_normalized",
+            "beta_normalized",
+            "gamma_normalized",
+        ]
 
         for band in band_names:
             if band in normalized_spectral:
                 # Convert to numpy array (junifer data comes in correct shape)
                 band_data = np.array(normalized_spectral[band])
                 logger.info(f"Found {band} band data with shape: {band_data.shape}")
-                
+
                 # Aggregate across epochs if data is (epochs, channels)
                 if band_data.ndim == 3 and band_data.shape[0] == 1:
                     # Shape is (1, epochs, channels) - squeeze first dimension
                     band_data = band_data.squeeze(0)
-                
+
                 if band_data.ndim == 2:
                     # Data is (epochs, channels) - aggregate across epochs
-                    logger.info(f"Aggregating {band} across {band_data.shape[0]} epochs")
+                    logger.info(
+                        f"Aggregating {band} across {band_data.shape[0]} epochs"
+                    )
                     band_data = np.mean(band_data, axis=0)
                     logger.info(f"Aggregated {band}: shape {band_data.shape}")
                 elif band_data.ndim == 1:
@@ -152,7 +165,7 @@ def _compute_normalized_spectral_bands(epochs, normalized_spectral, preprocessin
 
         s_reductions = {}
         s_picks = {}
-        
+
         def identity_reduction(data):
             return data
 
@@ -163,8 +176,11 @@ def _compute_normalized_spectral_bands(epochs, normalized_spectral, preprocessin
         # Compute topographies
         bands_path = Path(output_dir) / "spectral_bands_normalized.pkl"
         compute_markers_topos(
-            spectral_bands, s_reductions, s_picks, outlines="egi/256",
-            output_path=bands_path
+            spectral_bands,
+            s_reductions,
+            s_picks,
+            outlines="egi/256",
+            output_path=bands_path,
         )
         logger.info("✅ Normalized spectral bands computed")
         return bands_path
@@ -172,18 +188,21 @@ def _compute_normalized_spectral_bands(epochs, normalized_spectral, preprocessin
     except Exception as e:
         logger.error(f"Failed to compute normalized spectral bands: {e}")
         import traceback
+
         logger.error(f"Error details: {traceback.format_exc()}")
         return None
 
 
-def _compute_spectral_power_log(epochs, per_channel_spectral, preprocessing_bad_channels, output_dir):
+def _compute_spectral_power_log(
+    epochs, per_channel_spectral, preprocessing_bad_channels, output_dir
+):
     """Compute absolute spectral power (non-normalized, log scale).
-    
+
     Note: Data from HDF5 is already in dB scale (10*log10 of absolute power),
     so no additional transformation is needed.
     """
     from .topos import compute_markers_topos
-    
+
     try:
         logger.info("Computing absolute spectral power...")
         spectral_absolute_bands = OrderedDict()
@@ -193,16 +212,20 @@ def _compute_spectral_power_log(epochs, per_channel_spectral, preprocessing_bad_
             if band in per_channel_spectral:
                 # Convert to numpy array (junifer data comes in correct shape)
                 band_data = np.array(per_channel_spectral[band])
-                logger.info(f"Found {band} band for absolute power with shape: {band_data.shape}")
-                
+                logger.info(
+                    f"Found {band} band for absolute power with shape: {band_data.shape}"
+                )
+
                 # Aggregate across epochs if data is (epochs, channels)
                 if band_data.ndim == 3 and band_data.shape[0] == 1:
                     # Shape is (1, epochs, channels) - squeeze first dimension
                     band_data = band_data.squeeze(0)
-                
+
                 if band_data.ndim == 2:
                     # Data is (epochs, channels) - aggregate across epochs
-                    logger.info(f"Aggregating {band} across {band_data.shape[0]} epochs")
+                    logger.info(
+                        f"Aggregating {band} across {band_data.shape[0]} epochs"
+                    )
                     band_data = np.mean(band_data, axis=0)
                     logger.info(f"Aggregated {band}: shape {band_data.shape}")
                 elif band_data.ndim == 1:
@@ -238,7 +261,7 @@ def _compute_spectral_power_log(epochs, per_channel_spectral, preprocessing_bad_
 
         s_reductions = {}
         s_picks = {}
-        
+
         def identity_reduction(data):
             return data
 
@@ -248,8 +271,11 @@ def _compute_spectral_power_log(epochs, per_channel_spectral, preprocessing_bad_
 
         absolute_path = Path(output_dir) / "spectral_absolute_power.pkl"
         compute_markers_topos(
-            spectral_absolute_bands, s_reductions, s_picks, outlines="egi/256",
-            output_path=absolute_path
+            spectral_absolute_bands,
+            s_reductions,
+            s_picks,
+            outlines="egi/256",
+            output_path=absolute_path,
         )
         logger.info("✅ Absolute spectral power computed")
         return absolute_path
@@ -257,6 +283,7 @@ def _compute_spectral_power_log(epochs, per_channel_spectral, preprocessing_bad_
     except Exception as e:
         logger.error(f"Failed to compute spectral power (log): {e}")
         import traceback
+
         logger.error(f"Error details: {traceback.format_exc()}")
         return None
 
@@ -264,7 +291,7 @@ def _compute_spectral_power_log(epochs, per_channel_spectral, preprocessing_bad_
 def _compute_spectral_summaries(epochs, report_data, output_dir):
     """Compute spectral summaries (SE, MSF, SEF90, SEF95)"""
     from .topos import compute_markers_topos
-    
+
     try:
         logger.info("Computing spectral summaries...")
 
@@ -287,7 +314,7 @@ def _compute_spectral_summaries(epochs, report_data, output_dir):
         for summary in summary_names:
             if summary in per_channel_spectral_summaries:
                 summary_data = per_channel_spectral_summaries[summary]
-                
+
                 if hasattr(summary_data, "shape") and len(summary_data.shape) > 1:
                     summary_data = summary_data.flatten()
 
@@ -314,7 +341,7 @@ def _compute_spectral_summaries(epochs, report_data, output_dir):
 
         s_reductions = {}
         s_picks = {}
-        
+
         def identity_reduction(data):
             return data
 
@@ -324,8 +351,11 @@ def _compute_spectral_summaries(epochs, report_data, output_dir):
 
         summaries_path = Path(output_dir) / "spectral_summaries.pkl"
         compute_markers_topos(
-            spectral_summaries, s_reductions, s_picks, outlines="egi/256",
-            output_path=summaries_path
+            spectral_summaries,
+            s_reductions,
+            s_picks,
+            outlines="egi/256",
+            output_path=summaries_path,
         )
         logger.info("✅ Spectral summaries computed")
         return summaries_path
@@ -333,5 +363,6 @@ def _compute_spectral_summaries(epochs, report_data, output_dir):
     except Exception as e:
         logger.error(f"Failed to compute spectral summaries: {e}")
         import traceback
+
         logger.error(f"Error details: {traceback.format_exc()}")
         return None

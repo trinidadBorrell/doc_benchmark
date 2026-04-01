@@ -119,9 +119,7 @@ def _load_domain_knowledge_embeddings(
     df = pd.read_csv(marker_csv, sep=";")
     df_filt = df[df["Reduction"] == reduction_str].copy()
     if df_filt.empty:
-        raise ValueError(
-            f"No rows for Reduction={reduction_str!r} in {marker_csv}"
-        )
+        raise ValueError(f"No rows for Reduction={reduction_str!r} in {marker_csv}")
 
     meta_cols = {"Subject", "Reduction", "Label"}
     marker_names = [
@@ -324,7 +322,9 @@ def fit_ridge_probe(
         marker: {"r2": r2, "alpha": float(mor.estimators_[i].alpha_)}
         for i, (marker, r2) in enumerate(zip(marker_names, r2_per_marker))
     }
-    with open(op.join(output_dir, f"ridge_probe_summary_{fm_model_name}.json"), "w") as f:
+    with open(
+        op.join(output_dir, f"ridge_probe_summary_{fm_model_name}.json"), "w"
+    ) as f:
         json.dump(summary, f, indent=2)
 
     log.info(
@@ -469,7 +469,11 @@ def run_rsa_analysis(
 
     log.info(
         "RSA ρ=%.3f [%.3f, %.3f]  p_perm=%.3f — %s",
-        rho, ci_lo, ci_hi, p_perm, fm_model_name,
+        rho,
+        ci_lo,
+        ci_hi,
+        p_perm,
+        fm_model_name,
     )
     return results, tri_dk, tri_fm
 
@@ -531,21 +535,21 @@ def save_rsa_summary(rsa_results_all: Dict[str, Dict], output_dir: str):
     err_lo = [rho_vals[i] - ci_lo[i] for i in range(len(models))]
     err_hi = [ci_hi[i] - rho_vals[i] for i in range(len(models))]
     ax.bar(
-        x, rho_vals,
+        x,
+        rho_vals,
         yerr=[err_lo, err_hi],
         color=[_EMBED_COLORS[i % len(_EMBED_COLORS)] for i in range(len(models))],
-        alpha=0.85, capsize=8,
+        alpha=0.85,
+        capsize=8,
         error_kw={"elinewidth": 2, "capthick": 2},
     )
-  #  for xi, p, rho in zip(x, p_vals, rho_vals):
-  #      if p < 0.05:
-  #          ax.text(xi, rho + 0.02, "*", ha="center", va="bottom", fontsize=14)
+    #  for xi, p, rho in zip(x, p_vals, rho_vals):
+    #      if p < 0.05:
+    #          ax.text(xi, rho + 0.02, "*", ha="center", va="bottom", fontsize=14)
     ax.set_xticks(x)
     ax.set_xticklabels(models)
     ax.set_ylabel("Spearman ρ (RDM upper triangle)")
-    ax.set_title(
-        "RSA(DK, FM) per Foundation Model"
-    )
+    ax.set_title("RSA(DK, FM) per Foundation Model")
     ax.set_ylim(0, 1.05)
     ax.axhline(0, color="gray", linewidth=0.8, linestyle="--", alpha=0.5)
     ax.grid(True, alpha=0.3, axis="y")
@@ -695,9 +699,7 @@ def run_cka_analysis(
     os.makedirs(output_dir, exist_ok=True)
 
     if X_dk.shape[0] < 10:
-        log.warning(
-            "CKA: only %d subjects — results unreliable.", X_dk.shape[0]
-        )
+        log.warning("CKA: only %d subjects — results unreliable.", X_dk.shape[0])
         if X_dk.shape[0] < 100:
             log.info(
                 "Using unbiased CKA estimator is recommended for n < 100 "
@@ -786,10 +788,12 @@ def save_cka_summary(cka_results_all: Dict[str, Dict], output_dir: str):
     err_lo = [cka_vals[i] - ci_lo[i] for i in range(len(models))]
     err_hi = [ci_hi[i] - cka_vals[i] for i in range(len(models))]
     ax.bar(
-        x, cka_vals,
+        x,
+        cka_vals,
         yerr=[err_lo, err_hi],
         color=[_EMBED_COLORS[i % len(_EMBED_COLORS)] for i in range(len(models))],
-        alpha=0.85, capsize=8,
+        alpha=0.85,
+        capsize=8,
     )
     ax.set_xticks(x)
     ax.set_xticklabels(models)
@@ -818,7 +822,7 @@ def _compute_eigenvalues(X: np.ndarray) -> np.ndarray:
     X_c = X - X.mean(axis=0)
     n = X_c.shape[0]
     _, s, _ = np.linalg.svd(X_c, full_matrices=False)
-    ev = s ** 2 / max(n - 1, 1)
+    ev = s**2 / max(n - 1, 1)
     return ev[ev > 1e-10]
 
 
@@ -840,7 +844,7 @@ def _dim_metrics_from_eigenvalues(
             slope, _ = np.polyfit(np.log(k_vals), np.log(eigenvalues), 1)
             corr = np.corrcoef(np.log(k_vals), np.log(eigenvalues))[0, 1]
         alpha = float(-slope)
-        r2_fit = float(corr ** 2)
+        r2_fit = float(corr**2)
     else:
         alpha = float("nan")
         r2_fit = float("nan")
@@ -853,7 +857,7 @@ def _dim_metrics_from_eigenvalues(
     n_99 = int(np.searchsorted(ev_curve, 0.99) + 1)
 
     # Participation Ratio: sum(λ)² / sum(λ²)
-    PR = float(eigenvalues.sum() ** 2 / (eigenvalues ** 2).sum())
+    PR = float(eigenvalues.sum() ** 2 / (eigenvalues**2).sum())
 
     # Effective Rank: exp(H(p)) where H is Shannon entropy of normalized eigenvalues
     eff_rank = float(np.exp(-np.sum(lam_norm * np.log(lam_norm + 1e-12))))
@@ -936,10 +940,12 @@ def run_dimensionality_analysis(
             boot_ER.append(m["effective_rank"])
             boot_n90.append(m["n_90"])
             boot_n95.append(m["n_95"])
+
         def _ci(arr):
             if not arr:
                 return [float("nan"), float("nan")]
             return [float(np.percentile(arr, 2.5)), float(np.percentile(arr, 97.5))]
+
         return {
             "PR_ci": _ci(boot_PR),
             "EffRank_ci": _ci(boot_ER),
@@ -1004,16 +1010,25 @@ def _plot_eigenspectrum(
             continue
         k = np.arange(1, len(eigs) + 1, dtype=float)
         ax.plot(
-            np.log(k), np.log(eigs), ".", markersize=4, alpha=0.6,
-            color=color, label=label,
+            np.log(k),
+            np.log(eigs),
+            ".",
+            markersize=4,
+            alpha=0.6,
+            color=color,
+            label=label,
         )
         if len(eigs) > 2:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
                 slope, intercept = np.polyfit(np.log(k), np.log(eigs), 1)
             ax.plot(
-                np.log(k), slope * np.log(k) + intercept, "-",
-                color=color, linewidth=1.8, alpha=0.9,
+                np.log(k),
+                slope * np.log(k) + intercept,
+                "-",
+                color=color,
+                linewidth=1.8,
+                alpha=0.9,
                 label=f"  fit α={-slope:.2f}",
             )
 
@@ -1048,7 +1063,11 @@ def _plot_ev_curve(
 
     for thresh, ls in [(0.90, "--"), (0.95, ":")]:
         ax.axhline(
-            thresh, color="gray", linestyle=ls, linewidth=0.9, alpha=0.6,
+            thresh,
+            color="gray",
+            linestyle=ls,
+            linewidth=0.9,
+            alpha=0.6,
             label=f"{int(thresh * 100)}%",
         )
 
@@ -1080,14 +1099,26 @@ def _plot_eigenspectrum_all(
     dk_eigs = eigs_per_model[models[0]]["DK"]
     if len(dk_eigs) > 0:
         k = np.arange(1, len(dk_eigs) + 1, dtype=float)
-        ax.plot(np.log(k), np.log(dk_eigs), ".", ms=4, alpha=0.5, color="#9467bd", label="DK")
+        ax.plot(
+            np.log(k),
+            np.log(dk_eigs),
+            ".",
+            ms=4,
+            alpha=0.5,
+            color="#9467bd",
+            label="DK",
+        )
         if len(dk_eigs) > 2:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
                 slope, intercept = np.polyfit(np.log(k), np.log(dk_eigs), 1)
             ax.plot(
-                np.log(k), slope * np.log(k) + intercept, "-",
-                color="#9467bd", linewidth=1.8, label=f"DK fit  α={-slope:.2f}",
+                np.log(k),
+                slope * np.log(k) + intercept,
+                "-",
+                color="#9467bd",
+                linewidth=1.8,
+                label=f"DK fit  α={-slope:.2f}",
             )
 
     for i, model in enumerate(models):
@@ -1096,14 +1127,20 @@ def _plot_eigenspectrum_all(
             continue
         color = _EMBED_COLORS[i % len(_EMBED_COLORS)]
         k = np.arange(1, len(fm_eigs) + 1, dtype=float)
-        ax.plot(np.log(k), np.log(fm_eigs), ".", ms=4, alpha=0.5, color=color, label=model)
+        ax.plot(
+            np.log(k), np.log(fm_eigs), ".", ms=4, alpha=0.5, color=color, label=model
+        )
         if len(fm_eigs) > 2:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
                 slope, intercept = np.polyfit(np.log(k), np.log(fm_eigs), 1)
             ax.plot(
-                np.log(k), slope * np.log(k) + intercept, "-",
-                color=color, linewidth=1.8, label=f"{model} α={-slope:.2f}",
+                np.log(k),
+                slope * np.log(k) + intercept,
+                "-",
+                color=color,
+                linewidth=1.8,
+                label=f"{model} α={-slope:.2f}",
             )
 
     ax.set_xlabel("log(rank $i$)")
@@ -1112,7 +1149,9 @@ def _plot_eigenspectrum_all(
     ax.legend(fontsize=7, ncol=2)
     ax.grid(True, alpha=0.3)
     plt.tight_layout()
-    plt.savefig(op.join(plots_dir, "eigenspectrum_all.png"), dpi=150, bbox_inches="tight")
+    plt.savefig(
+        op.join(plots_dir, "eigenspectrum_all.png"), dpi=150, bbox_inches="tight"
+    )
     plt.close()
 
 
@@ -1131,7 +1170,14 @@ def _plot_ev_curve_all(
     dk_eigs = eigs_per_model[models[0]]["DK"]
     if len(dk_eigs) > 0:
         dk_ev = np.cumsum(dk_eigs) / dk_eigs.sum()
-        ax.plot(np.arange(1, len(dk_ev) + 1), dk_ev, "-", color="#9467bd", linewidth=2.5, label="DK")
+        ax.plot(
+            np.arange(1, len(dk_ev) + 1),
+            dk_ev,
+            "-",
+            color="#9467bd",
+            linewidth=2.5,
+            label="DK",
+        )
 
     for i, model in enumerate(models):
         fm_eigs = eigs_per_model[model]["FM"]
@@ -1139,11 +1185,24 @@ def _plot_ev_curve_all(
             continue
         fm_ev = np.cumsum(fm_eigs) / fm_eigs.sum()
         color = _EMBED_COLORS[i % len(_EMBED_COLORS)]
-        ax.plot(np.arange(1, len(fm_ev) + 1), fm_ev, "-", color=color, linewidth=2, label=model)
+        ax.plot(
+            np.arange(1, len(fm_ev) + 1),
+            fm_ev,
+            "-",
+            color=color,
+            linewidth=2,
+            label=model,
+        )
 
     for thresh, ls in [(0.90, "--"), (0.95, ":")]:
-        ax.axhline(thresh, color="gray", linestyle=ls, linewidth=0.9, alpha=0.6,
-                   label=f"{int(thresh * 100)}%")
+        ax.axhline(
+            thresh,
+            color="gray",
+            linestyle=ls,
+            linewidth=0.9,
+            alpha=0.6,
+            label=f"{int(thresh * 100)}%",
+        )
 
     ax.set_xlabel("Number of principal components")
     ax.set_ylabel("Cumulative explained variance")
@@ -1193,13 +1252,25 @@ def save_dimensionality_csv(
         return ""
 
     METRICS = [
-        "n_subjects", "ambient_dim", "n_eigenvalues",
-        "power_law_alpha", "power_law_r2",
-        "n_80", "n_90", "n_90_ci_lower", "n_90_ci_upper",
-        "n_95", "n_95_ci_lower", "n_95_ci_upper",
+        "n_subjects",
+        "ambient_dim",
+        "n_eigenvalues",
+        "power_law_alpha",
+        "power_law_r2",
+        "n_80",
+        "n_90",
+        "n_90_ci_lower",
+        "n_90_ci_upper",
+        "n_95",
+        "n_95_ci_lower",
+        "n_95_ci_upper",
         "n_99",
-        "participation_ratio", "PR_ci_lower", "PR_ci_upper",
-        "effective_rank", "EffRank_ci_lower", "EffRank_ci_upper",
+        "participation_ratio",
+        "PR_ci_lower",
+        "PR_ci_upper",
+        "effective_rank",
+        "EffRank_ci_lower",
+        "EffRank_ci_upper",
     ]
 
     data: Dict[str, Dict] = {}
@@ -1237,7 +1308,9 @@ def build_summary_table(
     """Build per-marker summary CSV with Ridge probe R² values."""
     ridge_r2: Dict[str, float] = {}
     if ridge_probe_dir:
-        ridge_path = op.join(ridge_probe_dir, f"ridge_probe_summary_{fm_model_name}.json")
+        ridge_path = op.join(
+            ridge_probe_dir, f"ridge_probe_summary_{fm_model_name}.json"
+        )
         if op.isfile(ridge_path):
             with open(ridge_path) as f:
                 ridge_data = json.load(f)
@@ -1393,7 +1466,8 @@ def main():
 
         # Path to foundation model embeddings
         fm_emb_dir = op.join(
-            args.results_dir, fm_name,
+            args.results_dir,
+            fm_name,
             "doc_patients/MLP_EMBEDDING/pooled_embeddings",
         )
         if not op.isdir(fm_emb_dir):
@@ -1443,7 +1517,11 @@ def main():
         else:
             log.info("Fitting Ridge probe for %s ...", fm_name)
             fit_ridge_probe(
-                X_fm, X_dk, marker_names, c1_dir, fm_name,
+                X_fm,
+                X_dk,
+                marker_names,
+                c1_dir,
+                fm_name,
                 random_state=args.random_state,
             )
 
@@ -1500,7 +1578,9 @@ def main():
                 dim_eigs_per_model[fm_name] = {"DK": dk_eigs, "FM": fm_eigs}
             except Exception as exc:
                 log.error(
-                    "Dimensionality analysis failed for %s: %s", fm_name, exc,
+                    "Dimensionality analysis failed for %s: %s",
+                    fm_name,
+                    exc,
                     exc_info=True,
                 )
 
@@ -1538,6 +1618,7 @@ def main():
             from feature_importance_comparison import (  # noqa: PLC0415
                 plot_comparison as plot_r2_comparison,
             )
+
             plot_r2_comparison(
                 results_dir=args.results_dir,
                 marker_csv=args.marker_csv,

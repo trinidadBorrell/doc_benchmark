@@ -89,6 +89,7 @@ Author: Trinidad Borrell <trinidad.borrell@gmail.com>
 import numpy as np
 import pandas as pd
 import argparse
+from datetime import datetime
 import os
 import os.path as op
 import json
@@ -118,20 +119,31 @@ from sklearn.metrics import (
     auc,
 )
 from sklearn.ensemble import RandomForestClassifier
+from sklearn.linear_model import Ridge
+from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
 from sklearn.neural_network import MLPClassifier
 from sklearn.pipeline import Pipeline
+from scipy.stats import pearsonr
 import joblib
 
 warnings.filterwarnings("ignore")
 
-from sklearn.linear_model import Ridge
-from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
-from scipy.stats import pearsonr
-
 try:
     from .kernel_ridge_classifier import KernelRidgeClassifier
+    from .cv_utils import (
+        build_common_session_pool,
+        generate_nested_cv_folds,
+        save_cv_splits,
+        load_cv_splits,
+    )
 except ImportError:
     from kernel_ridge_classifier import KernelRidgeClassifier
+    from cv_utils import (
+        build_common_session_pool,
+        generate_nested_cv_folds,
+        save_cv_splits,
+        load_cv_splits,
+    )
 
 plt.rcParams["font.family"] = "serif"
 plt.rcParams["mathtext.fontset"] = "cm"
@@ -300,6 +312,8 @@ class EmbeddingClassifier:
                 has_emb = any(
                     f.endswith(
                         (
+                            "embedding.npy",
+                            "embedding.npz",
                             "_embedding.npy",
                             "_embeddings.npy",
                             "_embedding.npz",
@@ -630,7 +644,9 @@ class EmbeddingClassifier:
                         f
                         for f in os.listdir(session_path)
                         if (
-                            f.endswith(embedding_suffix)
+                            f == "embedding.npy"
+                            or f == "embedding.npz"
+                            or f.endswith(embedding_suffix)
                             or f.endswith("_embeddings.npy")
                             or f.endswith("_embedding.npz")
                             or f.endswith("_embeddings.npz")
@@ -934,11 +950,72 @@ class EmbeddingClassifier:
         return X, Y, subjects_list, marker_names
 
     # ------------------------------------------------------------------
+    # Inner CV helper
+    # ------------------------------------------------------------------
+
+    def _build_inner_cv_splits(self, y_train, groups_train, X_train, precomputed=None):
+        """Return a list of (train_idx, val_idx) inner CV splits.
+
+        If *precomputed* is provided (from a shared cv_utils fold dict) those
+        splits are returned directly — ensuring all models use identical inner
+        fold assignments.  Otherwise, splits are generated from
+        ``StratifiedGroupKFold`` (binary targets) or ``GroupKFold``
+        (multiclass), using ``n_cv_folds - 1`` inner folds.
+
+        Parameters
+        ----------
+        y_train, groups_train, X_train:
+            Training labels, subject groups, and features.
+        precomputed:
+            Optional list of (inner_train_idx, inner_val_idx) tuples as
+            stored in a cv_utils fold dict.  Indices are relative to
+            X_train / y_train.
+
+        Returns
+        -------
+        List of (train_idx, val_idx) tuples (indices into X_train).
+        """
+        if precomputed is not None:
+            return precomputed
+
+        class_counts = np.bincount(y_train, minlength=2)
+        n_groups = len(np.unique(groups_train))
+        n_inner = int(
+            min(
+                self.n_cv_folds - 1,
+                n_groups,
+                int(np.min(class_counts)),
+            )
+        )
+        n_inner = max(2, n_inner)
+
+        if self.is_binary:
+            inner_cv = StratifiedGroupKFold(
+                n_splits=n_inner,
+                shuffle=True,
+                random_state=self.random_state,
+            )
+        else:
+            inner_cv = GroupKFold(n_splits=n_inner)
+
+        return list(inner_cv.split(X_train, y_train, groups=groups_train))
+
+    # ------------------------------------------------------------------
     # MLP training (sklearn MLPClassifier)
     # ------------------------------------------------------------------
 
-    def _grid_search_mlp(self, X_train, y_train, groups_train):
-        """Inner GroupKFold grid search for sklearn MLPClassifier.
+    def _grid_search_mlp(
+        self, X_train, y_train, groups_train, precomputed_inner_splits=None
+    ):
+        """Inner StratifiedGroupKFold grid search for sklearn MLPClassifier.
+
+        Parameters
+        ----------
+        precomputed_inner_splits:
+            Optional pre-computed (train_idx, val_idx) pairs to use instead
+            of generating new inner splits.  Pass ``fold["inner_splits"]``
+            from a cv_utils fold dict to enforce identical inner splits across
+            all models.
 
         Returns
         -------
@@ -946,8 +1023,9 @@ class EmbeddingClassifier:
             Best model refitted on full X_train.
         best_params : dict
         """
-        n_unique = len(np.unique(groups_train))
-        inner_cv = GroupKFold(n_splits=min(3, n_unique))
+        inner_splits = self._build_inner_cv_splits(
+            y_train, groups_train, X_train, precomputed=precomputed_inner_splits
+        )
         pipe = Pipeline(
             [
                 ("scaler", StandardScaler()),
@@ -969,12 +1047,12 @@ class EmbeddingClassifier:
         gs = GridSearchCV(
             pipe,
             param_grid,
-            cv=inner_cv,
+            cv=inner_splits,
             scoring="balanced_accuracy",
             n_jobs=-1,
             refit=True,
         )
-        gs.fit(X_train, y_train, groups=groups_train)
+        gs.fit(X_train, y_train)
         print(f"      MLP best params: {gs.best_params_}", flush=True)
         return gs.best_estimator_, gs.best_params_
 
@@ -993,8 +1071,15 @@ class EmbeddingClassifier:
     # Sklearn model training (RF, KR)
     # ------------------------------------------------------------------
 
-    def _grid_search_rf(self, X_train, y_train, groups_train):
-        """Inner 3-fold GroupKFold grid search for Random Forest.
+    def _grid_search_rf(
+        self, X_train, y_train, groups_train, precomputed_inner_splits=None
+    ):
+        """Inner StratifiedGroupKFold grid search for Random Forest.
+
+        Parameters
+        ----------
+        precomputed_inner_splits:
+            Optional pre-computed (train_idx, val_idx) pairs.
 
         Returns
         -------
@@ -1007,7 +1092,9 @@ class EmbeddingClassifier:
             "n_estimators": [100, 300, 500],
             "max_depth": [None, 10, 20],
         }
-        inner_cv = GroupKFold(n_splits=3)
+        inner_splits = self._build_inner_cv_splits(
+            y_train, groups_train, X_train, precomputed=precomputed_inner_splits
+        )
 
         best_score = -1
         best_params = {"n_estimators": 100, "max_depth": None}
@@ -1016,7 +1103,7 @@ class EmbeddingClassifier:
             param_grid["n_estimators"], param_grid["max_depth"]
         ):
             scores = []
-            for tr_idx, va_idx in inner_cv.split(X_train, y_train, groups=groups_train):
+            for tr_idx, va_idx in inner_splits:
                 rf = RandomForestClassifier(
                     n_estimators=n_est,
                     max_depth=max_d,
@@ -1050,11 +1137,18 @@ class EmbeddingClassifier:
         best_model.fit(X_train, y_train)
         return best_model, best_params
 
-    def _grid_search_kr(self, X_train, y_train, groups_train):
-        """Inner 3-fold GroupKFold grid search for Kernel Ridge (RBF).
+    def _grid_search_kr(
+        self, X_train, y_train, groups_train, precomputed_inner_splits=None
+    ):
+        """Inner StratifiedGroupKFold grid search for Kernel Ridge (RBF).
 
         Binary: predictions are clipped to [0,1] and thresholded at 0.5.
         Multiclass: one-hot encode targets, inner loop uses argmax for scoring.
+
+        Parameters
+        ----------
+        precomputed_inner_splits:
+            Optional pre-computed (train_idx, val_idx) pairs.
 
         Returns
         -------
@@ -1067,7 +1161,9 @@ class EmbeddingClassifier:
             "alpha": [0.01, 0.1, 1.0, 10.0],
             "gamma": [0.001, 0.01, 0.1, 1.0],
         }
-        inner_cv = GroupKFold(n_splits=3)
+        inner_splits = self._build_inner_cv_splits(
+            y_train, groups_train, X_train, precomputed=precomputed_inner_splits
+        )
 
         # Prepare targets: binary uses y_train directly; multiclass uses one-hot
         if not self.is_binary:
@@ -1081,7 +1177,7 @@ class EmbeddingClassifier:
 
         for alpha, gamma in product(param_grid["alpha"], param_grid["gamma"]):
             scores = []
-            for tr_idx, va_idx in inner_cv.split(X_train, y_train, groups=groups_train):
+            for tr_idx, va_idx in inner_splits:
                 kr = KernelRidgeClassifier(kernel="rbf", alpha=alpha, gamma=gamma)
                 if self.is_binary:
                     kr.fit(X_train[tr_idx], y_train[tr_idx])
@@ -1793,11 +1889,27 @@ class EmbeddingClassifier:
         death_binary=False,
         vs_to_mcs=False,
         mcs_to_conscious=False,
+        precomputed_splits=None,
+        common_sessions=None,
     ):
         """Run N-fold StratifiedGroupKFold CV with all 3 models.
 
-        For each fold all models use inner GroupKFold grid search and
-        predict on the same held-out fold.
+        For each fold all models use inner StratifiedGroupKFold grid search
+        and predict on the same held-out fold.
+
+        Parameters
+        ----------
+        precomputed_splits:
+            Optional list of fold dicts as returned by
+            :func:`cv_utils.generate_nested_cv_folds`.  When provided
+            (together with *common_sessions*), the outer AND inner splits
+            are taken from this pre-computed structure so that every model
+            evaluated with the same splits uses identical fold assignments.
+        common_sessions:
+            Ordered list of session keys corresponding to the rows of the
+            feature matrix expected by *precomputed_splits*.  The model's
+            own embeddings are filtered and reordered to match this list.
+            Required when *precomputed_splits* is not None.
         """
         n_folds = self.n_cv_folds
         mode_tag = f" [{target}"
@@ -1833,6 +1945,22 @@ class EmbeddingClassifier:
             mcs_to_conscious=mcs_to_conscious,
         )
 
+        # 2. If common_sessions provided, filter + reorder to match the
+        #    shared session pool so that precomputed_splits indices align.
+        if common_sessions is not None:
+            session_to_idx = {s: i for i, s in enumerate(subjects)}
+            missing = [s for s in common_sessions if s not in session_to_idx]
+            if missing:
+                raise ValueError(
+                    f"{len(missing)} sessions from the common pool are missing "
+                    f"from this model's embeddings: "
+                    f"{missing[:5]}{'...' if len(missing) > 5 else ''}"
+                )
+            keep = [session_to_idx[s] for s in common_sessions]
+            X = X[keep]
+            y = y[keep]
+            subjects = [subjects[i] for i in keep]
+
         # Subject groups
         groups = np.array([s.split("_ses-")[0] for s in subjects])
         n_unique = len(np.unique(groups))
@@ -1840,18 +1968,44 @@ class EmbeddingClassifier:
             f"   {n_unique} unique subjects across {len(subjects)} sessions", flush=True
         )
 
-        effective_folds = min(n_folds, n_unique)
-        if effective_folds < 2:
-            raise ValueError(
-                f"Only {n_unique} unique subjects — cannot perform {n_folds}-fold CV"
-            )
-
-        if self.is_binary:
-            sgkf = StratifiedGroupKFold(
-                n_splits=effective_folds, shuffle=True, random_state=self.random_state
+        # 3. Determine fold structure.
+        if precomputed_splits is not None:
+            if common_sessions is None:
+                raise ValueError(
+                    "common_sessions must be provided together with precomputed_splits"
+                )
+            folds = precomputed_splits
+            effective_folds = len(folds)
+            print(
+                f"   Using {effective_folds} pre-computed folds (shared across models)",
+                flush=True,
             )
         else:
-            sgkf = GroupKFold(n_splits=effective_folds)
+            effective_folds = min(n_folds, n_unique)
+            if effective_folds < 2:
+                raise ValueError(
+                    f"Only {n_unique} unique subjects — cannot perform "
+                    f"{n_folds}-fold CV"
+                )
+            if self.is_binary:
+                sgkf = StratifiedGroupKFold(
+                    n_splits=effective_folds,
+                    shuffle=True,
+                    random_state=self.random_state,
+                )
+            else:
+                sgkf = GroupKFold(n_splits=effective_folds)
+            # Build fold list in the same dict format as cv_utils for
+            # uniform handling in the loop below.
+            folds = []
+            for tr_idx, te_idx in sgkf.split(X, y, groups=groups):
+                folds.append(
+                    {
+                        "train_idx": tr_idx,
+                        "test_idx": te_idx,
+                        "inner_splits": None,  # generated on-the-fly per fold
+                    }
+                )
 
         # Accumulators per model
         accum = {
@@ -1859,9 +2013,11 @@ class EmbeddingClassifier:
             for mk in MODEL_CONFIGS
         }
 
-        for fold_idx, (train_idx, test_idx) in enumerate(
-            sgkf.split(X, y, groups=groups)
-        ):
+        for fold_idx, fold in enumerate(folds):
+            train_idx = fold["train_idx"]
+            test_idx = fold["test_idx"]
+            inner_splits_for_fold = fold.get("inner_splits")  # None → auto-generate
+
             print(f"\n{'─' * 60}", flush=True)
             print(f"  FOLD {fold_idx + 1}/{effective_folds}", flush=True)
             print(f"{'─' * 60}", flush=True)
@@ -1892,7 +2048,10 @@ class EmbeddingClassifier:
             # ---- MLP ----
             print("   Training MLP ...", flush=True)
             mlp_model, _ = self._grid_search_mlp(
-                X_train_fold, y_train_fold, groups_train_fold
+                X_train_fold,
+                y_train_fold,
+                groups_train_fold,
+                precomputed_inner_splits=inner_splits_for_fold,
             )
             mlp_fold_dir = op.join(self.output_dir, "nested_cv", "mlp")
             os.makedirs(mlp_fold_dir, exist_ok=True)
@@ -1912,7 +2071,10 @@ class EmbeddingClassifier:
             # ---- Random Forest ----
             print("   Training Random Forest ...", flush=True)
             rf_model, _ = self._grid_search_rf(
-                X_train_fold, y_train_fold, groups_train_fold
+                X_train_fold,
+                y_train_fold,
+                groups_train_fold,
+                precomputed_inner_splits=inner_splits_for_fold,
             )
             rf_fold_dir = op.join(self.output_dir, "nested_cv", "random_forest")
             os.makedirs(rf_fold_dir, exist_ok=True)
@@ -1932,7 +2094,10 @@ class EmbeddingClassifier:
             # ---- Kernel Ridge ----
             print("   Training Kernel Ridge ...", flush=True)
             kr_model, _ = self._grid_search_kr(
-                X_train_fold, y_train_fold, groups_train_fold
+                X_train_fold,
+                y_train_fold,
+                groups_train_fold,
+                precomputed_inner_splits=inner_splits_for_fold,
             )
             kr_fold_dir = op.join(self.output_dir, "nested_cv", "kernel_ridge")
             os.makedirs(kr_fold_dir, exist_ok=True)
@@ -2602,8 +2767,11 @@ Reduction map for --marker-reduction:
 
     parser.add_argument(
         "--data-dir",
-        required=True,
-        help="Path to directory with sub-{ID}/ses-{NUM}/*_embedding.npy",
+        default=None,
+        help=(
+            "Path to directory with sub-{ID}/ses-{NUM}/*_embedding.npy. "
+            "Required in single-model mode; not needed when --models is used."
+        ),
     )
     parser.add_argument(
         "--patient-labels",
@@ -2673,7 +2841,204 @@ Reduction map for --marker-reduction:
         help="Path to patient_labels.csv (required with --full-metric-prediction)",
     )
 
+    # Multi-model batch mode
+    parser.add_argument(
+        "--models",
+        nargs="+",
+        metavar="NAME=PATH",
+        default=None,
+        help=(
+            "Run multiple models with shared CV splits. "
+            "Each entry is NAME=PATH where PATH points to the pooled embeddings "
+            "directory for that model. When >1 model is given, a common session "
+            "pool is computed and all models use identical fold assignments. "
+            "Example: --models CBraMod=/path/cb NeuroLM=/path/nl"
+        ),
+    )
+    parser.add_argument(
+        "--targets",
+        nargs="+",
+        default=["crs"],
+        choices=["crs", "etiology", "cs_6m", "cs_1y", "cs_2y"],
+        help=(
+            "Prediction targets to run in multi-model batch mode (default: crs). "
+            "Each target gets its own common session pool and split file, "
+            "since label availability differs across targets."
+        ),
+    )
+    parser.add_argument(
+        "--splits-file",
+        default=None,
+        help=(
+            "Path to a pre-computed common_cv_splits.json (from cv_utils). "
+            "When provided in batch mode the stored splits are used instead of "
+            "generating new ones."
+        ),
+    )
+    parser.add_argument(
+        "--save-splits-to",
+        default=None,
+        help=(
+            "Path where the generated common CV splits should be saved. "
+            "Only used in batch mode when --splits-file is not given."
+        ),
+    )
+
     args = parser.parse_args()
+
+    # ------------------------------------------------------------------
+    # Multi-model batch mode
+    # ------------------------------------------------------------------
+    if args.models and len(args.models) > 1:
+        # Parse NAME=PATH entries
+        model_dirs = {}
+        for entry in args.models:
+            if "=" not in entry:
+                parser.error(f"--models entry must be NAME=PATH, got: {entry}")
+            name, path = entry.split("=", 1)
+            model_dirs[name] = path
+
+        print("=" * 80, flush=True)
+        print("MULTI-MODEL BATCH CV (shared session pool + shared splits)", flush=True)
+        print("=" * 80, flush=True)
+        print(f"Models:  {list(model_dirs.keys())}", flush=True)
+        print(f"Targets: {args.targets}", flush=True)
+
+        from learning_curve import load_crs_labels  # noqa: E402
+
+        _first_path = next(iter(model_dirs.values()))
+
+        # Embedding loaders are shared across targets (embeddings don't change).
+        def _make_loader(emb_path):
+            def _loader():
+                tmp = EmbeddingClassifier(
+                    data_dir=emb_path,
+                    patient_labels_file=args.patient_labels,
+                    output_dir="/tmp",
+                    random_state=args.random_state,
+                )
+                return tmp.load_embeddings()
+
+            return _loader
+
+        source_loaders = {name: _make_loader(path) for name, path in model_dirs.items()}
+
+        # Auto-save directory (global to the run, not inside any model folder).
+        splits_save_dir = (
+            op.join(args.output_dir, "cv_splits") if args.output_dir else "cv_splits"
+        )
+
+        # ------------------------------------------------------------------
+        # Loop over targets — each gets its own common pool and split file
+        # because label availability differs across targets.
+        # ------------------------------------------------------------------
+        for target in args.targets:
+            print(f"\n{'=' * 80}", flush=True)
+            print(f"TARGET: {target}", flush=True)
+            print(f"{'=' * 80}", flush=True)
+
+            # Build integer labels dict for cv_utils.
+            if target == "crs":
+                labels_dict = load_crs_labels(args.patient_labels)
+            else:
+                lf = args.patient_labels_full or args.patient_labels
+                _tmp_clf = EmbeddingClassifier(
+                    data_dir=_first_path,
+                    patient_labels_file=lf,
+                    output_dir="/tmp",
+                )
+                str_labels, _, _ = _tmp_clf.load_patient_labels_for_target(lf, target)
+                _le = LabelEncoder()
+                _keys = list(str_labels.keys())
+                _ints = _le.fit_transform(list(str_labels.values()))
+                labels_dict = {k: int(v) for k, v in zip(_keys, _ints)}
+
+            # Build target-specific common session pool.
+            print("\nBuilding common session pool ...", flush=True)
+            common_sessions = build_common_session_pool(source_loaders, labels_dict)
+            print(f"Common pool: {len(common_sessions)} sessions", flush=True)
+
+            # Load pre-computed splits (only honoured for a single-target run to
+            # avoid accidentally reusing splits built for a different label set).
+            if (
+                args.splits_file
+                and op.isfile(args.splits_file)
+                and len(args.targets) == 1
+            ):
+                print(
+                    f"Loading pre-computed splits from {args.splits_file}", flush=True
+                )
+                precomputed_splits, common_sessions, labels_dict = load_cv_splits(
+                    args.splits_file
+                )
+            else:
+                print("Generating common nested CV splits ...", flush=True)
+                precomputed_splits = generate_nested_cv_folds(
+                    common_sessions=common_sessions,
+                    labels=labels_dict,
+                    n_outer=args.n_cv_folds,
+                    random_state=args.random_state,
+                )
+                # Always auto-save with timestamp so different runs don't overwrite.
+                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                os.makedirs(splits_save_dir, exist_ok=True)
+                auto_path = op.join(
+                    splits_save_dir, f"mlp_embedding_{target}_{ts}.json"
+                )
+                save_cv_splits(
+                    folds=precomputed_splits,
+                    common_sessions=common_sessions,
+                    labels=labels_dict,
+                    path=auto_path,
+                )
+                print(f"Splits auto-saved to: {auto_path}", flush=True)
+
+            labels_file_for_target = (
+                args.patient_labels
+                if target == "crs"
+                else (args.patient_labels_full or args.patient_labels)
+            )
+
+            # Run each model on the target-specific shared splits.
+            for model_name, emb_path in model_dirs.items():
+                print(f"\n{'─' * 60}", flush=True)
+                print(f"Model: {model_name}  |  target: {target}", flush=True)
+                model_out = (
+                    op.join(args.output_dir, model_name, target)
+                    if args.output_dir
+                    else None
+                )
+                if model_out:
+                    os.makedirs(model_out, exist_ok=True)
+
+                classifier = EmbeddingClassifier(
+                    data_dir=emb_path,
+                    patient_labels_file=labels_file_for_target,
+                    output_dir=model_out,
+                    random_state=args.random_state,
+                    full_cv=True,
+                    n_cv_folds=args.n_cv_folds,
+                )
+                try:
+                    classifier.run_full_cv(
+                        target=target,
+                        labels_file=labels_file_for_target if target != "crs" else None,
+                        precomputed_splits=precomputed_splits,
+                        common_sessions=common_sessions,
+                    )
+                except Exception as exc:
+                    print(f"  [FAILED] {model_name}/{target}: {exc}", flush=True)
+
+        return
+
+    # ------------------------------------------------------------------
+    # Single-model mode (original behaviour)
+    # ------------------------------------------------------------------
+
+    if not args.data_dir:
+        parser.error(
+            "--data-dir is required in single-model mode (omit it only when --models is used)"
+        )
 
     # Parse embedding dirs into dict
     allowed_subjects = None
@@ -2706,6 +3071,52 @@ Reduction map for --marker-reduction:
                 )
             print(f"   Intersection saved to: {intersection_file}", flush=True)
 
+    # Handle pre-computed or auto-generated splits for single-model mode.
+    single_precomputed_splits = None
+    single_common_sessions = None
+    if args.splits_file and op.isfile(args.splits_file):
+        print(f"Loading pre-computed splits from {args.splits_file}", flush=True)
+        single_precomputed_splits, single_common_sessions, _ = load_cv_splits(
+            args.splits_file
+        )
+    elif args.full_cv:
+        # Auto-generate and save splits so the exact fold assignments are recorded.
+        try:
+            from learning_curve import load_crs_labels  # noqa: E402
+
+            _labels_tmp = load_crs_labels(args.patient_labels)
+            _avail = EmbeddingClassifier._scan_subjects(args.data_dir)
+            single_common_sessions = sorted(set(_labels_tmp.keys()) & _avail)
+            if single_common_sessions:
+                single_precomputed_splits = generate_nested_cv_folds(
+                    common_sessions=single_common_sessions,
+                    labels=_labels_tmp,
+                    n_outer=args.n_cv_folds,
+                    random_state=args.random_state,
+                )
+                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                _splits_dir = (
+                    op.join(args.output_dir, "cv_splits")
+                    if args.output_dir
+                    else "cv_splits"
+                )
+                os.makedirs(_splits_dir, exist_ok=True)
+                _auto_path = op.join(_splits_dir, f"mlp_embedding_crs_{ts}.json")
+                save_cv_splits(
+                    single_precomputed_splits,
+                    single_common_sessions,
+                    _labels_tmp,
+                    _auto_path,
+                )
+                print(f"Splits auto-saved to: {_auto_path}", flush=True)
+        except Exception as _e:
+            print(
+                f"Warning: could not auto-generate splits ({_e}); folds will be generated at run time.",
+                flush=True,
+            )
+            single_precomputed_splits = None
+            single_common_sessions = None
+
     classifier = EmbeddingClassifier(
         data_dir=args.data_dir,
         patient_labels_file=args.patient_labels,
@@ -2733,7 +3144,10 @@ Reduction map for --marker-reduction:
         ran_special = True
     if not ran_special:
         if args.full_cv:
-            classifier.run_full_cv()
+            classifier.run_full_cv(
+                precomputed_splits=single_precomputed_splits,
+                common_sessions=single_common_sessions,
+            )
         else:
             classifier.run_classification(
                 test_size=args.test_size,

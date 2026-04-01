@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 def compute_cnv_analysis_data(epochs, report_data, output_dir="./tmp_computed_data"):
     """
     Compute CNV analysis data and save to pkl (NO PLOTTING).
-    
+
     Parameters
     ----------
     epochs : mne.Epochs
@@ -22,7 +22,7 @@ def compute_cnv_analysis_data(epochs, report_data, output_dir="./tmp_computed_da
         Report data dictionary containing CNV data
     output_dir : str or Path
         Directory to save computed data
-        
+
     Returns
     -------
     Path or None
@@ -31,7 +31,7 @@ def compute_cnv_analysis_data(epochs, report_data, output_dir="./tmp_computed_da
     from ..viz import trim_mean80
     from .evokeds import compute_cnv_analysis
     from ..data_io import MarkerDataAdapter
-    
+
     cnv_data = report_data.get("cnv_data")
 
     if cnv_data is None:
@@ -61,7 +61,7 @@ def compute_cnv_analysis_data(epochs, report_data, output_dir="./tmp_computed_da
 
         # CNV has full channel set matching epochs.info
         cnv_info = epochs.info.copy()
-        
+
         # Create a marker adapter for CNV
         cnv_marker = MarkerDataAdapter(
             data=cnv_slopes_eeg,
@@ -69,10 +69,10 @@ def compute_cnv_analysis_data(epochs, report_data, output_dir="./tmp_computed_da
             ch_info=cnv_info,
             name="CNV",
         )
-        
+
         # Use egi/256 for ROI definitions (valid_roi filtering handles subset)
-        equipment_config = 'egi/256'
-        
+        equipment_config = "egi/256"
+
         # Compute all CNV analysis data and save to pickle
         output_path = Path(output_dir) / "cnv_computed_data.pkl"
         compute_cnv_analysis(
@@ -88,5 +88,6 @@ def compute_cnv_analysis_data(epochs, report_data, output_dir="./tmp_computed_da
     except Exception as e:
         logger.error(f"Failed to compute CNV data: {e}")
         import traceback
+
         logger.error(f"Error details: {traceback.format_exc()}")
         return None

@@ -54,6 +54,8 @@ import argparse
 import json
 import os
 import os.path as op
+import sys
+from datetime import datetime
 from itertools import product
 
 import matplotlib
@@ -85,12 +87,29 @@ from sklearn.svm import SVC
 try:
     from ..model.kernel_ridge_classifier import KernelRidgeClassifier
 except ImportError:
-    import sys
-
     _model_dir = op.abspath(op.join(op.dirname(__file__), "..", "model"))
     if _model_dir not in sys.path:
         sys.path.insert(0, _model_dir)
     from kernel_ridge_classifier import KernelRidgeClassifier
+
+# Import CV utilities (shared with model scripts for consistent fold assignments)
+try:
+    from ..model.cv_utils import (
+        check_no_subject_leakage,
+        generate_nested_cv_folds,
+        load_cv_splits,
+        save_cv_splits,
+    )
+except ImportError:
+    _model_dir = op.abspath(op.join(op.dirname(__file__), "..", "model"))
+    if _model_dir not in sys.path:
+        sys.path.insert(0, _model_dir)
+    from cv_utils import (
+        check_no_subject_leakage,
+        generate_nested_cv_folds,
+        load_cv_splits,
+        save_cv_splits,
+    )
 
 plt.rcParams["font.family"] = "serif"
 plt.rcParams["mathtext.fontset"] = "cm"
@@ -259,6 +278,8 @@ class LinearProber:
         n_cv_folds=5,
         random_state=42,
         full_cv=True,
+        precomputed_splits=None,
+        common_sessions=None,
     ):
         self.data_dir = data_dir
         self.output_dir = output_dir
@@ -270,6 +291,8 @@ class LinearProber:
         self.n_cv_folds = n_cv_folds
         self.random_state = random_state
         self.full_cv = full_cv
+        self.precomputed_splits = precomputed_splits
+        self.common_sessions = common_sessions  # ordered reference session list
 
         os.makedirs(output_dir, exist_ok=True)
 
@@ -511,6 +534,15 @@ class LinearProber:
     def load_markers_from_csv(self):
         """Load baseline scalar markers from CSV for the configured reduction.
 
+        Supports two CSV formats:
+
+        * **Old** (``baseline_stable_*.csv``): ``;``-separated, meta columns
+          ``Subject, Reduction, Subject_ID, Date, Label``.
+        * **New** (``nice_scalars_all.csv``): ``,``-separated, meta columns
+          ``Subject, Reduction, id``.
+
+        The separator and meta columns are auto-detected from the header.
+
         Returns
         -------
         markers_dict : dict
@@ -527,7 +559,15 @@ class LinearProber:
             )
         reduction_str = REDUCTION_MAP[self.reduction]
 
-        df = pd.read_csv(self.marker_csv, sep=";")
+        # Auto-detect separator: try ',' first, fall back to ';'
+        with open(self.marker_csv) as f:
+            header_line = f.readline()
+        if "Reduction" in header_line.split(","):
+            sep = ","
+        else:
+            sep = ";"
+
+        df = pd.read_csv(self.marker_csv, sep=sep)
 
         df_filtered = df[df["Reduction"] == reduction_str].copy()
         if df_filtered.empty:
@@ -535,7 +575,7 @@ class LinearProber:
                 f"No rows for Reduction={reduction_str!r} in {self.marker_csv}"
             )
 
-        meta_cols = {"Subject", "Reduction", "Label", "Subject_ID", "Date"}
+        meta_cols = {"Subject", "Reduction", "Label", "Subject_ID", "Date", "id"}
         marker_names = [
             c
             for c in df_filtered.columns
@@ -559,7 +599,8 @@ class LinearProber:
 
         print(
             f"   Loaded markers for {len(markers_dict)} subject/sessions "
-            f"({len(marker_names)} markers, reduction={reduction_str})",
+            f"({len(marker_names)} markers, reduction={reduction_str}, "
+            f"sep={sep!r})",
             flush=True,
         )
         self._markers_cache = markers_dict
@@ -736,17 +777,57 @@ class LinearProber:
         metrics_per_marker = {}
 
         if self.full_cv:
-            n_unique = len(np.unique(groups))
-            effective_folds = min(self.n_cv_folds, n_unique)
-            gkf = GroupKFold(n_splits=effective_folds)
+            # ── Build fold iterator (same splits as classification for consistency) ──
+            if self.precomputed_splits is not None and self.common_sessions is not None:
+                available_set = set(subjects)
+                missing = [s for s in self.common_sessions if s not in available_set]
+                if not missing:
+                    subj_to_row = {s: i for i, s in enumerate(subjects)}
+                    folds_iter = [
+                        {
+                            "train_idx": np.array([
+                                subj_to_row[self.common_sessions[i]]
+                                for i in fold["train_idx"]
+                                if self.common_sessions[i] in subj_to_row
+                            ]),
+                            "test_idx": np.array([
+                                subj_to_row[self.common_sessions[i]]
+                                for i in fold["test_idx"]
+                                if self.common_sessions[i] in subj_to_row
+                            ]),
+                        }
+                        for fold in self.precomputed_splits
+                    ]
+                else:
+                    folds_iter = None
+            else:
+                folds_iter = None
+
+            if folds_iter is None:
+                n_unique = len(np.unique(groups))
+                effective_folds = min(self.n_cv_folds, n_unique)
+                gkf = GroupKFold(n_splits=effective_folds)
+                folds_iter = [
+                    {"train_idx": tr, "test_idx": te}
+                    for tr, te in gkf.split(X, groups=groups)
+                ]
+
+            effective_folds = len(folds_iter)
+
+            # Leakage sanity checks for regression folds
+            for fold_idx, fold in enumerate(folds_iter):
+                check_no_subject_leakage(
+                    groups, fold["train_idx"], fold["test_idx"],
+                    label=f"regression fold {fold_idx}",
+                )
 
             accum = {
                 i: {"true": [], "pred": [], "subjects": []} for i in range(Y.shape[1])
             }
 
-            for fold_idx, (train_idx, test_idx) in enumerate(
-                gkf.split(X, groups=groups)
-            ):
+            for fold_idx, fold in enumerate(folds_iter):
+                train_idx = fold["train_idx"]
+                test_idx = fold["test_idx"]
                 print(
                     f"      Fold {fold_idx + 1}/{effective_folds}",
                     flush=True,
@@ -908,8 +989,21 @@ class LinearProber:
     # Classification
     # ------------------------------------------------------------------
 
-    def _grid_search_svm(self, X_train, y_train, groups_train):
-        """Inner 3-fold GroupKFold grid search for SVM."""
+    def _get_inner_cv_iter(self, X_train, y_train, groups_train, inner_splits):
+        """Return inner CV split iterator.
+
+        Uses ``inner_splits`` (pre-computed, relative to X_train) when provided,
+        otherwise generates a 3-fold GroupKFold on the fly.
+        """
+        if inner_splits is not None:
+            return list(inner_splits)
+        n_unique = len(np.unique(groups_train))
+        n_inner = min(3, n_unique)
+        inner_cv = GroupKFold(n_splits=n_inner)
+        return list(inner_cv.split(X_train, y_train, groups=groups_train))
+
+    def _grid_search_svm(self, X_train, y_train, groups_train, inner_splits=None):
+        """Inner CV grid search for SVM."""
         param_grid = {
             "C": [0.01, 0.1, 1.0, 10.0],
             "kernel": ["rbf", "linear"],
@@ -919,18 +1013,14 @@ class LinearProber:
             "linear": [None],
         }
 
-        n_unique = len(np.unique(groups_train))
-        n_inner = min(3, n_unique)
-        inner_cv = GroupKFold(n_splits=n_inner)
+        cv_iter = self._get_inner_cv_iter(X_train, y_train, groups_train, inner_splits)
         best_score = -1.0
         best_params = {"C": 1.0, "kernel": "rbf", "gamma": "scale"}
 
         for C, kernel in product(param_grid["C"], param_grid["kernel"]):
             for gamma in gamma_options[kernel]:
                 scores = []
-                for tr_idx, va_idx in inner_cv.split(
-                    X_train, y_train, groups=groups_train
-                ):
+                for tr_idx, va_idx in cv_iter:
                     svc_kw = dict(
                         C=C,
                         kernel=kernel,
@@ -983,15 +1073,13 @@ class LinearProber:
         best_model.fit(X_train, y_train)
         return best_model, best_params
 
-    def _grid_search_rf(self, X_train, y_train, groups_train):
-        """Inner 3-fold GroupKFold grid search for Random Forest."""
+    def _grid_search_rf(self, X_train, y_train, groups_train, inner_splits=None):
+        """Inner CV grid search for Random Forest."""
         param_grid = {
             "n_estimators": [100, 300, 500],
             "max_depth": [None, 10, 20],
         }
-        n_unique = len(np.unique(groups_train))
-        n_inner = min(3, n_unique)
-        inner_cv = GroupKFold(n_splits=n_inner)
+        cv_iter = self._get_inner_cv_iter(X_train, y_train, groups_train, inner_splits)
 
         best_score = -1.0
         best_params = {"n_estimators": 100, "max_depth": None}
@@ -1000,7 +1088,7 @@ class LinearProber:
             param_grid["n_estimators"], param_grid["max_depth"]
         ):
             scores = []
-            for tr_idx, va_idx in inner_cv.split(X_train, y_train, groups=groups_train):
+            for tr_idx, va_idx in cv_iter:
                 rf = RandomForestClassifier(
                     n_estimators=n_est,
                     max_depth=max_d,
@@ -1028,22 +1116,20 @@ class LinearProber:
         best_model.fit(X_train, y_train)
         return best_model, best_params
 
-    def _grid_search_kr(self, X_train, y_train, groups_train):
-        """Inner 3-fold GroupKFold grid search for Kernel Ridge (binary)."""
+    def _grid_search_kr(self, X_train, y_train, groups_train, inner_splits=None):
+        """Inner CV grid search for Kernel Ridge (binary)."""
         param_grid = {
             "alpha": [0.01, 0.1, 1.0, 10.0],
             "gamma": [0.001, 0.01, 0.1, 1.0],
         }
-        n_unique = len(np.unique(groups_train))
-        n_inner = min(3, n_unique)
-        inner_cv = GroupKFold(n_splits=n_inner)
+        cv_iter = self._get_inner_cv_iter(X_train, y_train, groups_train, inner_splits)
 
         best_score = -1.0
         best_params = {"alpha": 1.0, "gamma": 0.01}
 
         for alpha, gamma in product(param_grid["alpha"], param_grid["gamma"]):
             scores = []
-            for tr_idx, va_idx in inner_cv.split(X_train, y_train, groups=groups_train):
+            for tr_idx, va_idx in cv_iter:
                 kr = KernelRidgeClassifier(kernel="rbf", alpha=alpha, gamma=gamma)
                 kr.fit(X_train[tr_idx], y_train[tr_idx])
                 raw = kr.decision_function(X_train[va_idx])
@@ -1093,49 +1179,89 @@ class LinearProber:
     ):
         """Nested CV classification for a single model/layer.
 
+        Uses ``self.precomputed_splits`` when available (same fold assignments
+        across all layers and scripts).  Falls back to freshly generated
+        StratifiedGroupKFold when no pre-computed splits are set.
+
         Returns
         -------
         results : dict
             ``{classifier_name: {auc_mean, auc_std, bal_acc_mean, ...}}``
         """
-        n_unique = len(np.unique(groups))
-        effective_folds = min(self.n_cv_folds, n_unique)
-
-        if effective_folds < 2:
-            print(
-                f"   [SKIP] Only {n_unique} unique subjects, need >= 2",
-                flush=True,
-            )
-            return {}
-
-        sgkf = StratifiedGroupKFold(
-            n_splits=effective_folds,
-            shuffle=True,
-            random_state=self.random_state,
-        )
-
         classifiers = {
             "svm": self._grid_search_svm,
             "kernel_ridge": self._grid_search_kr,
             "random_forest": self._grid_search_rf,
         }
 
+        # ── Build fold iterator ──────────────────────────────────────────────
+        if self.precomputed_splits is not None and self.common_sessions is not None:
+            # Filter precomputed splits to subjects present in this layer's data
+            available_set = set(subjects)
+            missing = [s for s in self.common_sessions if s not in available_set]
+            if missing:
+                print(
+                    f"   [WARN] {len(missing)} sessions from splits not in layer "
+                    f"{layer_key} — generating fresh folds.",
+                    flush=True,
+                )
+                folds_iter = None
+            else:
+                # Remap: subjects list == common_sessions filtered to available
+                # (order must match X rows)
+                subj_to_row = {s: i for i, s in enumerate(subjects)}
+                folds_iter = []
+                for fold in self.precomputed_splits:
+                    tr = np.array([subj_to_row[self.common_sessions[i]]
+                                   for i in fold["train_idx"]
+                                   if self.common_sessions[i] in subj_to_row])
+                    te = np.array([subj_to_row[self.common_sessions[i]]
+                                   for i in fold["test_idx"]
+                                   if self.common_sessions[i] in subj_to_row])
+                    folds_iter.append({
+                        "train_idx": tr,
+                        "test_idx": te,
+                        "inner_splits": fold.get("inner_splits"),
+                    })
+        else:
+            folds_iter = None
+
+        if folds_iter is None:
+            n_unique = len(np.unique(groups))
+            effective_folds = min(self.n_cv_folds, n_unique)
+            if effective_folds < 2:
+                print(
+                    f"   [SKIP] Only {n_unique} unique subjects, need >= 2",
+                    flush=True,
+                )
+                return {}
+            sgkf = StratifiedGroupKFold(
+                n_splits=effective_folds,
+                shuffle=True,
+                random_state=self.random_state,
+            )
+            folds_iter = [
+                {"train_idx": tr, "test_idx": te, "inner_splits": None}
+                for tr, te in sgkf.split(X, y, groups=groups)
+            ]
+
+        effective_folds = len(folds_iter)
+
+        # ── Leakage sanity checks ────────────────────────────────────────────
+        for fold_idx, fold in enumerate(folds_iter):
+            check_no_subject_leakage(
+                groups, fold["train_idx"], fold["test_idx"],
+                label=f"layer {layer_key} fold {fold_idx}",
+            )
+
         accum = {
             name: {"y_true": [], "y_pred": [], "y_proba": []} for name in classifiers
         }
 
-        for fold_idx, (train_idx, test_idx) in enumerate(
-            sgkf.split(X, y, groups=groups)
-        ):
-            # Leakage check
-            train_subj = set(groups[train_idx])
-            test_subj = set(groups[test_idx])
-            overlap = train_subj & test_subj
-            if overlap:
-                print(
-                    f"   [WARN] Subject leakage fold {fold_idx}: {overlap}",
-                    flush=True,
-                )
+        for fold_idx, fold in enumerate(folds_iter):
+            train_idx = fold["train_idx"]
+            test_idx = fold["test_idx"]
+            inner_splits = fold.get("inner_splits")
 
             X_train, X_test = X[train_idx], X[test_idx]
             y_train, y_test = y[train_idx], y[test_idx]
@@ -1149,7 +1275,8 @@ class LinearProber:
 
             for clf_name, grid_fn in classifiers.items():
                 try:
-                    model, _ = grid_fn(X_train, y_train, groups_train)
+                    model, _ = grid_fn(X_train, y_train, groups_train,
+                                       inner_splits=inner_splits)
                     probs, preds = self._predict_model(model, X_test)
                     accum[clf_name]["y_true"].append(y_test)
                     accum[clf_name]["y_pred"].append(preds)
@@ -1195,8 +1322,53 @@ class LinearProber:
 
         return results
 
-    def run_classification(self):
-        """Run nested CV classification for all models and layers."""
+    def _maybe_generate_and_save_splits(
+        self, subjects, y, groups, save_splits_to=None
+    ):
+        """Generate splits from the first available layer data and cache them.
+
+        Only called when ``self.precomputed_splits`` is None.  The generated
+        splits are stored on ``self`` for reuse across all subsequent layers.
+
+        Parameters
+        ----------
+        save_splits_to : str or None
+            Explicit save path.  When None, auto-saves to
+            ``{output_dir}/cv_splits/linear_probing_crs_{ts}.json``.
+        """
+        labels_for_splits = {s: int(y[i]) for i, s in enumerate(subjects)}
+        self.common_sessions = list(subjects)
+        self.precomputed_splits = generate_nested_cv_folds(
+            common_sessions=self.common_sessions,
+            labels=labels_for_splits,
+            n_outer=self.n_cv_folds,
+            random_state=self.random_state,
+        )
+        print(
+            f"   Generated {len(self.precomputed_splits)} outer folds "
+            f"(StratifiedGroupKFold, seed={self.random_state})",
+            flush=True,
+        )
+        # Save for reproducibility
+        save_path = save_splits_to
+        if not save_path:
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            splits_dir = op.join(self.output_dir, "cv_splits")
+            save_path = op.join(splits_dir, f"linear_probing_crs_{ts}.json")
+        save_cv_splits(
+            self.precomputed_splits, self.common_sessions, labels_for_splits, save_path
+        )
+        print(f"   CV splits saved to {save_path}", flush=True)
+
+    def run_classification(self, save_splits_to=None):
+        """Run nested CV classification for all models and layers.
+
+        Parameters
+        ----------
+        save_splits_to : str or None
+            Path to save generated CV splits.  Only used when
+            ``self.precomputed_splits`` is None.
+        """
         print("\n" + "=" * 70, flush=True)
         print("NESTED CV CLASSIFICATION (embedding -> CRS)", flush=True)
         print("=" * 70, flush=True)
@@ -1219,6 +1391,12 @@ class LinearProber:
                 except ValueError as e:
                     print(f"   [SKIP] {e}", flush=True)
                     continue
+
+                # Auto-generate splits on the first successful data collection
+                if self.full_cv and self.precomputed_splits is None:
+                    self._maybe_generate_and_save_splits(
+                        subjects, y, groups, save_splits_to=save_splits_to
+                    )
 
                 results = self.run_classification_for_layer(
                     model_name, layer_key, X, y, subjects, groups
@@ -1385,11 +1563,128 @@ class LinearProber:
             print(f"   Classification plot saved: {out_path}", flush=True)
 
     # ------------------------------------------------------------------
+    # Aggregation (reads per-layer JSONs from parallel jobs)
+    # ------------------------------------------------------------------
+
+    def aggregate_results(self):
+        """Re-read per-layer JSON results and produce summaries + plots.
+
+        Call this after all per-layer jobs have finished.  It does NOT
+        re-run any computation — it only reads the JSON files that were
+        already saved by ``run_regression`` / ``run_classification``.
+        """
+        print("=" * 70, flush=True)
+        print("AGGREGATE MODE — reading per-layer results", flush=True)
+        print("=" * 70, flush=True)
+
+        # --- Regression aggregation ---
+        reg_root = op.join(self.output_dir, "regression")
+        layer_r2_across_models = {}
+
+        if op.isdir(reg_root):
+            for model_name in self.models:
+                layers = self._get_layers(model_name)
+                for layer_key in layers:
+                    summary_path = op.join(
+                        reg_root, layer_key, model_name, "summary.json"
+                    )
+                    if not op.isfile(summary_path):
+                        continue
+                    with open(summary_path) as f:
+                        metrics = json.load(f)
+                    r2_dict = {
+                        m: v["r2"]
+                        for m, v in metrics.items()
+                        if not v.get("skipped", False)
+                    }
+                    if layer_key not in layer_r2_across_models:
+                        layer_r2_across_models[layer_key] = {}
+                    layer_r2_across_models[layer_key][model_name] = r2_dict
+                    print(
+                        f"   [regression] {model_name}/{layer_key}: "
+                        f"{len(r2_dict)} markers",
+                        flush=True,
+                    )
+
+            for layer_key, r2_per_model in layer_r2_across_models.items():
+                if r2_per_model:
+                    self._plot_feature_importance_raw(layer_key, r2_per_model)
+
+            agg_summary = {}
+            for layer_key, r2_per_model in layer_r2_across_models.items():
+                agg_summary[layer_key] = {}
+                for model_name, r2_dict in r2_per_model.items():
+                    vals = list(r2_dict.values())
+                    agg_summary[layer_key][model_name] = {
+                        "mean_r2": float(np.nanmean(vals)) if vals else None,
+                        "n_markers": len(r2_dict),
+                    }
+            agg_path = op.join(reg_root, "regression_summary.json")
+            os.makedirs(op.dirname(agg_path), exist_ok=True)
+            with open(agg_path, "w") as f:
+                json.dump(agg_summary, f, indent=2)
+            print(f"   Regression summary: {agg_path}", flush=True)
+
+        # --- Classification aggregation ---
+        clf_root = op.join(self.output_dir, "classification")
+        all_results = {}
+
+        if op.isdir(clf_root):
+            clf_names = ["svm", "kernel_ridge", "random_forest"]
+            for model_name in self.models:
+                all_results[model_name] = {}
+                layers = self._get_layers(model_name)
+                for layer_key in layers:
+                    layer_dir = op.join(clf_root, layer_key)
+                    if not op.isdir(layer_dir):
+                        continue
+                    layer_results = {}
+                    for clf_name in clf_names:
+                        clf_path = op.join(
+                            layer_dir,
+                            f"{clf_name}_{model_name}_results.json",
+                        )
+                        if not op.isfile(clf_path):
+                            continue
+                        with open(clf_path) as f:
+                            layer_results[clf_name] = json.load(f)
+                    if layer_results:
+                        all_results[model_name][layer_key] = layer_results
+                        parts = []
+                        for c, r in layer_results.items():
+                            auc = r.get("auc_mean")
+                            if auc is not None:
+                                parts.append(f"{c}: AUC={auc:.3f}")
+                            else:
+                                parts.append(f"{c}: AUC=N/A")
+                        print(
+                            f"   [classification] {model_name}/{layer_key}: "
+                            f"{', '.join(parts)}",
+                            flush=True,
+                        )
+
+            summary_path = op.join(clf_root, "classification_summary.json")
+            os.makedirs(op.dirname(summary_path), exist_ok=True)
+            with open(summary_path, "w") as f:
+                json.dump(all_results, f, indent=2)
+            print(f"   Classification summary: {summary_path}", flush=True)
+            self._plot_classification_summary(all_results)
+
+        print("Aggregation complete.", flush=True)
+
+    # ------------------------------------------------------------------
     # Top-level orchestrator
     # ------------------------------------------------------------------
 
-    def run(self, skip_regression=False, skip_classification=False):
-        """Run the full linear probing pipeline."""
+    def run(self, skip_regression=False, skip_classification=False, save_splits_to=None):
+        """Run the full linear probing pipeline.
+
+        Parameters
+        ----------
+        save_splits_to : str or None
+            Path to save generated CV splits.  Forwarded to
+            :meth:`run_classification`.
+        """
         print("=" * 70, flush=True)
         print("LINEAR PROBING -- Multi-Layer Embedding Analysis", flush=True)
         print(f"  data_dir      : {self.data_dir}", flush=True)
@@ -1398,6 +1693,8 @@ class LinearProber:
         print(f"  layers        : {self.layers_filter}", flush=True)
         print(f"  n_cv_folds    : {self.n_cv_folds}", flush=True)
         print(f"  full_cv       : {self.full_cv}", flush=True)
+        if self.precomputed_splits is not None:
+            print(f"  splits        : {len(self.precomputed_splits)} pre-computed folds", flush=True)
         print("=" * 70, flush=True)
 
         if not skip_regression:
@@ -1410,7 +1707,7 @@ class LinearProber:
                 self.run_regression()
 
         if not skip_classification:
-            self.run_classification()
+            self.run_classification(save_splits_to=save_splits_to)
 
         # Save top-level summary
         summary = {
@@ -1448,15 +1745,15 @@ Examples
 python linear_probing.py \\
     --data-dir /data/project/eeg_foundation/data \\
     --output-dir /data/project/eeg_foundation/data/benchmark_results/new_results/LINEAR_PROBING \\
-    --patient-labels /data/project/eeg_foundation/data/original_DoC/patient_labels_with_controls.csv \\
-    --marker-csv /data/project/eeg_foundation/data/original_DoC/baseline_stable_20210128_scalars.csv
+    --patient-labels /data/project/eeg_foundation/data/metadata/metadata_patient_labels.csv \\
+    --marker-csv /data/project/eeg_foundation/data/original_DoC/nice_scalars_all.csv
 
 # Regression only, single model:
 python linear_probing.py \\
     --data-dir /data/project/eeg_foundation/data \\
     --output-dir /tmp/lp_test \\
-    --patient-labels /data/project/eeg_foundation/data/original_DoC/patient_labels_with_controls.csv \\
-    --marker-csv /data/project/eeg_foundation/data/original_DoC/baseline_stable_20210128_scalars.csv \\
+    --patient-labels /data/project/eeg_foundation/data/metadata/metadata_patient_labels.csv \\
+    --marker-csv /data/project/eeg_foundation/data/original_DoC/nice_scalars_all.csv \\
     --models CbraMod --layers layer_0 --skip-classification
         """,
     )
@@ -1543,11 +1840,37 @@ python linear_probing.py \\
         ),
     )
     parser.add_argument(
+        "--aggregate-only",
+        action="store_true",
+        help=(
+            "Only aggregate per-layer JSON results into summaries and "
+            "plots.  Run this after all per-layer analysis jobs finish."
+        ),
+    )
+    parser.add_argument(
         "--subjects",
         help=(
             "Comma-separated list of sub-* directory names to process "
             "(e.g. 'sub-001,sub-002').  If omitted, all subjects are "
             "processed."
+        ),
+    )
+    parser.add_argument(
+        "--splits-file",
+        default=None,
+        help=(
+            "Pre-computed CV splits JSON (from generate_nested_cv_folds). "
+            "When provided, all layers use identical outer/inner fold assignments — "
+            "enabling consistent comparison across layers and with other scripts."
+        ),
+    )
+    parser.add_argument(
+        "--save-splits-to",
+        default=None,
+        help=(
+            "Path to save generated CV splits JSON for reuse. "
+            "If omitted and no --splits-file given, splits are auto-saved to "
+            "{output_dir}/cv_splits/linear_probing_crs_{timestamp}.json."
         ),
     )
 
@@ -1562,6 +1885,22 @@ python linear_probing.py \\
     if args.subjects:
         subject_ids = [s.strip() for s in args.subjects.split(",")]
 
+    # ── Load or prepare splits ────────────────────────────────────────────────
+    precomputed_splits = None
+    common_sessions = None
+
+    if args.splits_file and op.isfile(args.splits_file):
+        precomputed_splits, common_sessions, labels_ref = load_cv_splits(args.splits_file)
+        print(
+            f"Loaded {len(precomputed_splits)} pre-computed outer folds "
+            f"({len(common_sessions)} sessions) from {args.splits_file}",
+            flush=True,
+        )
+    elif not args.pool_only and not args.aggregate_only and not args.single_split:
+        # We'll generate splits after collect_classification_data() on first run.
+        # For now, pass None — LinearProber will detect when to generate.
+        pass
+
     prober = LinearProber(
         data_dir=args.data_dir,
         output_dir=args.output_dir,
@@ -1573,6 +1912,8 @@ python linear_probing.py \\
         n_cv_folds=args.n_cv_folds,
         random_state=args.random_state,
         full_cv=not args.single_split,
+        precomputed_splits=precomputed_splits,
+        common_sessions=common_sessions,
     )
 
     if args.pool_only:
@@ -1582,10 +1923,13 @@ python linear_probing.py \\
         for model_name in prober.models:
             prober.pool_and_cache_all(model_name, subject_ids=subject_ids)
         print("Pooling complete.", flush=True)
+    elif args.aggregate_only:
+        prober.aggregate_results()
     else:
         prober.run(
             skip_regression=args.skip_regression,
             skip_classification=args.skip_classification,
+            save_splits_to=args.save_splits_to,
         )
 
 

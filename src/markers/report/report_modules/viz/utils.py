@@ -190,9 +190,7 @@ def _map_key_to_section(name):
     elif "TimeLockedContrast" in name:
         section = "Time Locked"
     else:
-        raise NotImplementedError(
-            f"Sorry, no default section for marker {name}"
-        )
+        raise NotImplementedError(f"Sorry, no default section for marker {name}")
     return section
 
 
@@ -225,8 +223,7 @@ def get_log_topomap(xsig, vmin, vmax):
     from mne.utils import logger
 
     logger.warning(
-        "This will be removed soon! Wrong name. "
-        "Call get_stat_colormap() instead"
+        "This will be removed soon! Wrong name. Call get_stat_colormap() instead"
     )
     return get_stat_colormap(xsig, vmin, vmax)
 
@@ -244,9 +241,7 @@ def get_stat_colormap(xsig, vmin, vmax):
     return logcolor
 
 
-def plot_bad_channels(
-    epochs, bads, outlines="head", axes=None, sns_kwargs=None
-):
+def plot_bad_channels(epochs, bads, outlines="head", axes=None, sns_kwargs=None):
     """Plot bad channels
 
     Parameters
@@ -292,9 +287,7 @@ def plot_bad_channels(
             im = ax.images[0]
             # im.colorbar.set_label('regular')
             data = np.array(im.get_array())
-            bad_idx = {
-                evoked.ch_names.index(k) for k in bads if k in evoked.ch_names
-            }
+            bad_idx = {evoked.ch_names.index(k) for k in bads if k in evoked.ch_names}
             if len(bad_idx) > 0:
                 has_bads = True
                 mask = np.ones(data.shape, dtype=bool)
@@ -431,9 +424,7 @@ def plot_events(epochs):
     # Reverse labels
     ax = fig.get_axes()[0]
     handles, labels = ax.get_legend_handles_labels()
-    ax.legend(
-        handles[::-1], labels[::-1], loc="center left", bbox_to_anchor=(1, 0.5)
-    )
+    ax.legend(handles[::-1], labels[::-1], loc="center left", bbox_to_anchor=(1, 0.5))
     import matplotlib as mpl
 
     for legend in fig.findobj(mpl.legend.Legend):
@@ -558,13 +549,9 @@ def render_autoreject(epochs, summary, sns_kwargs=None):
     cmap_drop = sns.cubehelix_palette(8, as_cmap=True, reverse=True)
     cmap_inter = sns.cubehelix_palette(8, as_cmap=True)
     fig_bad_epochs, ax = plt.subplots()
-    im = ax.imshow(
-        masked_matrix, interpolation="nearest", cmap=cmap_inter, alpha=0.9
-    )
+    im = ax.imshow(masked_matrix, interpolation="nearest", cmap=cmap_inter, alpha=0.9)
     if np.any(bad_epochs):
-        ax.imshow(
-            masked_dropped, interpolation="nearest", cmap=cmap_drop, alpha=0.9
-        )
+        ax.imshow(masked_dropped, interpolation="nearest", cmap=cmap_drop, alpha=0.9)
     cbar = fig_bad_epochs.colorbar(im, ax=ax, shrink=0.5)
     cbar.set_ticks(np.arange(cbar.vmin, cbar.vmax + 1))
     cbar.set_ticklabels(list(np.arange(cbar.vmin, cbar.vmax)) + ["Rejected"])
@@ -621,13 +608,13 @@ def _render_drop_log_table(epochs):
     table_content = ""
     for reason, perc in zip(reasons, percs):
         value = scores[reason]
-        table_content += f"<tr><td>{reason.title()}</td><td>{value}</td><td>{perc:.2f} %</td></tr>"
+        table_content += (
+            f"<tr><td>{reason.title()}</td><td>{value}</td><td>{perc:.2f} %</td></tr>"
+        )
 
     value = len(drop_log) - np.array(list(scores.values())).sum()
     perc = 100 * value / len(drop_log)
-    table_content += (
-        f"<tr><td>Good</td><td>{value}</td><td>{perc:.2f} %</td></tr>"
-    )
+    table_content += f"<tr><td>Good</td><td>{value}</td><td>{perc:.2f} %</td></tr>"
     table = f"""{css}<div><h5 style="text-align:center;">Epochs count</h5></div>
         <table class="dropped_epochs">{header}{table_content}</table>"""
     return table
@@ -687,12 +674,7 @@ def render_preprocessing_summary(summary):
             f"<td>{result}</td></tr>"
         )
 
-    table = (
-        f"{css}"
-        '<table class="preprocess_summary">'
-        f"{header}{table_content}"
-        "</table>"
-    )
+    table = f'{css}<table class="preprocess_summary">{header}{table_content}</table>'
     return table
 
 
@@ -738,12 +720,7 @@ def render_prediction_summary(summary):
             f'<td class="results">{str_results}</td></tr>'
         )
 
-    table = (
-        f"{css}"
-        '<table class="prediction_summary">'
-        f"{header}{table_content}"
-        "</table>"
-    )
+    table = f'{css}<table class="prediction_summary">{header}{table_content}</table>'
     return table
 
 
@@ -793,9 +770,7 @@ def plot_generalization_decoding(
                 sig_masks = [None] * len(instances)
     t_axes = axes.ravel()[: len(instances)]
     im2 = None
-    for t_ax, t_i, t_title, t_sig in zip(
-        t_axes, instances.values(), titles, sig_masks
-    ):
+    for t_ax, t_i, t_title, t_sig in zip(t_axes, instances.values(), titles, sig_masks):
         t_data = t_i.data_.mean(axis=0)
         if vrange is None:
             vmin = np.min(t_data)
@@ -844,9 +819,7 @@ def plot_generalization_decoding(
                 )
             elif sig_type == "color":
                 C = [(0, 0, 0), (1.0, 1.0, 1.0), (0, 0, 0)]
-                cm = mpl.colors.LinearSegmentedColormap.from_list(
-                    colors=C, name="bwb"
-                )
+                cm = mpl.colors.LinearSegmentedColormap.from_list(colors=C, name="bwb")
                 im2 = t_ax.imshow(
                     np.ma.masked_array(t_data, mask=t_sig),
                     vmin=vmin,
@@ -868,9 +841,7 @@ def plot_generalization_decoding(
             ls="--",
             lw=0.7,
         )
-        cbar = plt.colorbar(
-            im, ax=t_ax, pad=-0.1, shrink=1, aspect=30, format="%.2f"
-        )
+        cbar = plt.colorbar(im, ax=t_ax, pad=-0.1, shrink=1, aspect=30, format="%.2f")
         cbar.set_label("AUC")
         if t_sig is not None and sig_type == "color":
             cbar2 = plt.colorbar(

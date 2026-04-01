@@ -63,6 +63,7 @@ Author: Trinidad Borrell <trinidad.borrell@gmail.com>
 import numpy as np
 import pandas as pd
 import argparse
+from datetime import datetime
 import os
 import os.path as op
 import json
@@ -111,8 +112,10 @@ def _safe_auc_score(y_true, y_score, fallback_preds):
 
 try:
     from .kernel_ridge_classifier import KernelRidgeClassifier
+    from .cv_utils import generate_nested_cv_folds, load_cv_splits, save_cv_splits
 except ImportError:
     from kernel_ridge_classifier import KernelRidgeClassifier
+    from cv_utils import generate_nested_cv_folds, load_cv_splits, save_cv_splits
 
 warnings.filterwarnings("ignore")
 
@@ -529,8 +532,46 @@ class BaselineClassifier:
     # Grid searches (inner 3-fold GroupKFold)
     # ------------------------------------------------------------------
 
-    def _grid_search_svm(self, X_train, y_train, groups_train):
-        """Inner 3-fold GroupKFold grid search for SVM (with StandardScaler).
+    def _build_inner_cv_splits(self, y_train, groups_train, X_train, precomputed=None):
+        """Return a list of (train_idx, val_idx) inner CV splits.
+
+        Uses ``StratifiedGroupKFold`` for binary targets and ``GroupKFold``
+        for multiclass.  Inner fold count is ``n_cv_folds - 1`` (capped by
+        the number of subjects and smallest class count).
+
+        If *precomputed* is provided those splits are returned directly,
+        ensuring all models evaluated on the same outer folds also share
+        identical inner splits.
+        """
+        if precomputed is not None:
+            return precomputed
+
+        class_counts = np.bincount(y_train, minlength=2)
+        n_groups = len(np.unique(groups_train))
+        n_inner = int(
+            min(
+                self.n_cv_folds - 1,
+                n_groups,
+                int(np.min(class_counts)),
+            )
+        )
+        n_inner = max(2, n_inner)
+
+        if self.is_binary:
+            inner_cv = StratifiedGroupKFold(
+                n_splits=n_inner,
+                shuffle=True,
+                random_state=self.random_state,
+            )
+        else:
+            inner_cv = GroupKFold(n_splits=n_inner)
+
+        return list(inner_cv.split(X_train, y_train, groups=groups_train))
+
+    def _grid_search_svm(
+        self, X_train, y_train, groups_train, precomputed_inner_splits=None
+    ):
+        """Inner StratifiedGroupKFold grid search for SVM (with StandardScaler).
 
         Returns
         -------
@@ -544,16 +585,16 @@ class BaselineClassifier:
         # gamma only relevant for rbf
         gamma_options = {"rbf": ["scale", 0.001, 0.01, 0.1], "linear": [None]}
 
-        inner_cv = GroupKFold(n_splits=3)
+        inner_splits = self._build_inner_cv_splits(
+            y_train, groups_train, X_train, precomputed=precomputed_inner_splits
+        )
         best_score = -1.0
         best_params = {"C": 1.0, "kernel": "rbf", "gamma": "scale"}
 
         for C, kernel in product(param_grid["C"], param_grid["kernel"]):
             for gamma in gamma_options[kernel]:
                 scores = []
-                for tr_idx, va_idx in inner_cv.split(
-                    X_train, y_train, groups=groups_train
-                ):
+                for tr_idx, va_idx in inner_splits:
                     svc_kw = dict(
                         C=C,
                         kernel=kernel,
@@ -607,8 +648,10 @@ class BaselineClassifier:
         best_model.fit(X_train, y_train)
         return best_model, best_params
 
-    def _grid_search_rf(self, X_train, y_train, groups_train):
-        """Inner 3-fold GroupKFold grid search for Random Forest.
+    def _grid_search_rf(
+        self, X_train, y_train, groups_train, precomputed_inner_splits=None
+    ):
+        """Inner StratifiedGroupKFold grid search for Random Forest.
 
         Returns
         -------
@@ -619,7 +662,9 @@ class BaselineClassifier:
             "n_estimators": [100, 300, 500],
             "max_depth": [None, 10, 20],
         }
-        inner_cv = GroupKFold(n_splits=3)
+        inner_splits = self._build_inner_cv_splits(
+            y_train, groups_train, X_train, precomputed=precomputed_inner_splits
+        )
 
         best_score = -1.0
         best_params = {"n_estimators": 100, "max_depth": None}
@@ -628,7 +673,7 @@ class BaselineClassifier:
             param_grid["n_estimators"], param_grid["max_depth"]
         ):
             scores = []
-            for tr_idx, va_idx in inner_cv.split(X_train, y_train, groups=groups_train):
+            for tr_idx, va_idx in inner_splits:
                 rf = RandomForestClassifier(
                     n_estimators=n_est,
                     max_depth=max_d,
@@ -661,8 +706,10 @@ class BaselineClassifier:
         best_model.fit(X_train, y_train)
         return best_model, best_params
 
-    def _grid_search_kr(self, X_train, y_train, groups_train):
-        """Inner 3-fold GroupKFold grid search for Kernel Ridge (RBF).
+    def _grid_search_kr(
+        self, X_train, y_train, groups_train, precomputed_inner_splits=None
+    ):
+        """Inner StratifiedGroupKFold grid search for Kernel Ridge (RBF).
 
         Binary: predictions clipped to [0,1] and thresholded at 0.5.
         Multiclass: one-hot targets, argmax for scoring.
@@ -676,7 +723,9 @@ class BaselineClassifier:
             "alpha": [0.01, 0.1, 1.0, 10.0],
             "gamma": [0.001, 0.01, 0.1, 1.0],
         }
-        inner_cv = GroupKFold(n_splits=3)
+        inner_splits = self._build_inner_cv_splits(
+            y_train, groups_train, X_train, precomputed=precomputed_inner_splits
+        )
 
         if not self.is_binary:
             n_cls = len(np.unique(y_train))
@@ -689,7 +738,7 @@ class BaselineClassifier:
 
         for alpha, gamma in product(param_grid["alpha"], param_grid["gamma"]):
             scores = []
-            for tr_idx, va_idx in inner_cv.split(X_train, y_train, groups=groups_train):
+            for tr_idx, va_idx in inner_splits:
                 kr = KernelRidgeClassifier(kernel="rbf", alpha=alpha, gamma=gamma)
                 if self.is_binary:
                     kr.fit(X_train[tr_idx], y_train[tr_idx])
@@ -725,16 +774,19 @@ class BaselineClassifier:
             best_model.fit(X_train, np.eye(n_cls)[y_train])
         return best_model, best_params
 
-    def _grid_search_mlp(self, X_train, y_train, groups_train):
-        """Inner GroupKFold grid search for MLP (StandardScaler + MLPClassifier).
+    def _grid_search_mlp(
+        self, X_train, y_train, groups_train, precomputed_inner_splits=None
+    ):
+        """Inner StratifiedGroupKFold grid search for MLP (StandardScaler + MLPClassifier).
 
         Returns
         -------
         model : Pipeline (StandardScaler + MLPClassifier)
         best_params : dict
         """
-        n_unique = len(np.unique(groups_train))
-        inner_cv = GroupKFold(n_splits=min(3, n_unique))
+        inner_splits = self._build_inner_cv_splits(
+            y_train, groups_train, X_train, precomputed=precomputed_inner_splits
+        )
         pipe = Pipeline(
             [
                 ("scaler", StandardScaler()),
@@ -756,12 +808,12 @@ class BaselineClassifier:
         gs = GridSearchCV(
             pipe,
             param_grid,
-            cv=inner_cv,
+            cv=inner_splits,
             scoring="balanced_accuracy",
             n_jobs=-1,
             refit=True,
         )
-        gs.fit(X_train, y_train, groups=groups_train)
+        gs.fit(X_train, y_train)
         print(
             f"      MLP best params: {gs.best_params_} (bal_acc={gs.best_score_:.3f})",
             flush=True,
@@ -1538,6 +1590,8 @@ class BaselineClassifier:
         death_binary=False,
         vs_to_mcs=False,
         mcs_to_conscious=False,
+        precomputed_splits=None,
+        common_sessions=None,
     ):
         """Nested CV: StratifiedGroupKFold / GroupKFold outer loop.
 
@@ -1548,6 +1602,13 @@ class BaselineClassifier:
             If True, collapses outcome classes to binary VS/MCS.
         death_binary : bool
             If True, collapses outcome classes to binary DEATH/NON_DEATH.
+        precomputed_splits:
+            Optional list of fold dicts from :func:`cv_utils.generate_nested_cv_folds`.
+            When provided (with *common_sessions*), all models use identical fold
+            assignments so results are directly comparable across embedding types.
+        common_sessions:
+            Ordered session keys matching the rows expected by *precomputed_splits*.
+            Required when *precomputed_splits* is not None.
         """
         n_folds = self.n_cv_folds
         if death_binary:
@@ -1575,6 +1636,21 @@ class BaselineClassifier:
             mcs_to_conscious=mcs_to_conscious,
         )
 
+        # Filter and reorder to common session pool when precomputed splits provided.
+        if common_sessions is not None:
+            session_to_idx = {s: i for i, s in enumerate(subjects)}
+            missing = [s for s in common_sessions if s not in session_to_idx]
+            if missing:
+                raise ValueError(
+                    f"{len(missing)} common sessions missing from DK baseline: "
+                    f"{missing[:5]}{'...' if len(missing) > 5 else ''}"
+                )
+            keep = [session_to_idx[s] for s in common_sessions]
+            X = X[keep]
+            y = y[keep]
+            subjects = [subjects[i] for i in keep]
+            groups = groups[keep]
+
         unique_groups = np.unique(groups)
         n_unique = len(unique_groups)
         print(
@@ -1582,20 +1658,42 @@ class BaselineClassifier:
             flush=True,
         )
 
-        effective_folds = min(n_folds, n_unique)
-        if effective_folds < 2:
-            raise ValueError(
-                f"Only {n_unique} unique subjects — cannot perform {n_folds}-fold CV"
-            )
-
-        if self.is_binary:
-            sgkf = StratifiedGroupKFold(
-                n_splits=effective_folds,
-                shuffle=True,
-                random_state=self.random_state,
+        # Determine fold structure.
+        if precomputed_splits is not None:
+            if common_sessions is None:
+                raise ValueError(
+                    "common_sessions must be provided together with precomputed_splits"
+                )
+            folds = precomputed_splits
+            effective_folds = len(folds)
+            print(
+                f"   Using {effective_folds} pre-computed folds (shared across models)",
+                flush=True,
             )
         else:
-            sgkf = GroupKFold(n_splits=effective_folds)
+            effective_folds = min(n_folds, n_unique)
+            if effective_folds < 2:
+                raise ValueError(
+                    f"Only {n_unique} unique subjects — cannot perform "
+                    f"{n_folds}-fold CV"
+                )
+            if self.is_binary:
+                sgkf = StratifiedGroupKFold(
+                    n_splits=effective_folds,
+                    shuffle=True,
+                    random_state=self.random_state,
+                )
+            else:
+                sgkf = GroupKFold(n_splits=effective_folds)
+            folds = []
+            for tr_idx, te_idx in sgkf.split(X, y, groups=groups):
+                folds.append(
+                    {
+                        "train_idx": tr_idx,
+                        "test_idx": te_idx,
+                        "inner_splits": None,
+                    }
+                )
 
         accum = {
             mk: {
@@ -1608,9 +1706,11 @@ class BaselineClassifier:
             for mk in MODEL_CONFIGS
         }
 
-        for fold_idx, (train_idx, test_idx) in enumerate(
-            sgkf.split(X, y, groups=groups)
-        ):
+        for fold_idx, fold in enumerate(folds):
+            train_idx = fold["train_idx"]
+            test_idx = fold["test_idx"]
+            inner_splits_for_fold = fold.get("inner_splits")
+
             print(f"\n{'─' * 60}", flush=True)
             print(f"  FOLD {fold_idx + 1}/{effective_folds}", flush=True)
             print(f"{'─' * 60}", flush=True)
@@ -1654,7 +1754,10 @@ class BaselineClassifier:
             # ---- SVM ----
             print("   Training SVM ...", flush=True)
             svm_model, _ = self._grid_search_svm(
-                X_train_fold, y_train_fold, groups_train_fold
+                X_train_fold,
+                y_train_fold,
+                groups_train_fold,
+                precomputed_inner_splits=inner_splits_for_fold,
             )
             _fold_dir = op.join(self.output_dir, "nested_cv", "svm")
             os.makedirs(_fold_dir, exist_ok=True)
@@ -1681,7 +1784,10 @@ class BaselineClassifier:
             # ---- MLP ----
             print("   Training MLP ...", flush=True)
             mlp_model, _ = self._grid_search_mlp(
-                X_train_fold, y_train_fold, groups_train_fold
+                X_train_fold,
+                y_train_fold,
+                groups_train_fold,
+                precomputed_inner_splits=inner_splits_for_fold,
             )
             _fold_dir = op.join(self.output_dir, "nested_cv", "mlp")
             os.makedirs(_fold_dir, exist_ok=True)
@@ -1708,7 +1814,10 @@ class BaselineClassifier:
             # ---- Random Forest ----
             print("   Training Random Forest ...", flush=True)
             rf_model, _ = self._grid_search_rf(
-                X_train_fold, y_train_fold, groups_train_fold
+                X_train_fold,
+                y_train_fold,
+                groups_train_fold,
+                precomputed_inner_splits=inner_splits_for_fold,
             )
             _fold_dir = op.join(self.output_dir, "nested_cv", "random_forest")
             os.makedirs(_fold_dir, exist_ok=True)
@@ -1735,7 +1844,10 @@ class BaselineClassifier:
             # ---- Kernel Ridge ----
             print("   Training Kernel Ridge ...", flush=True)
             kr_model, _ = self._grid_search_kr(
-                X_train_fold, y_train_fold, groups_train_fold
+                X_train_fold,
+                y_train_fold,
+                groups_train_fold,
+                precomputed_inner_splits=inner_splits_for_fold,
             )
             _fold_dir = op.join(self.output_dir, "nested_cv", "kernel_ridge")
             os.makedirs(_fold_dir, exist_ok=True)
@@ -1849,7 +1961,12 @@ class BaselineClassifier:
     # Multi-target runner
     # ------------------------------------------------------------------
 
-    def run_all_targets(self, test_size=0.2):
+    def run_all_targets(
+        self,
+        test_size=0.2,
+        precomputed_splits=None,
+        common_sessions=None,
+    ):
         """Run classification for all targets.
 
         For binary targets (crs, etiology, etiology_code) a single run is used.
@@ -1859,6 +1976,12 @@ class BaselineClassifier:
           - ``{target}/binary_death/``            — DEATH vs NON_DEATH
           - ``{target}/binary_vs_to_mcs/``        — VS→MCS transition
           - ``{target}/binary_mcs_to_conscious/`` — MCS→CONSCIOUS transition
+
+        Parameters
+        ----------
+        precomputed_splits, common_sessions :
+            When provided, all ``run_full_cv`` calls use the same fold
+            assignments (CRS-based, shared across targets).
         """
         _OUTCOME_TARGETS = {"cs_6m", "cs_1y", "cs_2y"}
         base_output_dir = self.output_dir
@@ -1895,6 +2018,8 @@ class BaselineClassifier:
                                 death_binary=death_binary,
                                 vs_to_mcs=vs_to_mcs,
                                 mcs_to_conscious=mcs_to_conscious,
+                                precomputed_splits=precomputed_splits,
+                                common_sessions=common_sessions,
                             )
                         else:
                             self.run_classification(
@@ -1915,7 +2040,11 @@ class BaselineClassifier:
                 os.makedirs(self.output_dir, exist_ok=True)
                 try:
                     if self.full_cv:
-                        self.run_full_cv(target)
+                        self.run_full_cv(
+                            target,
+                            precomputed_splits=precomputed_splits,
+                            common_sessions=common_sessions,
+                        )
                     else:
                         self.run_classification(target, test_size)
                 except ValueError as exc:
@@ -2191,15 +2320,14 @@ Reduction map:
 
     parser.add_argument(
         "--original-metadata",
-        default=(
-            "/data/project/eeg_foundation/data/original_DoC/"
-            "baseline_stable_20210128_scalars.csv"
-        ),
+        default=("/data/project/eeg_foundation/data/original_DoC/nice_scalars_all.csv"),
         help="Path to baseline_stable scalars CSV (semicolon-delimited).",
     )
     parser.add_argument(
         "--patient-labels",
-        default=("/data/project/eeg_foundation/data/metadata/patient_labels.csv"),
+        default=(
+            "/data/project/eeg_foundation/data/metadata/metadata_patient_labels.csv"
+        ),
         help="Path to patient_labels.csv with target columns.",
     )
     parser.add_argument(
@@ -2245,11 +2373,42 @@ Reduction map:
             "Which target to predict.  'all' (default) runs all 5 targets in sequence."
         ),
     )
+    parser.add_argument(
+        "--splits-file",
+        default=None,
+        help=(
+            "Path to a pre-computed common_cv_splits.json (from cv_utils). "
+            "When provided, the stored session pool and fold assignments are "
+            "used so the baseline is evaluated on the same folds as FM models."
+        ),
+    )
+    parser.add_argument(
+        "--save-splits-to",
+        default=None,
+        help=(
+            "Path where the generated CV splits should be saved as JSON. "
+            "Only used when --splits-file is not provided. Splits are built "
+            "from the DK session pool for the 'crs' target and reused across "
+            "all targets so results are internally comparable."
+        ),
+    )
 
     args = parser.parse_args()
 
     output_dir = op.join(args.main_path, "MARKER_BASELINE")
     os.makedirs(output_dir, exist_ok=True)
+
+    # Load pre-computed shared splits if provided.
+    precomputed_splits = None
+    common_sessions = None
+    if args.splits_file and op.isfile(args.splits_file):
+        print(f"Loading pre-computed splits from {args.splits_file}", flush=True)
+        precomputed_splits, common_sessions, _ = load_cv_splits(args.splits_file)
+        print(
+            f"  {len(common_sessions)} common sessions, "
+            f"{len(precomputed_splits)} outer folds",
+            flush=True,
+        )
 
     classifier = BaselineClassifier(
         scalars_csv=args.original_metadata,
@@ -2261,10 +2420,55 @@ Reduction map:
         n_cv_folds=args.n_cv_folds,
     )
 
+    # Generate splits from the marker session pool (crs target) when no
+    # pre-computed splits file was provided.  The CRS-based folds are reused
+    # for all subsequent run_full_cv calls so every target is evaluated on
+    # the same fold assignments (internally comparable, and compatible with
+    # FM-model splits generated from the same data).
+    if precomputed_splits is None and args.full_cv:
+        print(
+            "\nGenerating CV splits from marker session pool (crs target) ...",
+            flush=True,
+        )
+        X_tmp, y_tmp, subjects_tmp, _ = classifier.collect_data("crs")
+        labels_for_splits = {s: int(y_tmp[i]) for i, s in enumerate(subjects_tmp)}
+        common_sessions = list(subjects_tmp)
+        precomputed_splits = generate_nested_cv_folds(
+            common_sessions,
+            labels_for_splits,
+            n_outer=args.n_cv_folds,
+            random_state=args.random_state,
+        )
+        # Always auto-save with timestamp so different runs don't overwrite.
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        splits_dir = op.join(output_dir, "cv_splits")
+        os.makedirs(splits_dir, exist_ok=True)
+        auto_path = op.join(splits_dir, f"baseline_crs_{ts}.json")
+        save_cv_splits(
+            precomputed_splits, common_sessions, labels_for_splits, path=auto_path
+        )
+        print(
+            f"  Saved {len(precomputed_splits)} folds over "
+            f"{len(common_sessions)} sessions to {auto_path}",
+            flush=True,
+        )
+        if args.save_splits_to:
+            save_cv_splits(
+                precomputed_splits,
+                common_sessions,
+                labels_for_splits,
+                path=args.save_splits_to,
+            )
+            print(f"  Also saved to explicit path: {args.save_splits_to}", flush=True)
+
     _OUTCOME_TARGETS = {"cs_6m", "cs_1y", "cs_2y"}
 
     if args.target == "all":
-        classifier.run_all_targets(test_size=args.test_size)
+        classifier.run_all_targets(
+            test_size=args.test_size,
+            precomputed_splits=precomputed_splits,
+            common_sessions=common_sessions,
+        )
     elif args.target in _OUTCOME_TARGETS:
         modes = [
             ("multiclass", False, False),
@@ -2279,6 +2483,8 @@ Reduction map:
                     args.target,
                     binary_outcome=binary_outcome,
                     death_binary=death_binary,
+                    precomputed_splits=precomputed_splits,
+                    common_sessions=common_sessions,
                 )
             else:
                 classifier.run_classification(
@@ -2291,7 +2497,11 @@ Reduction map:
         classifier.output_dir = op.join(output_dir, args.target)
         os.makedirs(classifier.output_dir, exist_ok=True)
         if args.full_cv:
-            classifier.run_full_cv(args.target)
+            classifier.run_full_cv(
+                args.target,
+                precomputed_splits=precomputed_splits,
+                common_sessions=common_sessions,
+            )
         else:
             classifier.run_classification(args.target, args.test_size)
 

@@ -26,6 +26,9 @@ src/global_analysis/global_analysis.py
 src/global_analysis/README_SCRIPTS.txt
 src/report_completed_results.py
 src/model/txt/
+src/interp/how_to_run.txt
+src/build_tables/run.txt
+
 
 .ruff_cache/
 .vscode/
@@ -35,6 +38,8 @@ src/model/txt/
 .venv_n/
 
 PIPELINE_CHANGES_EXPLANATION.txt
+run_model_scripts.txt
+
 
 cookbooks/pipeline.py.backup
 

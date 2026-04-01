@@ -34,9 +34,10 @@ logger = logging.getLogger(__name__)
 # Part 1: HDF5 Feature Reading (from Junifer)
 # =============================================================================
 
+
 class HDF5Reader:
     """Read Junifer HDF5 feature storage files.
-    
+
     Uses junifer's built-in HDF5FeatureStorage to read features.
     """
 
@@ -44,7 +45,7 @@ class HDF5Reader:
         self.hdf5_path = Path(hdf5_path)
         if not self.hdf5_path.exists():
             raise FileNotFoundError(f"HDF5 file not found: {self.hdf5_path}")
-        
+
         self.storage = HDF5FeatureStorage(str(self.hdf5_path))
         self._features_cache = None
 
@@ -75,6 +76,7 @@ class HDF5Reader:
 # Part 2: MNE Preprocessing Data Reading
 # =============================================================================
 
+
 class PreprocessingReader:
     """Read MNE preprocessing data from dumped files."""
 
@@ -83,7 +85,7 @@ class PreprocessingReader:
 
     def load_preprocessing_data(self) -> Dict[str, Any]:
         """Load preprocessing data from dumped files.
-        
+
         Loads cleaned epochs and preprocessing metadata.
         Original epochs are not needed since all info is in the metadata.
         """
@@ -91,13 +93,17 @@ class PreprocessingReader:
         bad_channels_metadata_file = self.dump_path / "03_bad_channels_metadata.pkl"
 
         if not cleaned_epochs_file.exists():
-            raise FileNotFoundError(f"Cleaned epochs file not found: {cleaned_epochs_file}")
+            raise FileNotFoundError(
+                f"Cleaned epochs file not found: {cleaned_epochs_file}"
+            )
         if not bad_channels_metadata_file.exists():
-            raise FileNotFoundError(f"Metadata file not found: {bad_channels_metadata_file}")
+            raise FileNotFoundError(
+                f"Metadata file not found: {bad_channels_metadata_file}"
+            )
 
         # Load cleaned epochs (for all analysis)
         cleaned_epochs = mne.read_epochs(str(cleaned_epochs_file), preload=True)
-        
+
         # Load metadata containing preprocessing info
         with open(bad_channels_metadata_file, "rb") as f:
             metadata = pickle.load(f)
@@ -106,19 +112,23 @@ class PreprocessingReader:
         preprocessing_info = metadata.get("preprocessing_info", {})
         bad_channels = preprocessing_info.get("bad_channels_detected", [])
         bad_epochs_indices = preprocessing_info.get("bad_epochs_detected", [])
-        
+
         # Calculate epoch counts
         n_epochs_after = len(cleaned_epochs)
-        n_bad_epochs = len(bad_epochs_indices) if bad_epochs_indices is not None and len(bad_epochs_indices) > 0 else 0
+        n_bad_epochs = (
+            len(bad_epochs_indices)
+            if bad_epochs_indices is not None and len(bad_epochs_indices) > 0
+            else 0
+        )
         n_epochs_before = n_epochs_after + n_bad_epochs
-        
+
         logger.info(f"Loaded cleaned epochs: {n_epochs_after}")
         logger.info(f"Bad epochs from metadata: {n_bad_epochs}")
         logger.info(f"Total epochs before rejection: {n_epochs_before}")
         logger.info(f"Bad channels detected: {len(bad_channels)} - {bad_channels}")
 
         return {
-            "epochs": cleaned_epochs,           # For all analysis (main data)
+            "epochs": cleaned_epochs,  # For all analysis (main data)
             "bad_channels": bad_channels,
             "bad_epochs": bad_epochs_indices,
             "n_epochs_before_rejection": n_epochs_before,
@@ -131,9 +141,10 @@ class PreprocessingReader:
 # Part 3: Data Adapter (for nice_ext compatibility)
 # =============================================================================
 
+
 class MarkerDataAdapter:
     """Adapter to make data compatible with nice_ext plotting functions.
-    
+
     This wraps data to provide the interface that nice_ext expects.
     """
 
@@ -142,7 +153,9 @@ class MarkerDataAdapter:
         self.name_ = name
         self.ch_info_ = ch_info
         # For CNV markers that have both slopes and intercepts
-        self.intercepts_ = np.asarray(intercepts, dtype=np.float64) if intercepts is not None else None
+        self.intercepts_ = (
+            np.asarray(intercepts, dtype=np.float64) if intercepts is not None else None
+        )
 
     def _get_title(self):
         """Get marker title for nice_ext plotting."""
@@ -164,7 +177,7 @@ class MarkerDataAdapter:
 
         # Ensure at least 1D array (not scalar)
         reduced_data = np.atleast_1d(reduced_data)
-        
+
         # Flatten if more than 1D
         if reduced_data.ndim > 1:
             reduced_data = reduced_data.flatten()
@@ -182,7 +195,9 @@ class MarkerDataAdapter:
             bad_channels = self.ch_info_.get("bads", [])
 
             # If data already aligned to full montage with NaNs, return as-is
-            if len(reduced_data) == len(all_channels) and np.any(np.isnan(reduced_data)):
+            if len(reduced_data) == len(all_channels) and np.any(
+                np.isnan(reduced_data)
+            ):
                 return reduced_data
 
             # Otherwise, filter to good channels only
@@ -198,11 +213,9 @@ class MarkerDataAdapter:
         return reduced_data
 
 
-def align_data_to_eeg_montage(
-    data, mne_info, fill_value=np.nan, bad_channels=None
-):
+def align_data_to_eeg_montage(data, mne_info, fill_value=np.nan, bad_channels=None):
     """Align data to EEG montage, handling channel mismatches and bad channels.
-    
+
     Parameters
     ----------
     data : array-like
@@ -213,7 +226,7 @@ def align_data_to_eeg_montage(
         Value to use for missing/bad channels
     bad_channels : list, optional
         List of bad channel names
-    
+
     Returns
     -------
     aligned_data : np.ndarray
@@ -227,16 +240,17 @@ def align_data_to_eeg_montage(
     # Extract EEG channels from mne_info
     ch_names = mne_info["ch_names"]
     eeg_channel_indices = [
-        i for i, ch in enumerate(ch_names)
-        if ch.startswith("E") and ch[1:].isdigit()
+        i for i, ch in enumerate(ch_names) if ch.startswith("E") and ch[1:].isdigit()
     ]
     eeg_info = mne.pick_info(mne_info, eeg_channel_indices, copy=True)
     n_eeg_channels = len(eeg_info["ch_names"])
-    
+
     # Set bad channels in info
     bad_eeg_channels = [ch for ch in bad_channels if ch in eeg_info["ch_names"]]
     eeg_info["bads"] = bad_eeg_channels
-    good_eeg_channels = [ch for ch in eeg_info["ch_names"] if ch not in bad_eeg_channels]
+    good_eeg_channels = [
+        ch for ch in eeg_info["ch_names"] if ch not in bad_eeg_channels
+    ]
 
     # Handle dict input
     if isinstance(data, dict):
@@ -253,8 +267,7 @@ def align_data_to_eeg_montage(
     if len(data_flat) == len(good_eeg_channels):
         aligned_data = np.full(n_eeg_channels, fill_value)
         good_indices = [
-            i for i, ch in enumerate(eeg_info["ch_names"])
-            if ch not in bad_eeg_channels
+            i for i, ch in enumerate(eeg_info["ch_names"]) if ch not in bad_eeg_channels
         ]
         aligned_data[good_indices] = data_flat
         return aligned_data, eeg_info
@@ -266,11 +279,12 @@ def align_data_to_eeg_montage(
     # Case 3: Data is larger (includes non-EEG channels)
     if len(eeg_channel_indices) <= len(data_flat):
         eeg_data = data_flat[eeg_channel_indices]
-        
+
         if len(eeg_data) == len(good_eeg_channels):
             aligned_data = np.full(n_eeg_channels, fill_value)
             good_indices = [
-                i for i, ch in enumerate(eeg_info["ch_names"])
+                i
+                for i, ch in enumerate(eeg_info["ch_names"])
                 if ch not in bad_eeg_channels
             ]
             aligned_data[good_indices] = eeg_data
@@ -290,7 +304,14 @@ def align_data_to_eeg_montage(
 
 
 # Standard Local-Global paradigm mapping (10=HSTD, 20=HDVT, 30=LSGS, 40=LSGD, 50=LDGD, 60=LDGS)
-_LG_EVENT_ID_MAP = {10: "HSTD", 20: "HDVT", 30: "LSGS", 40: "LSGD", 50: "LDGD", 60: "LDGS"}
+_LG_EVENT_ID_MAP = {
+    10: "HSTD",
+    20: "HDVT",
+    30: "LSGS",
+    40: "LSGD",
+    50: "LDGD",
+    60: "LDGS",
+}
 
 
 def _remap_numeric_event_ids(epochs):
@@ -312,9 +333,7 @@ def _remap_numeric_event_ids(epochs):
     # Rebuild event_id with string names, restricted to codes present in data
     present_codes = set(epochs.events[:, 2].tolist())
     new_event_id = {
-        name: code
-        for code, name in _LG_EVENT_ID_MAP.items()
-        if code in present_codes
+        name: code for code, name in _LG_EVENT_ID_MAP.items() if code in present_codes
     }
     if new_event_id:
         epochs.event_id = new_event_id
@@ -339,9 +358,7 @@ def _ensure_montage(epochs):
 
     montage = mne.channels.make_standard_montage("GSN-HydroCel-256")
     epochs.set_montage(montage, on_missing="warn")
-    logger.info(
-        "Applied GSN-HydroCel-256 montage (epochs had no digitization points)"
-    )
+    logger.info("Applied GSN-HydroCel-256 montage (epochs had no digitization points)")
     return epochs
 
 
@@ -349,13 +366,19 @@ def _ensure_montage(epochs):
 # Part 4: Report Data Loader (Main Orchestrator)
 # =============================================================================
 
+
 class ReportDataLoader:
     """Load and transform all data for report generation.
-    
+
     This combines HDF5 reading, preprocessing data, and transformations.
     """
 
-    def __init__(self, hdf5_path: Union[str, Path], fif_path: Union[str, Path] = None, skip_preprocessing: bool = False):
+    def __init__(
+        self,
+        hdf5_path: Union[str, Path],
+        fif_path: Union[str, Path] = None,
+        skip_preprocessing: bool = False,
+    ):
         self.hdf5_reader = HDF5Reader(hdf5_path)
         self.fif_path = Path(fif_path) if fif_path else None
         self.skip_preprocessing = skip_preprocessing
@@ -368,7 +391,7 @@ class ReportDataLoader:
         """Load all data from HDF5 and preprocessing files."""
         logger.info("Loading HDF5 features...")
         report_data = self._load_hdf5_features()
-        
+
         if self.skip_preprocessing:
             # Load epochs directly from FIF file without preprocessing metadata
             logger.info(f"Loading epochs from FIF file: {self.fif_path}")
@@ -381,24 +404,32 @@ class ReportDataLoader:
                 "bad_channels": [],
                 "bad_epochs": [],
                 "n_epochs_before_rejection": len(epochs),
-                "n_epochs_after_rejection": len(epochs)
+                "n_epochs_after_rejection": len(epochs),
             }
             logger.info(f"Loaded {len(epochs)} epochs from FIF file")
         else:
             # Load with preprocessing metadata
             logger.info("Loading preprocessing data...")
             preprocessing_data = self.preprocessing_reader.load_preprocessing_data()
-            
+
             # Add preprocessing data to report_data
-            report_data["epoch_info"] = preprocessing_data["epochs"]  # Cleaned epochs for analysis
+            report_data["epoch_info"] = preprocessing_data[
+                "epochs"
+            ]  # Cleaned epochs for analysis
             report_data["metadata"] = {
-                "preprocessing_info": preprocessing_data["preprocessing_info"],  # Full preprocessing JSON from pkl
+                "preprocessing_info": preprocessing_data[
+                    "preprocessing_info"
+                ],  # Full preprocessing JSON from pkl
                 "bad_channels": preprocessing_data["bad_channels"],
                 "bad_epochs": preprocessing_data["bad_epochs"],
-                "n_epochs_before_rejection": preprocessing_data["n_epochs_before_rejection"],
-                "n_epochs_after_rejection": preprocessing_data["n_epochs_after_rejection"]
+                "n_epochs_before_rejection": preprocessing_data[
+                    "n_epochs_before_rejection"
+                ],
+                "n_epochs_after_rejection": preprocessing_data[
+                    "n_epochs_after_rejection"
+                ],
             }
-        
+
         logger.info(f"Loaded {len(report_data)} data sections")
         return report_data
 
@@ -416,49 +447,53 @@ class ReportDataLoader:
 
         # Create CNV data structure
         self._create_cnv_data(report_data)
-        
+
         # Organize connectivity data
         self._organize_connectivity_data(report_data)
-        
+
         # Organize spectral data
         self._organize_spectral_data(report_data)
 
         return report_data
 
-    def _process_feature(self, feature_name: str, feature_data: Dict, report_data: Dict):
+    def _process_feature(
+        self, feature_name: str, feature_data: Dict, report_data: Dict
+    ):
         """Process a single feature and add to report_data.
-        
+
         Maps HDF5 feature names to internal keys expected by computation modules.
         All features follow pattern: EEG_<name>_<markertype>
         """
         data = feature_data["data"]
-        
+
         # SpectralPower - Absolute power (delta_power, theta_power, etc.)
         if "_power_spectralpower" in feature_name:
             band = feature_name.replace("EEG_", "").replace("_power_spectralpower", "")
             key = f"per_channel_{band}"
             report_data[key] = data
             logger.info(f"Loaded {feature_name} -> {key}")
-        
+
         # SpectralPower - Normalized/Relative power (delta_relative, theta_relative, etc.)
         elif "_relative_spectralpower" in feature_name:
-            band = feature_name.replace("EEG_", "").replace("_relative_spectralpower", "")
+            band = feature_name.replace("EEG_", "").replace(
+                "_relative_spectralpower", ""
+            )
             key = f"{band}n_spectralpower"  # deltan, thetan, etc.
             report_data[key] = data
             logger.info(f"Loaded {feature_name} -> {key}")
-        
+
         # SpectralPower - Spectral entropy
         elif "spectral_entropy_spectralpower" in feature_name:
             report_data["spectral_entropy"] = data
             logger.info(f"Loaded {feature_name} -> spectral_entropy")
-        
+
         # PowerSpectralDensitySummary (msf, sef90, sef95)
         elif "psdsummary" in feature_name:
             summary_type = feature_name.replace("EEG_", "").replace("_psdsummary", "")
             key = f"{summary_type}_per_channel"
             report_data[key] = data
             logger.info(f"Loaded {feature_name} -> {key}")
-        
+
         # PermutationEntropy
         elif "permutationentropy" in feature_name:
             # Extract band from name like EEG_pe_theta_permutationentropy
@@ -467,7 +502,7 @@ class ReportDataLoader:
             key = f"pe_{band}"
             report_data[key] = data
             logger.info(f"Loaded {feature_name} -> {key}")
-        
+
         # SymbolicMutualInformation (WSMI)
         elif "symbolicmutualinformation" in feature_name:
             # Extract band from name like EEG_wsmi_theta_symbolicmutualinformation
@@ -476,30 +511,30 @@ class ReportDataLoader:
             key = f"wsmi_{band}"
             report_data[key] = data
             logger.info(f"Loaded {feature_name} -> {key}")
-        
+
         # KolmogorovComplexity
         elif "kolmogorovcomplexity" in feature_name:
             report_data["kolmogorov_complexity"] = data
             logger.info(f"Loaded {feature_name} -> kolmogorov_complexity")
-        
+
         # ContingentNegativeVariation
         elif "cnv" in feature_name.lower():
             key = feature_name.replace("EEG_", "")
             report_data[key] = data
             logger.info(f"Loaded {feature_name} -> {key}")
-        
+
         # TimeLockedTopography
         elif "timelockedtopo" in feature_name:
             key = feature_name.replace("EEG_", "")
             report_data[key] = data
             logger.info(f"Loaded {feature_name} -> {key}")
-        
+
         # TimeLockedContrast
         elif "timelockedcontrast" in feature_name:
             key = feature_name.replace("EEG_", "")
             report_data[key] = data
             logger.info(f"Loaded {feature_name} -> {key}")
-        
+
         # WindowDecoding
         elif "windowdecoding" in feature_name:
             # EEG_window_decoding_local_windowdecoding -> window_decoding_local
@@ -519,41 +554,51 @@ class ReportDataLoader:
         # Look for CNV data with either naming convention
         slope_key = None
         intercept_key = None
-        
+
         if "cnv_slopes_trials" in report_data:
             slope_key = "cnv_slopes_trials"
             intercept_key = "cnv_intercepts_trials"
         elif "cnv_detailed_cnvslope" in report_data:
             slope_key = "cnv_detailed_cnvslope"
             intercept_key = "cnv_detailed_cnvintercept"
-        
+
         if slope_key and intercept_key:
             # Convert to numpy arrays (junifer data comes as (1, trials, channels))
             slopes = np.array(report_data[slope_key])
             intercepts = np.array(report_data[intercept_key])
-            
+
             # Squeeze leading dimension if present: (1, trials, channels) -> (trials, channels)
             if slopes.ndim == 3 and slopes.shape[0] == 1:
                 slopes = slopes.squeeze(0)
                 intercepts = intercepts.squeeze(0)
-            
+
             report_data["cnv_data"] = {
                 "cnv_slopes_trials": slopes,
                 "cnv_intercepts_trials": intercepts,
             }
-            logger.info(f"Created cnv_data structure: {slopes.shape[0]} trials, {slopes.shape[1]} channels")
+            logger.info(
+                f"Created cnv_data structure: {slopes.shape[0]} trials, {slopes.shape[1]} channels"
+            )
         else:
             logger.warning("No CNV slope/intercept data found in report_data")
 
     def _organize_connectivity_data(self, report_data: Dict):
         """Organize connectivity features."""
-        connectivity_keys = [k for k in report_data.keys() if k.startswith("smi_") or k.startswith("wsmi_")]
+        connectivity_keys = [
+            k
+            for k in report_data.keys()
+            if k.startswith("smi_") or k.startswith("wsmi_")
+        ]
         if connectivity_keys:
-            report_data["connectivity_data"] = {k: report_data[k] for k in connectivity_keys}
+            report_data["connectivity_data"] = {
+                k: report_data[k] for k in connectivity_keys
+            }
             report_data["per_band_connectivity"] = {
                 k: report_data[k] for k in connectivity_keys if k.startswith("wsmi_")
             }
-            logger.info(f"Loaded connectivity data: {list(report_data['connectivity_data'].keys())}")
+            logger.info(
+                f"Loaded connectivity data: {list(report_data['connectivity_data'].keys())}"
+            )
 
     def _organize_spectral_data(self, report_data: Dict):
         """Organize spectral features by band."""
@@ -563,18 +608,22 @@ class ReportDataLoader:
             key = f"per_channel_{band}"
             if key in report_data:
                 per_channel_spectral[band] = report_data[key]
-        
+
         if per_channel_spectral:
             report_data["per_channel_spectral"] = per_channel_spectral
-            logger.info(f"Organized per-channel spectral data: {list(per_channel_spectral.keys())}")
-        
+            logger.info(
+                f"Organized per-channel spectral data: {list(per_channel_spectral.keys())}"
+            )
+
         # Normalized power (aggregated)
         normalized_spectral = {}
         for band in ["delta", "theta", "alpha", "beta", "gamma"]:
             key = f"{band}n_spectralpower"  # deltan, thetan, etc.
             if key in report_data:
                 normalized_spectral[f"{band}n"] = report_data[key]
-        
+
         if normalized_spectral:
             report_data["normalized_spectral"] = normalized_spectral
-            logger.info(f"Organized normalized spectral data: {list(normalized_spectral.keys())}")
+            logger.info(
+                f"Organized normalized spectral data: {list(normalized_spectral.keys())}"
+            )

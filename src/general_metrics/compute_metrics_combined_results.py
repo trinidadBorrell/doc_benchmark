@@ -41,9 +41,7 @@ plt.rcParams.update(
 plt.rcParams["text.latex.preamble"] = r"\usepackage[version=3]{mhchem}"
 
 # ── Paths ───────────────────────────────────────────────────────────────────
-BASE_DIR = Path(
-    "/data/project/eeg_foundation/data/benchmark_results/new_results"
-)
+BASE_DIR = Path("/data/project/eeg_foundation/data/benchmark_results/new_results")
 OUTPUT_DIR = BASE_DIR / "combined_plots"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 MODEL_ORDER = ["TOTEM", "CBraMod", "LaBram", "NeuroLM"]
@@ -53,9 +51,7 @@ def load_all_models(base_dir: Path) -> pd.DataFrame:
     """Load subject_metrics from every model that has a metrics.json."""
     rows = []
     for model_dir in sorted(base_dir.iterdir()):
-        metrics_path = (
-            model_dir / "doc_patients" / "GENERAL_METRICS" / "metrics.json"
-        )
+        metrics_path = model_dir / "doc_patients" / "GENERAL_METRICS" / "metrics.json"
         if not metrics_path.is_file():
             continue
         model_name = model_dir.name
@@ -170,8 +166,10 @@ def main() -> None:
         print("No metrics.json files found – nothing to plot.")
         return
 
-    print(f"Loaded {len(df)} subject entries across models: "
-          f"{df['model'].unique().tolist()}")
+    print(
+        f"Loaded {len(df)} subject entries across models: "
+        f"{df['model'].unique().tolist()}"
+    )
 
     # Plot 1: FFT correlation + FFT MAPE
     make_combined_plot(
