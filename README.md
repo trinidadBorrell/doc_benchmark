@@ -191,7 +191,7 @@ Layer-by-layer probing studies to understand what neurophysiological information
 | Script | Purpose |
 |--------|---------|
 | `linear_probing.py` | For each layer: (1) Ridge regression from embeddings to each marker scalar (R² per marker per layer) and (2) nested CV VS/MCS classification (AUC per layer). Can run in `--pool-only` mode to cache mean-pooled per-layer embeddings first. |
-| `embedding_steering.py` | Trains per-marker linear probes, then steers embeddings along probe directions to measure causal effect on VS/MCS predictions (representation engineering / causal tracing) |
+| `embedding_steering.py` | Trains per-marker linear probes, then steers embeddings along probe directions to measure the effect on VS/MCS predictions (representation engineering) |
 | `residualization_embeddings.py` | Removes marker-predictable variance from embeddings by projecting out all probe directions, then re-classifies VS/MCS to quantify how much marker information was load-bearing for classification |
 | `plot_layers.py` | R² curves across layers — one curve per layer, markers on x-axis |
 | `plot_classification_layers.py` | Per-layer AUC grouped bar chart by classifier |
@@ -210,7 +210,7 @@ python src/interp/linear_probing.py \
     --model CBraMod --output-dir results/interp/CBraMod/ \
     --layer 0   # repeat for each layer
 
-# Step 3: causal tracing via embedding steering
+# Step 3: embedding steering
 python src/interp/embedding_steering.py \
     --results-root /data/.../benchmark_results/new_results \
     --model CBraMod \
