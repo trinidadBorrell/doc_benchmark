@@ -29,6 +29,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 
 plt.rcParams["font.family"] = "serif"
 plt.rcParams["mathtext.fontset"] = "cm"
@@ -37,7 +38,7 @@ plt.rcParams["figure.dpi"] = 120
 # Must match linear_probing.py
 MODEL_LAYERS = {
     "CbraMod": ["patch_emb", "layer_0", "layer_3", "layer_6", "layer_9", "layer_11"],
-    "NeuroLM": ["gpt_0", "gpt_3", "gpt_6", "gpt_9", "gpt_11"],
+    "NeuroLM": ["vq_emb", "gpt_0", "gpt_3", "gpt_6", "gpt_9", "gpt_11"],
 }
 
 # Accept both spellings in CLI (CbraMod and CBraMod)
@@ -217,6 +218,119 @@ def plot_classification_layers(layer_results, model, output_dir, emb_clf=None):
     print(f"   Saved: {out_path}", flush=True)
 
 
+# -- table renderer --------------------------------------------------------
+
+
+def render_layer_table(layer_results, model, output_dir, emb_clf=None):
+    """Render a PNG table: rows = layers, columns = classifiers (AUC mean ± std).
+
+    Parameters
+    ----------
+    layer_results : dict
+        ``{layer: {clf: {auc_mean, auc_std}}}``
+    model : str
+    output_dir : str
+    emb_clf : dict or None
+        ``{clf: {auc_mean, auc_std}}`` from the last-layer embedding.
+    """
+    layers = [lyr for lyr in MODEL_LAYERS[model] if lyr in layer_results]
+    if emb_clf is not None:
+        layers_all = layers + ["last-layer embedding"]
+    else:
+        layers_all = list(layers)
+
+    if not layers_all:
+        print(f"   [{model}] No data for table, skipping.", flush=True)
+        return
+
+    def _fmt(r):
+        mean = r.get("auc_mean")
+        std = r.get("auc_std")
+        if mean is None:
+            return "N/A"
+        if std is None:
+            return f"{mean:.3f}"
+        return f"{mean:.3f} \u00b1 {std:.3f}"
+
+    # Build table data
+    col_labels = ["Layer"] + [CLF_LABELS[c] for c in CLF_NAMES]
+    table_text = []
+    cell_means = []  # for bold-best highlighting
+    for layer in layers_all:
+        if layer == "last-layer embedding":
+            src = emb_clf or {}
+        else:
+            src = layer_results.get(layer, {})
+        row = [layer]
+        row_means = []
+        for clf in CLF_NAMES:
+            r = src.get(clf, {})
+            row.append(_fmt(r))
+            row_means.append(r.get("auc_mean"))
+        table_text.append(row)
+        cell_means.append(row_means)
+
+    # Best AUC per classifier column
+    best_per_clf = []
+    for ci in range(len(CLF_NAMES)):
+        vals = [cell_means[ri][ci] for ri in range(len(layers_all)) if cell_means[ri][ci] is not None]
+        best_per_clf.append(max(vals) if vals else None)
+
+    n_rows = len(table_text)
+    fig_w = 4 + 2.5 * len(CLF_NAMES)
+    fig_h = 1.2 + 0.45 * max(n_rows, 1)
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+    ax.axis("off")
+
+    table = ax.table(
+        cellText=table_text,
+        colLabels=col_labels,
+        cellLoc="center",
+        colLoc="center",
+        loc="center",
+    )
+    table.auto_set_font_size(False)
+    table.set_fontsize(10)
+    table.scale(1.0, 1.3)
+
+    # Header style
+    for col_idx in range(len(col_labels)):
+        cell = table[(0, col_idx)]
+        cell.set_facecolor("#f0f0f0")
+        cell.get_text().set_weight("bold")
+
+    # Layer name column left-aligned
+    for row_idx in range(1, n_rows + 1):
+        table[(row_idx, 0)].get_text().set_ha("left")
+
+    # Highlight embedding row
+    if emb_clf is not None:
+        emb_row_idx = n_rows  # last row (1-based)
+        for col_idx in range(len(col_labels)):
+            table[(emb_row_idx, col_idx)].set_facecolor("#fff8dc")
+
+    # Bold best value per classifier
+    for ci, clf in enumerate(CLF_NAMES):
+        best = best_per_clf[ci]
+        if best is None:
+            continue
+        for ri, layer in enumerate(layers_all):
+            mean_val = cell_means[ri][ci]
+            if mean_val is not None and abs(float(mean_val) - float(best)) < 1e-9:
+                table[(ri + 1, ci + 1)].get_text().set_weight("bold")
+
+    ax.set_title(
+        f"{model} \u2014 Classification AUC across layers (VS vs MCS)",
+        fontsize=13,
+        fontweight="bold",
+        pad=12,
+    )
+    out_path = op.join(output_dir, f"classification_layers_table_{model}.png")
+    plt.savefig(out_path, dpi=220, bbox_inches="tight", facecolor="white")
+    plt.close()
+    print(f"   Saved: {out_path}", flush=True)
+
+
 # -- main ------------------------------------------------------------------
 
 
@@ -271,6 +385,9 @@ def main():
             )
 
         plot_classification_layers(
+            layer_results, model, args.output_dir, emb_clf=emb_clf
+        )
+        render_layer_table(
             layer_results, model, args.output_dir, emb_clf=emb_clf
         )
 

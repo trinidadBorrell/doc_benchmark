@@ -142,13 +142,16 @@ MODEL_LAYER_KEYS = {
     },
     "NeuroLM": {
         "data_subdir": "NeuroLM/multi_layer_embeddings",
-        "layers": ["gpt_0", "gpt_3", "gpt_6", "gpt_9", "gpt_11"],
+        "layers": ["vq_emb", "gpt_0", "gpt_3", "gpt_6", "gpt_9", "gpt_11"],
         # Raw shape: (n_tokens, n_channels, emb_dim)
         # Disk pool: mean over tokens -> (n_channels, emb_dim)
         # RAM pool:  mean over channels -> (emb_dim,)
         "disk_pool_axes": (0,),
         "n_channels": 256,
+        # vq_emb has a different embedding dim (768) than the GPT layers (1024).
+        # Use a dict for per-layer overrides; scalar is the default.
         "emb_dim": 1024,
+        "emb_dim_override": {"vq_emb": 768},
     },
 }
 
@@ -371,10 +374,15 @@ class LinearProber:
             print(f"   [WARN] Embedding dir not found: {emb_dir}", flush=True)
             return
 
+        _dim_note = (
+            f"{config['emb_dim']} (default)"
+            if config.get("emb_dim_override")
+            else str(config["emb_dim"])
+        )
         print(
             f"   [{model_name}] Pooling strategy: "
             f"disk_pool_axes={config['disk_pool_axes']} -> "
-            f"saved shape per layer = ({config['n_channels']}, {config['emb_dim']}), "
+            f"saved shape per layer = ({config['n_channels']}, emb_dim={_dim_note}), "
             f"channel pooling deferred to RAM",
             flush=True,
         )
@@ -481,7 +489,8 @@ class LinearProber:
             )
             return embeddings
 
-        expected_disk_shape = (config["n_channels"], config["emb_dim"])
+        layer_emb_dim = config.get("emb_dim_override", {}).get(layer_key, config["emb_dim"])
+        expected_disk_shape = (config["n_channels"], layer_emb_dim)
         n_loaded = 0
 
         for sub_dir in sorted(os.listdir(cache_root)):
@@ -522,7 +531,7 @@ class LinearProber:
 
         print(
             f"   [{model_name}/{layer_key}] Loaded {n_loaded} subjects: "
-            f"disk {expected_disk_shape} --mean(axis=0)--> ({config['emb_dim']},)",
+            f"disk {expected_disk_shape} --mean(axis=0)--> ({layer_emb_dim},)",
             flush=True,
         )
         return embeddings
@@ -1773,16 +1782,14 @@ python linear_probing.py \\
     parser.add_argument(
         "--patient-labels",
         default=(
-            "/data/project/eeg_foundation/data/original_DoC"
-            "/patient_labels_with_controls.csv"
+            "/data/project/eeg_foundation/data/metadata/metadata_patient_labels.csv"
         ),
         help="Path to patient_labels_with_controls.csv.",
     )
     parser.add_argument(
         "--marker-csv",
         default=(
-            "/data/project/eeg_foundation/data/original_DoC"
-            "/baseline_stable_20210128_scalars.csv"
+            "/data/project/eeg_foundation/data/original_DoC/nice_scalars_all.csv"
         ),
         help="Path to baseline scalar markers CSV.",
     )

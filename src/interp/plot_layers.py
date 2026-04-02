@@ -34,8 +34,13 @@ plt.rcParams["figure.dpi"] = 120
 # Must match linear_probing.py
 MODEL_LAYERS = {
     "CbraMod": ["patch_emb", "layer_0", "layer_3", "layer_6", "layer_9", "layer_11"],
-    "NeuroLM": ["gpt_0", "gpt_3", "gpt_6", "gpt_9", "gpt_11"],
+    "NeuroLM": ["vq_emb", "gpt_0", "gpt_3", "gpt_6", "gpt_9", "gpt_11"],
 }
+
+# Classification constants (mirrors plot_classification_layers.py)
+CLF_NAMES = ["svm", "kernel_ridge", "random_forest"]
+CLF_LABELS = {"svm": "SVM", "kernel_ridge": "KernelRidge", "random_forest": "RandomForest"}
+CLF_COLORS = {"svm": "#1f77b4", "kernel_ridge": "#ff7f0e", "random_forest": "#2ca02c"}
 
 # Path to last-layer (full) embedding regressor results from the pipeline.
 # These use the final embedding rather than individual intermediate layers.
@@ -48,6 +53,16 @@ EMBEDDING_REGRESSOR_PATHS = {
     "NeuroLM": op.join(
         _BENCHMARK_ROOT,
         "NeuroLM/doc_patients/MLP_EMBEDDING/regressor_results/summary.json",
+    ),
+}
+EMBEDDING_CLF_PATHS = {
+    "CbraMod": op.join(
+        _BENCHMARK_ROOT,
+        "CBraMod/doc_patients/MLP_EMBEDDING/crs/nested_cv",
+    ),
+    "NeuroLM": op.join(
+        _BENCHMARK_ROOT,
+        "NeuroLM/doc_patients/MLP_EMBEDDING/crs/nested_cv",
     ),
 }
 
@@ -251,6 +266,141 @@ def plot_r2_all_layers(r2_per_layer, model, output_dir, emb_r2=None):
     print(f"   Saved: {out_path}", flush=True)
 
 
+# -- classification loaders ------------------------------------------------
+
+
+def load_classification_per_layer(output_dir, model):
+    """Load per-layer classification JSONs.
+
+    Returns
+    -------
+    dict : ``{layer: {clf: {auc_mean, auc_std}}}``
+    """
+    clf_root = op.join(output_dir, "classification")
+    results = {}
+    for layer in MODEL_LAYERS[model]:
+        layer_dir = op.join(clf_root, layer)
+        if not op.isdir(layer_dir):
+            continue
+        layer_results = {}
+        for clf in CLF_NAMES:
+            path = op.join(layer_dir, f"{clf}_{model}_results.json")
+            if not op.isfile(path):
+                continue
+            with open(path) as f:
+                layer_results[clf] = json.load(f)
+        if layer_results:
+            results[layer] = layer_results
+    return results
+
+
+def load_embedding_classification(model):
+    """Load last-layer embedding classification results.
+
+    Returns
+    -------
+    dict or None : ``{clf: {auc_mean, auc_std}}``
+    """
+    base = EMBEDDING_CLF_PATHS.get(model)
+    if base is None or not op.isdir(base):
+        return None
+    results = {}
+    for clf in CLF_NAMES:
+        path = op.join(base, clf, "classification_results.json")
+        if not op.isfile(path):
+            continue
+        with open(path) as f:
+            data = json.load(f)
+        auc = data.get("macro_average", {}).get("auc_score", {})
+        if "mean" in auc:
+            results[clf] = {"auc_mean": auc["mean"], "auc_std": auc["std"]}
+    return results if results else None
+
+
+# -- AUC line plot ---------------------------------------------------------
+
+
+def plot_auc_curves(clf_per_layer, model, output_dir, emb_clf=None):
+    """Line plot: AUC across layers, one curve per classifier with fill_between.
+
+    Parameters
+    ----------
+    clf_per_layer : dict
+        ``{layer: {clf: {auc_mean, auc_std}}}``
+    model : str
+    output_dir : str
+    emb_clf : dict or None
+        ``{clf: {auc_mean, auc_std}}`` for the last-layer embedding.
+    """
+    layers = [lyr for lyr in MODEL_LAYERS[model] if lyr in clf_per_layer]
+    if emb_clf is not None:
+        layers_plot = layers + ["last-layer\nembedding"]
+    else:
+        layers_plot = list(layers)
+
+    if not layers_plot:
+        print(f"   [{model}] No classification data for AUC plot, skipping.", flush=True)
+        return
+
+    x = np.arange(len(layers_plot))
+    fig, ax = plt.subplots(figsize=(max(7, len(layers_plot) * 1.4), 5))
+
+    for clf in CLF_NAMES:
+        means, stds = [], []
+        for layer in layers:
+            r = clf_per_layer.get(layer, {}).get(clf, {})
+            means.append(r.get("auc_mean", np.nan))
+            stds.append(r.get("auc_std", np.nan))
+        if emb_clf is not None:
+            r = emb_clf.get(clf, {})
+            means.append(r.get("auc_mean", np.nan))
+            stds.append(r.get("auc_std", np.nan))
+
+        means = np.array(means, dtype=float)
+        stds = np.array(stds, dtype=float)
+        color = CLF_COLORS[clf]
+
+        ax.plot(
+            x, means,
+            label=CLF_LABELS[clf],
+            color=color,
+            marker="o",
+            linewidth=2.0,
+            markersize=6,
+        )
+        ax.fill_between(
+            x,
+            means - stds,
+            means + stds,
+            color=color,
+            alpha=0.15,
+        )
+
+    # Vertical dashed line separating layer probes from final embedding
+  #  if emb_clf is not None:
+  #      ax.axvline(len(layers) - 0.5, color="gray", linewidth=1.0, linestyle=":", alpha=0.7)
+
+  #  ax.axhline(0.5, color="gray", linewidth=1.0, linestyle="--", alpha=0.5, label="Chance")
+    ax.set_xticks(x)
+    ax.set_xticklabels(layers_plot, rotation=30, ha="right", fontsize=12)
+    ax.set_xlabel("Layer", fontsize=14)
+    ax.set_ylabel("AUC", fontsize=14)
+    ax.set_ylim(0.5, 1.0)
+    ax.set_title(
+        f"{model} \u2014 Classification AUC across layers (VS vs MCS)",
+        fontsize=15,
+    )
+    ax.tick_params(axis="y", labelsize=12)
+    ax.legend(fontsize=10, loc="upper left")
+    ax.grid(True, alpha=0.25, axis="y")
+
+    plt.tight_layout()
+    out_path = op.join(output_dir, f"auc_curves_{model}.png")
+    plt.savefig(out_path, dpi=180, bbox_inches="tight")
+    plt.close()
+    print(f"   Saved: {out_path}", flush=True)
+
+
 # -- main ------------------------------------------------------------------
 
 
@@ -300,6 +450,19 @@ def main():
             print(f"   [{model}] No last-layer embedding regressor found", flush=True)
 
         plot_r2_all_layers(r2_per_layer, model, args.output_dir, emb_r2=emb_r2)
+
+        clf_per_layer = load_classification_per_layer(args.output_dir, model)
+        print(f"   [{model}] Loaded {len(clf_per_layer)} layers (classification)", flush=True)
+        emb_clf = load_embedding_classification(model)
+        if emb_clf is not None:
+            print(
+                f"   [{model}] Loaded last-layer embedding classification "
+                f"({list(emb_clf.keys())})",
+                flush=True,
+            )
+        else:
+            print(f"   [{model}] No last-layer embedding classification found", flush=True)
+        plot_auc_curves(clf_per_layer, model, args.output_dir, emb_clf=emb_clf)
 
     print("Done.", flush=True)
 

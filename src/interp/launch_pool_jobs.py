@@ -68,7 +68,7 @@ MODEL_DATA_SUBDIRS = {
 # Layer keys per model (must match MODEL_LAYER_KEYS in linear_probing.py)
 MODEL_LAYERS = {
     "CbraMod": ["patch_emb", "layer_0", "layer_3", "layer_6", "layer_9", "layer_11"],
-    "NeuroLM": ["gpt_0", "gpt_3", "gpt_6", "gpt_9", "gpt_11"],
+    "NeuroLM": ["vq_emb", "gpt_0", "gpt_3", "gpt_6", "gpt_9", "gpt_11"],
 }
 
 

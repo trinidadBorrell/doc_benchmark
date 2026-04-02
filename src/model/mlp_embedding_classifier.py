@@ -123,6 +123,7 @@ from sklearn.linear_model import Ridge
 from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
 from sklearn.neural_network import MLPClassifier
 from sklearn.pipeline import Pipeline
+from sklearn.svm import SVC
 from scipy.stats import pearsonr
 import joblib
 
@@ -175,6 +176,7 @@ MODEL_CONFIGS = {
     "mlp": {"name": "MLP"},
     "random_forest": {"name": "Random Forest"},
     "kernel_ridge": {"name": "Kernel Ridge"},
+    "svm": {"name": "SVM"},
 }
 
 
@@ -1213,12 +1215,62 @@ class EmbeddingClassifier:
             best_model.fit(X_train, y_onehot_full)
         return best_model, best_params
 
+    def _grid_search_svm(
+        self, X_train, y_train, groups_train, precomputed_inner_splits=None
+    ):
+        """Inner StratifiedGroupKFold grid search for SVM (RBF/linear).
+
+        Parameters
+        ----------
+        precomputed_inner_splits:
+            Optional pre-computed (train_idx, val_idx) pairs.
+
+        Returns
+        -------
+        model : Pipeline (StandardScaler + SVC)
+            Best model refitted on full X_train.
+        best_params : dict
+        """
+        inner_splits = self._build_inner_cv_splits(
+            y_train, groups_train, X_train, precomputed=precomputed_inner_splits
+        )
+        pipe = Pipeline(
+            [
+                ("scaler", StandardScaler()),
+                (
+                    "svc",
+                    SVC(
+                        probability=True,
+                        class_weight="balanced",
+                        random_state=self.random_state,
+                    ),
+                ),
+            ]
+        )
+        param_grid = {
+            "svc__C": [0.01, 0.1, 1.0, 10.0],
+            "svc__kernel": ["rbf", "linear"],
+        }
+        gs = GridSearchCV(
+            pipe,
+            param_grid,
+            cv=inner_splits,
+            scoring="balanced_accuracy",
+            n_jobs=-1,
+            refit=True,
+        )
+        gs.fit(X_train, y_train)
+        print(f"      SVM best params: {gs.best_params_}", flush=True)
+        return gs.best_estimator_, gs.best_params_
+
     def _predict_sklearn(self, model, X):
         """Return (probabilities, predicted_labels) for sklearn models.
 
         Binary: RF uses predict_proba[:,1]; KR clips to [0,1].
         Multiclass: RF returns (n, n_classes) proba natively;
                     KR returns raw regression, softmax for pseudo-probs.
+        SVM (Pipeline with 'svc' step): uses predict_proba[:,1] (binary)
+            or full proba matrix (multiclass).
         """
         if isinstance(model, RandomForestClassifier):
             probs = model.predict_proba(X)
@@ -1240,6 +1292,13 @@ class EmbeddingClassifier:
                 # Softmax over raw regression outputs for pseudo-probs
                 exp_raw = np.exp(raw - raw.max(axis=1, keepdims=True))
                 probs = exp_raw / exp_raw.sum(axis=1, keepdims=True)
+                preds = np.argmax(probs, axis=1)
+        elif isinstance(model, Pipeline) and "svc" in model.named_steps:
+            probs = model.predict_proba(X)
+            if self.is_binary:
+                probs = probs[:, 1]
+                preds = (probs >= 0.5).astype(int)
+            else:
                 preds = np.argmax(probs, axis=1)
         else:
             raise ValueError(f"Unknown sklearn model type: {type(model)}")
@@ -1843,6 +1902,41 @@ class EmbeddingClassifier:
         )
         all_results["kernel_ridge"] = kr_results
 
+        # ---- SVM ----
+        print("\n   Training SVM (grid search) ...", flush=True)
+        svm_model, svm_best_params = self._grid_search_svm(
+            X_trainval, y_trainval, groups_trainval
+        )
+        svm_probs, svm_preds = self._predict_sklearn(svm_model, X_test)
+        svm_results = self._compute_test_metrics(
+            y_test, svm_preds, svm_probs, subjects_test
+        )
+        svm_results.update(
+            {
+                "n_train": len(X_trainval),
+                "n_test": len(X_test),
+                "n_features": int(X.shape[1]),
+                "best_params": svm_best_params,
+                "subjects_train": subjects_trainval,
+            }
+        )
+
+        svm_dir = op.join(split_dir, "svm")
+        os.makedirs(svm_dir, exist_ok=True)
+        self._save_results(
+            svm_results, svm_dir, model=svm_model, model_type="svm"
+        )
+        self._plot_results(
+            svm_results,
+            "SVM",
+            svm_dir,
+            best_params=svm_best_params,
+            n_samples=len(X_trainval),
+            n_features=X.shape[1],
+            class_balance=dict(zip(*np.unique(y_trainval, return_counts=True))),
+        )
+        all_results["svm"] = svm_results
+
         # Save subject intersection info if used
         if self.allowed_subjects is not None:
             intersection_file = op.join(split_dir, "subject_intersection.json")
@@ -2113,6 +2207,29 @@ class EmbeddingClassifier:
 
             ba_kr = balanced_accuracy_score(y_test_fold, kr_preds)
             print(f"   KR fold bal_acc: {ba_kr:.3f}", flush=True)
+
+            # ---- SVM ----
+            print("   Training SVM ...", flush=True)
+            svm_model, _ = self._grid_search_svm(
+                X_train_fold,
+                y_train_fold,
+                groups_train_fold,
+                precomputed_inner_splits=inner_splits_for_fold,
+            )
+            svm_fold_dir = op.join(self.output_dir, "nested_cv", "svm")
+            os.makedirs(svm_fold_dir, exist_ok=True)
+            joblib.dump(
+                svm_model,
+                op.join(svm_fold_dir, f"fold_{fold_idx:02d}_model.joblib"),
+            )
+            svm_probs, svm_preds = self._predict_sklearn(svm_model, X_test_fold)
+            accum["svm"]["y_true"].append(y_test_fold)
+            accum["svm"]["y_pred"].append(svm_preds)
+            accum["svm"]["y_proba"].append(svm_probs)
+            accum["svm"]["subjects"].extend(subjects_test_fold)
+
+            ba_svm = balanced_accuracy_score(y_test_fold, svm_preds)
+            print(f"   SVM fold bal_acc: {ba_svm:.3f}", flush=True)
 
         # Aggregate across folds
         print(f"\n{'=' * 60}", flush=True)
@@ -2858,7 +2975,7 @@ Reduction map for --marker-reduction:
     parser.add_argument(
         "--targets",
         nargs="+",
-        default=["crs"],
+        default=["crs", "etiology", "cs_6m", "cs_1y", "cs_2y"],
         choices=["crs", "etiology", "cs_6m", "cs_1y", "cs_2y"],
         help=(
             "Prediction targets to run in multi-model batch mode (default: crs). "
@@ -2960,6 +3077,14 @@ Reduction map for --marker-reduction:
 
             # Load pre-computed splits (only honoured for a single-target run to
             # avoid accidentally reusing splits built for a different label set).
+            if args.splits_file and len(args.targets) > 1:
+                print(
+                    f"[WARNING] --splits-file ignored for target '{target}': "
+                    "splits files encode target-specific labels and sessions, "
+                    "so they can only be used when running a single target. "
+                    f"Pass --targets {target} to reuse this file for one target.",
+                    flush=True,
+                )
             if (
                 args.splits_file
                 and op.isfile(args.splits_file)
@@ -3004,7 +3129,13 @@ Reduction map for --marker-reduction:
                 print(f"\n{'─' * 60}", flush=True)
                 print(f"Model: {model_name}  |  target: {target}", flush=True)
                 model_out = (
-                    op.join(args.output_dir, model_name, target)
+                    op.join(
+                        args.output_dir,
+                        model_name,
+                        "doc_patients",
+                        "MLP_EMBEDDING",
+                        target,
+                    )
                     if args.output_dir
                     else None
                 )

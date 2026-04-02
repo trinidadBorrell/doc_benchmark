@@ -54,6 +54,7 @@ from sklearn.model_selection import GridSearchCV
 from sklearn.neural_network import MLPClassifier
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
+from sklearn.svm import SVC
 
 try:
     from .mlp_embedding_classifier import EmbeddingClassifier, REDUCTION_MAP
@@ -322,6 +323,24 @@ def _get_classifier_and_grid(classifier_name, random_state):
             "kr__alpha": [0.01, 0.1, 1.0, 10.0],
             "kr__gamma": [0.001, 0.01, 0.1, 1.0],
         }
+    elif classifier_name == "svm":
+        estimator = Pipeline(
+            [
+                ("scaler", StandardScaler()),
+                (
+                    "svc",
+                    SVC(
+                        probability=True,
+                        class_weight="balanced",
+                        random_state=random_state,
+                    ),
+                ),
+            ]
+        )
+        param_grid = {
+            "svc__C": [0.01, 0.1, 1.0, 10.0],
+            "svc__kernel": ["rbf", "linear"],
+        }
     else:
         raise ValueError(f"Unknown classifier: {classifier_name}")
     return estimator, param_grid
@@ -357,7 +376,7 @@ def run_shifted_nested_cv(
     shift_mode,
     cv_folds,
     random_state,
-    classifiers=("mlp", "random_forest", "kernel_ridge"),
+    classifiers=("mlp", "random_forest", "kernel_ridge", "svm"),
     output_dir=None,
     session_keys=None,
 ):
@@ -643,6 +662,7 @@ def _run_shifted_target_for_model(
         "mlp": "MLP",
         "random_forest": "Random Forest",
         "kernel_ridge": "Kernel Ridge",
+        "svm": "SVM",
     }
 
     # Save per-classifier results: CSV + JSON + same plots as original variant.
@@ -743,7 +763,7 @@ def plot_shifted_comparison(all_results, output_dir):
     """
     os.makedirs(output_dir, exist_ok=True)
     conditions = ["original", "shift_fm", "shift_dk", "shift_both"]
-    classifiers = ["mlp", "random_forest", "kernel_ridge"]
+    classifiers = ["mlp", "random_forest", "kernel_ridge", "svm"]
     plt.rcParams["font.family"] = "serif"
     plt.rcParams["figure.dpi"] = 120
 
