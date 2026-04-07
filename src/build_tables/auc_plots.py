@@ -239,6 +239,37 @@ def collect_crs_variant_data(fm_model: str) -> dict[str, dict[str, dict]]:
     return result
 
 
+def collect_combined_overview_data(metric_path: str) -> dict[str, dict[str, dict]]:
+    """Return {label: {clf: {mean, std}}} for Baseline + FM base + FM (Combined).
+
+    X-axis order: Baseline, TOTEM, TOTEM (Combined), CBraMod, CBraMod (Combined), ...
+    """
+    result: dict[str, dict[str, dict]] = {}
+
+    # Baseline
+    label = _MODEL_LABELS["MARKER_BASELINE"]
+    result[label] = {}
+    for clf in CLASSIFIERS:
+        candidates = _candidate_paths_main("MARKER_BASELINE", metric_path, "MLP_EMBEDDING", clf)
+        scores = _resolve_scores(candidates)
+        if scores is not None:
+            result[label][clf] = scores
+
+    # FM models: base (MLP_EMBEDDING) then Combined (EMBEDDING_DK_COMBINED)
+    for model in FM_MODELS:
+        base_label = _MODEL_LABELS[model]
+        for emb_kind, suffix in [("MLP_EMBEDDING", ""), ("EMBEDDING_DK_COMBINED", " (Combined)")]:
+            lbl = base_label + suffix
+            result[lbl] = {}
+            for clf in CLASSIFIERS:
+                candidates = _candidate_paths_main(model, metric_path, emb_kind, clf)
+                scores = _resolve_scores(candidates)
+                if scores is not None:
+                    result[lbl][clf] = scores
+
+    return result
+
+
 # ── Plotting ───────────────────────────────────────────────────────────────────
 
 
@@ -380,6 +411,43 @@ def main() -> None:
             x_order=x_order_main,
             title=f"{title_str} — AUC by model (MLP embedding, nested CV)",
             output_path=output_dir / f"{slug}_main_models.png",
+        )
+
+    # ── Combined overview: Baseline + FM + FM (Combined) ──────────────────────
+    # X-axis: Baseline | TOTEM  TOTEM(Combined) | CBraMod CBraMod(Combined) | ...
+    combined_x_order = ["Baseline"]
+    for m in FM_MODELS:
+        lbl = _MODEL_LABELS[m]
+        combined_x_order += [lbl, lbl + " (Combined)"]
+    # Shade alternating FM model pairs: TOTEM(1-2) and LaBram(5-6) shaded,
+    # CBraMod(3-4) and NeuroLM(7-8) unshaded — the i%2==0 filter in plot_auc_dots
+    # picks every other entry, so pass all four pairs.
+    combined_bands = [(1, 2), (3, 4), (5, 6), (7, 8)]
+
+    print("CRS combined-overview plot...")
+    crs_combined = collect_combined_overview_data("crs")
+    plot_auc_dots(
+        crs_combined,
+        x_order=combined_x_order,
+        title="CRS — Baseline vs. FM vs. FM + Domain Knowledge (nested CV)",
+        output_path=output_dir / "crs_combined_overview.png",
+        band_groups=combined_bands,
+    )
+
+    for task in _OTHER_TASKS:
+        metric = task["metric"]
+        metric_path = task["metric_path"]
+        title_str = _METRIC_TITLE.get(metric, metric)
+        slug = metric.replace("/", "__")
+
+        print(f"{title_str} combined-overview plot...")
+        task_combined = collect_combined_overview_data(metric_path)
+        plot_auc_dots(
+            task_combined,
+            x_order=combined_x_order,
+            title=f"{title_str} — Baseline vs. FM vs. FM + Domain Knowledge (nested CV)",
+            output_path=output_dir / f"{slug}_combined_overview.png",
+            band_groups=combined_bands,
         )
 
     print("\nDone.")
