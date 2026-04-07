@@ -28,6 +28,11 @@ src/global_analysis/global_analysis.py
 src/global_analysis/README_SCRIPTS.txt
 src/report_completed_results.py
 
+src/interp/run_analysis_nonlinear.sh
+src/interp/run_pool_nonlinear.sh
+src/interp/run_analysis.sh
+src/interp/run_pool.sh
+
 src/model/txt/
 
 src/interp/how_to_run.txt

@@ -1,11 +1,14 @@
 """Combined R² across layers — one curve per layer, markers on x-axis.
 
 Reads the per-layer regression ``summary.json`` files produced by
-``linear_probing.py`` and draws a single figure per model with:
+``linear_probing.py`` and/or ``non_linear_probing.py`` and draws a single
+figure per model with:
 
 * **x-axis** — neurophysiological markers (grouped by family)
 * **y-axis** — R²
 * **one curve per layer** (different colour)
+* **dashed curves** for non-linear probing results when ``--nonlinear-dir``
+  is provided
 
 Usage
 -----
@@ -13,6 +16,9 @@ Usage
 
     python plot_layers.py --output-dir /path/to/LINEAR_PROBING
     python plot_layers.py --output-dir /path/to/LINEAR_PROBING --models CbraMod
+    python plot_layers.py \\
+        --output-dir /path/to/LINEAR_PROBING \\
+        --nonlinear-dir /path/to/NON_LINEAR_PROBING
 
 Author: Trinidad Borrell <trinidad.borrell@gmail.com>
 """
@@ -140,7 +146,8 @@ def load_regression_per_layer(output_dir, model):
     """
     reg_root = op.join(output_dir, "regression")
     r2_per_layer = {}
-    for layer in MODEL_LAYERS[model]:
+    layers_to_check = list(MODEL_LAYERS.get(model, [])) + ["last_layer"]
+    for layer in layers_to_check:
         path = op.join(reg_root, layer, model, "summary.json")
         if not op.isfile(path):
             continue
@@ -180,26 +187,32 @@ def load_embedding_regressor(model):
 # -- plotter ---------------------------------------------------------------
 
 
-def plot_r2_all_layers(r2_per_layer, model, output_dir, emb_r2=None):
+def plot_r2_all_layers(
+    r2_per_layer, model, output_dir, emb_r2=None, nl_r2_per_layer=None
+):
     """One curve per layer, markers on x-axis, R² on y-axis.
 
     Parameters
     ----------
     r2_per_layer : dict
-        ``{layer_key: {marker_name: r2}}``
+        ``{layer_key: {marker_name: r2}}`` — linear probing results.
     model : str
     output_dir : str
     emb_r2 : dict or None
         If given, ``{marker_name: r2}`` from the last-layer embedding
-        regressor.  Plotted as a thick dashed black curve labelled
-        ``"last-layer embedding"``.
+        regressor.  Plotted as a thick dashed black curve.
+    nl_r2_per_layer : dict or None
+        ``{layer_key: {marker_name: r2}}`` from non-linear probing.
+        Plotted as dashed curves with ``(NL)`` suffix in the legend.
     """
-    if not r2_per_layer and emb_r2 is None:
+    if not r2_per_layer and emb_r2 is None and not nl_r2_per_layer:
         print(f"   [{model}] No regression results found, skipping.", flush=True)
         return
 
-    # Include embedding markers in the ordering computation
+    # Include all sources in the marker ordering computation
     all_curves = dict(r2_per_layer)
+    if nl_r2_per_layer:
+        all_curves.update(nl_r2_per_layer)
     if emb_r2 is not None:
         all_curves["__emb__"] = emb_r2
 
@@ -207,13 +220,14 @@ def plot_r2_all_layers(r2_per_layer, model, output_dir, emb_r2=None):
     short_names = [_short_name(m) for m in marker_order]
     x = np.arange(len(marker_order))
 
-    layers = [lyr for lyr in MODEL_LAYERS[model] if lyr in r2_per_layer]
+    canonical = list(MODEL_LAYERS.get(model, [])) + ["last_layer"]
+    layers = [lyr for lyr in canonical if lyr in r2_per_layer]
     n_layers = len(layers)
     colors = [LAYER_CMAP(i / max(n_layers - 1, 1)) for i in range(n_layers)]
 
     fig, ax = plt.subplots(figsize=(max(16, len(marker_order) * 0.65), 7))
 
-    # -- layer curves --
+    # -- linear probing layer curves (solid) --
     for li, layer in enumerate(layers):
         r2_dict = r2_per_layer[layer]
         y_raw = [r2_dict.get(m, np.nan) for m in marker_order]
@@ -228,6 +242,25 @@ def plot_r2_all_layers(r2_per_layer, model, output_dir, emb_r2=None):
             markersize=5,
             alpha=0.9,
         )
+
+    # -- non-linear probing layer curves (dashed) --
+    if nl_r2_per_layer:
+        nl_layers = [lyr for lyr in MODEL_LAYERS[model] if lyr in nl_r2_per_layer]
+        nl_colors = [LAYER_CMAP(i / max(len(nl_layers) - 1, 1)) for i in range(len(nl_layers))]
+        for li, layer in enumerate(nl_layers):
+            r2_dict = nl_r2_per_layer[layer]
+            y_raw = [r2_dict.get(m, np.nan) for m in marker_order]
+            ax.plot(
+                x,
+                y_raw,
+                label=f"{layer} (NL)",
+                color=nl_colors[li],
+                marker=LAYER_MARKERS[li % len(LAYER_MARKERS)],
+                linestyle="--",
+                linewidth=1.4,
+                markersize=4,
+                alpha=0.75,
+            )
 
     # -- last-layer embedding curve --
     if emb_r2 is not None:
@@ -248,8 +281,9 @@ def plot_r2_all_layers(r2_per_layer, model, output_dir, emb_r2=None):
     ax.axhline(0, color="gray", linewidth=1.0, linestyle="--", alpha=0.6)
     ax.set_xlabel("Markers", fontsize=17)
     ax.set_ylabel("R\u00b2", fontsize=17)
+    title_suffix = " + NL" if nl_r2_per_layer else ""
     ax.set_title(
-        f"{model} \u2014 Raw R\u00b2 (Ridge regression) across layers",
+        f"{model} \u2014 Raw R\u00b2 (Ridge regression{title_suffix}) across layers",
         fontsize=18,
     )
     ax.set_xticks(x)
@@ -278,7 +312,8 @@ def load_classification_per_layer(output_dir, model):
     """
     clf_root = op.join(output_dir, "classification")
     results = {}
-    for layer in MODEL_LAYERS[model]:
+    layers_to_check = list(MODEL_LAYERS.get(model, [])) + ["last_layer"]
+    for layer in layers_to_check:
         layer_dir = op.join(clf_root, layer)
         if not op.isdir(layer_dir):
             continue
@@ -320,31 +355,36 @@ def load_embedding_classification(model):
 # -- AUC line plot ---------------------------------------------------------
 
 
-def plot_auc_curves(clf_per_layer, model, output_dir, emb_clf=None):
+def plot_auc_curves(clf_per_layer, model, output_dir, emb_clf=None, nl_clf_per_layer=None):
     """Line plot: AUC across layers, one curve per classifier with fill_between.
 
     Parameters
     ----------
     clf_per_layer : dict
-        ``{layer: {clf: {auc_mean, auc_std}}}``
+        ``{layer: {clf: {auc_mean, auc_std}}}`` — linear probing results.
     model : str
     output_dir : str
     emb_clf : dict or None
         ``{clf: {auc_mean, auc_std}}`` for the last-layer embedding.
+    nl_clf_per_layer : dict or None
+        ``{layer: {clf: {auc_mean, auc_std}}}`` from non-linear probing.
+        Plotted as dashed curves with ``(NL)`` suffix in the legend.
     """
-    layers = [lyr for lyr in MODEL_LAYERS[model] if lyr in clf_per_layer]
+    canonical = list(MODEL_LAYERS.get(model, [])) + ["last_layer"]
+    layers = [lyr for lyr in canonical if lyr in clf_per_layer]
     if emb_clf is not None:
         layers_plot = layers + ["last-layer\nembedding"]
     else:
         layers_plot = list(layers)
 
-    if not layers_plot:
+    if not layers_plot and not nl_clf_per_layer:
         print(f"   [{model}] No classification data for AUC plot, skipping.", flush=True)
         return
 
     x = np.arange(len(layers_plot))
     fig, ax = plt.subplots(figsize=(max(7, len(layers_plot) * 1.4), 5))
 
+    # -- linear probing curves (solid) --
     for clf in CLF_NAMES:
         means, stds = [], []
         for layer in layers:
@@ -368,26 +408,41 @@ def plot_auc_curves(clf_per_layer, model, output_dir, emb_clf=None):
             linewidth=2.0,
             markersize=6,
         )
-        ax.fill_between(
-            x,
-            means - stds,
-            means + stds,
-            color=color,
-            alpha=0.15,
-        )
+        ax.fill_between(x, means - stds, means + stds, color=color, alpha=0.15)
 
-    # Vertical dashed line separating layer probes from final embedding
-  #  if emb_clf is not None:
-  #      ax.axvline(len(layers) - 0.5, color="gray", linewidth=1.0, linestyle=":", alpha=0.7)
+    # -- non-linear probing curves (dashed) --
+    if nl_clf_per_layer:
+        nl_layers = [lyr for lyr in MODEL_LAYERS[model] if lyr in nl_clf_per_layer]
+        nl_x = np.arange(len(nl_layers))
+        for clf in CLF_NAMES:
+            means, stds = [], []
+            for layer in nl_layers:
+                r = nl_clf_per_layer.get(layer, {}).get(clf, {})
+                means.append(r.get("auc_mean", np.nan))
+                stds.append(r.get("auc_std", np.nan))
+            means = np.array(means, dtype=float)
+            stds = np.array(stds, dtype=float)
+            color = CLF_COLORS[clf]
+            ax.plot(
+                nl_x, means,
+                label=f"{CLF_LABELS[clf]} (NL)",
+                color=color,
+                marker="s",
+                linewidth=1.6,
+                markersize=5,
+                linestyle="--",
+                alpha=0.75,
+            )
+            ax.fill_between(nl_x, means - stds, means + stds, color=color, alpha=0.08)
 
-  #  ax.axhline(0.5, color="gray", linewidth=1.0, linestyle="--", alpha=0.5, label="Chance")
     ax.set_xticks(x)
     ax.set_xticklabels(layers_plot, rotation=30, ha="right", fontsize=12)
     ax.set_xlabel("Layer", fontsize=14)
     ax.set_ylabel("AUC", fontsize=14)
     ax.set_ylim(0.5, 1.0)
+    title_suffix = " + NL" if nl_clf_per_layer else ""
     ax.set_title(
-        f"{model} \u2014 Classification AUC across layers (VS vs MCS)",
+        f"{model} \u2014 Classification AUC across layers (VS vs MCS){title_suffix}",
         fontsize=15,
     )
     ax.tick_params(axis="y", labelsize=12)
@@ -417,6 +472,16 @@ def main():
         help="Results directory (same --output-dir used for linear_probing.py).",
     )
     parser.add_argument(
+        "--nonlinear-dir",
+        default=None,
+        help=(
+            "Non-linear probing results directory (--output-dir used for "
+            "non_linear_probing.py).  When provided, NL curves are overlaid "
+            "as dashed lines on the linear plots AND standalone NL plots are "
+            "saved to this directory."
+        ),
+    )
+    parser.add_argument(
         "--models",
         nargs="+",
         default=["CbraMod", "NeuroLM"],
@@ -431,13 +496,14 @@ def main():
 
     print("=" * 60, flush=True)
     print("R\u00b2 ALL-LAYERS PLOT", flush=True)
-    print(f"  output_dir : {args.output_dir}", flush=True)
-    print(f"  models     : {models}", flush=True)
+    print(f"  output_dir     : {args.output_dir}", flush=True)
+    print(f"  nonlinear_dir  : {args.nonlinear_dir}", flush=True)
+    print(f"  models         : {models}", flush=True)
     print("=" * 60, flush=True)
 
     for model in models:
         r2_per_layer = load_regression_per_layer(args.output_dir, model)
-        print(f"   [{model}] Loaded {len(r2_per_layer)} layers", flush=True)
+        print(f"   [{model}] Loaded {len(r2_per_layer)} layers (linear)", flush=True)
 
         emb_r2 = load_embedding_regressor(model)
         if emb_r2 is not None:
@@ -449,10 +515,32 @@ def main():
         else:
             print(f"   [{model}] No last-layer embedding regressor found", flush=True)
 
-        plot_r2_all_layers(r2_per_layer, model, args.output_dir, emb_r2=emb_r2)
+        # Load non-linear probing results if requested
+        nl_r2_per_layer = None
+        if args.nonlinear_dir:
+            nl_r2_per_layer = load_regression_per_layer(args.nonlinear_dir, model)
+            print(
+                f"   [{model}] Loaded {len(nl_r2_per_layer)} layers (non-linear)",
+                flush=True,
+            )
+
+        # Combined plot (saved to linear dir)
+        plot_r2_all_layers(
+            r2_per_layer, model, args.output_dir,
+            emb_r2=emb_r2, nl_r2_per_layer=nl_r2_per_layer,
+        )
+
+        # Standalone NL plot (saved to nonlinear dir)
+        if args.nonlinear_dir and nl_r2_per_layer:
+            plot_r2_all_layers(
+                nl_r2_per_layer, model, args.nonlinear_dir, emb_r2=None,
+            )
 
         clf_per_layer = load_classification_per_layer(args.output_dir, model)
-        print(f"   [{model}] Loaded {len(clf_per_layer)} layers (classification)", flush=True)
+        print(
+            f"   [{model}] Loaded {len(clf_per_layer)} layers (classification, linear)",
+            flush=True,
+        )
         emb_clf = load_embedding_classification(model)
         if emb_clf is not None:
             print(
@@ -462,7 +550,27 @@ def main():
             )
         else:
             print(f"   [{model}] No last-layer embedding classification found", flush=True)
-        plot_auc_curves(clf_per_layer, model, args.output_dir, emb_clf=emb_clf)
+
+        nl_clf_per_layer = None
+        if args.nonlinear_dir:
+            nl_clf_per_layer = load_classification_per_layer(args.nonlinear_dir, model)
+            print(
+                f"   [{model}] Loaded {len(nl_clf_per_layer)} layers "
+                f"(classification, non-linear)",
+                flush=True,
+            )
+
+        # Combined AUC plot (saved to linear dir)
+        plot_auc_curves(
+            clf_per_layer, model, args.output_dir,
+            emb_clf=emb_clf, nl_clf_per_layer=nl_clf_per_layer,
+        )
+
+        # Standalone NL AUC plot (saved to nonlinear dir)
+        if args.nonlinear_dir and nl_clf_per_layer:
+            plot_auc_curves(
+                nl_clf_per_layer, model, args.nonlinear_dir, emb_clf=None,
+            )
 
     print("Done.", flush=True)
 

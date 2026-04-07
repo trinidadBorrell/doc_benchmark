@@ -1,15 +1,16 @@
-"""Linear probing on multi-layer foundation model embeddings.
+"""Non-linear probing on multi-layer foundation model embeddings.
 
-===========================================================
-Linear Probing — Ridge Regression & Nested CV Classification
-===========================================================
+================================================================
+Non-Linear Probing — RandomForest Regressor & Nested CV Classification
+================================================================
 
-This script probes multi-layer embeddings from foundation models (CbraMod,
-NeuroLM) in two complementary ways:
+This script is the non-linear analogue of ``linear_probing.py``.  It probes
+multi-layer embeddings from foundation models (CbraMod, NeuroLM) using
+non-linear models:
 
-1. **Ridge Regression** (per layer):
-   For each marker, train a Ridge regressor that predicts the marker scalar
-   from the mean-pooled layer embedding.  Output: R² per marker per FM,
+1. **RandomForest Regression** (per layer):
+   For each marker, train a RandomForestRegressor that predicts the marker
+   scalar from the mean-pooled layer embedding.  Output: R² per marker per FM,
    saved as ``summary.json`` and plotted as ``feature_importance_raw.png``.
 
 2. **Nested CV Classification** (per layer):
@@ -18,30 +19,22 @@ NeuroLM) in two complementary ways:
    and GroupKFold inner CV.  Output: AUC (mean +/- std) per classifier per
    FM per layer.
 
+The regression probe uses ``RandomForestRegressor`` (non-linear) instead of
+``Ridge`` (linear), allowing it to capture non-linear relationships between
+embeddings and neurophysiological markers.  The classification probe is
+identical to ``linear_probing.py`` (already uses non-linear classifiers).
+
 Pooling strategy (two-stage)
 ----------------------------
-Multi-layer ``.npz`` files are huge (650 MB - 1.6 GB).  The script uses a
-two-stage pooling approach to save disk while preserving electrode topology:
-
-**Stage 1 — disk (channel-preserving):**
-
-* Opens files with ``np.load(path, mmap_mode='r')`` (lazy, memory-mapped).
-* Mean-pools over non-channel axes (epochs, patches/tokens) so each layer
-  is reduced to ``(n_channels, emb_dim)`` — e.g. ``(256, 1024)`` for NeuroLM.
-* Caches these as ``pooled_chan_layers.npz`` (~250 KB–1 MB).  Re-runs skip
-  pooling entirely.  The raw multi-layer files can then be deleted to
-  reclaim disk space.
-
-**Stage 2 — RAM (channel pooling):**
-
-* When loading for regression or classification, mean-pools over the
-  channel axis (axis=0) in RAM → ``(emb_dim,)`` vector per subject.
+Reuses the same ``pooled_chan_layers.npz`` cache produced by
+``linear_probing.py`` (or ``run_pool.sh``).  If the cache does not exist,
+this script pools the raw multi-layer ``.npz`` files identically.
 
 Usage
 -----
 ::
 
-    python linear_probing.py \\
+    python non_linear_probing.py \\
         --data-dir /data/project/eeg_foundation/data \\
         --output-dir /path/to/results \\
         --patient-labels /path/to/patient_labels_with_controls.csv \\
@@ -65,8 +58,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from scipy.stats import pearsonr
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.linear_model import Ridge
+from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.metrics import (
     balanced_accuracy_score,
     mean_absolute_error,
@@ -118,9 +110,6 @@ plt.rcParams["legend.fontsize"] = "small"
 plt.rcParams["axes.labelsize"] = "medium"
 
 # -- Model configuration ---------------------------------------------------
-# Each model specifies where its multi-layer embeddings live, layer key names,
-# which axes to mean-pool, and the expected embedding dimension.
-# Modify ``data_subdir`` to point at a different directory if needed.
 
 # Default root for benchmark results (used in last_layer mode)
 _BENCHMARK_RESULTS_DEFAULT = (
@@ -128,6 +117,7 @@ _BENCHMARK_RESULTS_DEFAULT = (
 )
 
 # Maps script model name -> benchmark results subdirectory name.
+# Used in last_layer mode to locate pooled_embeddings.
 LAST_LAYER_RESULT_DIRS = {
     "CbraMod": "CBraMod",
     "NeuroLM": "NeuroLM",
@@ -135,6 +125,7 @@ LAST_LAYER_RESULT_DIRS = {
     "LaBram": "LaBram",
 }
 
+# Models valid for each mode
 MULTILAYER_MODELS = ["CbraMod", "NeuroLM"]
 LAST_LAYER_MODELS = ["CbraMod", "NeuroLM", "TOTEM", "LaBram"]
 
@@ -149,9 +140,6 @@ MODEL_LAYER_KEYS = {
             "layer_9",
             "layer_11",
         ],
-        # Raw shape: (n_epochs, n_channels, n_patches, emb_dim)
-        # Disk pool: mean over epochs & patches -> (n_channels, emb_dim)
-        # RAM pool:  mean over channels -> (emb_dim,)
         "disk_pool_axes": (0, 2),
         "n_channels": 256,
         "emb_dim": 200,
@@ -159,13 +147,8 @@ MODEL_LAYER_KEYS = {
     "NeuroLM": {
         "data_subdir": "NeuroLM/multi_layer_embeddings",
         "layers": ["vq_emb", "gpt_0", "gpt_3", "gpt_6", "gpt_9", "gpt_11"],
-        # Raw shape: (n_tokens, n_channels, emb_dim)
-        # Disk pool: mean over tokens -> (n_channels, emb_dim)
-        # RAM pool:  mean over channels -> (emb_dim,)
         "disk_pool_axes": (0,),
         "n_channels": 256,
-        # vq_emb has a different embedding dim (768) than the GPT layers (1024).
-        # Use a dict for per-layer overrides; scalar is the default.
         "emb_dim": 1024,
         "emb_dim_override": {"vq_emb": 768},
     },
@@ -178,7 +161,6 @@ REDUCTION_MAP = {
     "D": "icm/lg/egi256gfp/std",
 }
 
-# Colour palette per model (matches feature_importance_comparison.py)
 _MODEL_COLORS = {
     "CbraMod": "#2ca02c",
     "NeuroLM": "#1f77b4",
@@ -254,35 +236,37 @@ def _color_xticks_by_family(ax, marker_order: list) -> None:
         tick.set_color(FAMILY_COLORS.get(fam, "black"))
 
 
-# -- LinearProber class -----------------------------------------------------
+# -- NonLinearProber class --------------------------------------------------
 
 
-class LinearProber:
-    """Probe multi-layer foundation model embeddings via Ridge and classifiers.
+class NonLinearProber:
+    """Probe multi-layer foundation model embeddings via RandomForest and classifiers.
+
+    Non-linear analogue of ``LinearProber`` from ``linear_probing.py``.
+    The regression probe uses ``RandomForestRegressor`` instead of ``Ridge``.
+    The classification probe is identical (already uses non-linear classifiers).
+
+    The pooled embedding cache (``pooled_chan_layers.npz``) is shared with
+    ``LinearProber`` — both scripts read from the same cache directory.
 
     Parameters
     ----------
     data_dir : str
         Root data directory containing model embedding subdirectories.
     output_dir : str
-        Directory where all results (pooled embeddings, JSON, plots) are saved.
+        Directory where all results (JSON, plots) are saved.  Should be
+        different from the linear probing output dir (e.g. NON_LINEAR_PROBING).
     patient_labels_file : str
         Path to ``patient_labels_with_controls.csv``.
     marker_csv : str or None
-        Path to ``baseline_stable_20210128_scalars.csv``.  Required for
-        regression; ignored when ``--skip-regression`` is set.
+        Path to ``baseline_stable_20210128_scalars.csv``.
     reduction : str
-        One of A/B/C/D.  Selects the aggregation variant in the marker CSV.
+        One of A/B/C/D.
     models : list of str
-        Foundation model names (keys of ``MODEL_LAYER_KEYS``).
     layers : list of str or ``"all"``
-        Which layer keys to probe.  ``"all"`` uses all layers in the config.
     n_cv_folds : int
-        Number of outer CV folds.
     random_state : int
-        Random seed for reproducibility.
     full_cv : bool
-        If True, use full GroupKFold CV for regression (else single split).
     """
 
     def __init__(
@@ -317,11 +301,10 @@ class LinearProber:
         self.random_state = random_state
         self.full_cv = full_cv
         self.precomputed_splits = precomputed_splits
-        self.common_sessions = common_sessions  # ordered reference session list
+        self.common_sessions = common_sessions
 
         os.makedirs(output_dir, exist_ok=True)
 
-        # Caches (populated lazily)
         self._markers_cache = None
         self._marker_names_cache = None
         self._labels_cache = None
@@ -343,8 +326,17 @@ class LinearProber:
     def _load_last_layer_embeddings(self, model_name):
         """Load pre-pooled final-layer embeddings from the MLP_EMBEDDING cache.
 
-        Reads ``embedding.npz["embedding"]`` — already a 1-D vector, no
-        further pooling needed.
+        Reads ``embedding.npz`` files saved by ``mlp_embedding_classifier.py``
+        at ``{benchmark_results_dir}/{result_dir}/doc_patients/MLP_EMBEDDING/
+        pooled_embeddings/sub-*/ses-*/embedding.npz``.
+
+        Each file contains a 1-D vector of shape ``(emb_dim,)`` — no further
+        pooling is needed.
+
+        Returns
+        -------
+        dict[str, np.ndarray]
+            ``"SubjectID_ses-NN"`` -> 1-D embedding.
         """
         result_dir = LAST_LAYER_RESULT_DIRS.get(model_name, model_name)
         pooled_root = op.join(
@@ -402,23 +394,11 @@ class LinearProber:
         return self._load_pooled_embeddings(model_name, layer_key)
 
     # ------------------------------------------------------------------
-    # Pooling
+    # Pooling  (multilayer mode only — reuses the same cache as LinearProber)
     # ------------------------------------------------------------------
 
     def _pool_single_subject(self, npz_path, model_name):
-        """Mean-pool each layer keeping the channel dimension.
-
-        Pools over non-channel axes (epochs, patches/tokens) so each layer
-        is reduced to ``(n_channels, emb_dim)``.  The channel axis is pooled
-        later in RAM when loading for regression/classification.
-
-        Uses memory-mapped loading to avoid reading the full file into RAM.
-
-        Returns
-        -------
-        dict[str, np.ndarray]
-            Mapping ``layer_key`` -> array of shape ``(n_channels, emb_dim)``.
-        """
+        """Mean-pool each layer keeping the channel dimension."""
         config = MODEL_LAYER_KEYS[model_name]
         result = {}
         npz = np.load(npz_path, mmap_mode="r", allow_pickle=True)
@@ -444,16 +424,8 @@ class LinearProber:
     def pool_and_cache_all(self, model_name, subject_ids=None):
         """Pool all subjects' multi-layer embeddings and cache to disk.
 
-        Each cached file stores per-layer arrays of shape
-        ``(n_channels, emb_dim)`` — small enough to keep on disk while
-        preserving electrode topology.  Subsequent runs skip pooling.
-
-        Parameters
-        ----------
-        model_name : str
-        subject_ids : list of str or None
-            If given, only process these ``sub-*`` directory names.
-            E.g. ``["sub-001", "sub-002"]``.
+        Writes to the same cache directory as LinearProber so both scripts
+        share the same pooled files.
         """
         config = MODEL_LAYER_KEYS[model_name]
         emb_dir = op.join(self.data_dir, config["data_subdir"])
@@ -498,7 +470,6 @@ class LinearProber:
                 if not op.isdir(ses_path) or not ses_dir.startswith("ses-"):
                     continue
 
-                # New cache file name to avoid collisions with old 1-D caches
                 cache_path = op.join(
                     cache_root, sub_dir, ses_dir, "pooled_chan_layers.npz"
                 )
@@ -506,7 +477,6 @@ class LinearProber:
                     n_cached += 1
                     continue
 
-                # Find the .npz file (prefer non-original)
                 npz_files = [
                     f
                     for f in os.listdir(ses_path)
@@ -555,17 +525,7 @@ class LinearProber:
         )
 
     def _load_pooled_embeddings(self, model_name, layer_key):
-        """Load channel-level embeddings and mean-pool channels in RAM.
-
-        Disk files store ``(n_channels, emb_dim)`` per layer.  This method
-        loads them, mean-pools over the channel axis (axis=0) in RAM, and
-        returns 1-D vectors of shape ``(emb_dim,)``.
-
-        Returns
-        -------
-        dict[str, np.ndarray]
-            Mapping ``"SubjectID_ses-NN"`` -> 1-D pooled embedding.
-        """
+        """Load channel-level embeddings and mean-pool channels in RAM."""
         config = MODEL_LAYER_KEYS[model_name]
         cache_root = op.join(self.output_dir, "pooled_embeddings", model_name)
         embeddings = {}
@@ -607,8 +567,7 @@ class LinearProber:
                             flush=True,
                         )
                         continue
-                    # Channel pooling in RAM
-                    vec = arr.mean(axis=0)  # (n_channels, emb_dim) -> (emb_dim,)
+                    vec = arr.mean(axis=0)
                     key = f"{subject_id}_{ses_dir}"
                     embeddings[key] = vec
                     n_loaded += 1
@@ -626,27 +585,11 @@ class LinearProber:
         return embeddings
 
     # ------------------------------------------------------------------
-    # Data loading
+    # Data loading  (identical to LinearProber)
     # ------------------------------------------------------------------
 
     def load_markers_from_csv(self):
-        """Load baseline scalar markers from CSV for the configured reduction.
-
-        Supports two CSV formats:
-
-        * **Old** (``baseline_stable_*.csv``): ``;``-separated, meta columns
-          ``Subject, Reduction, Subject_ID, Date, Label``.
-        * **New** (``nice_scalars_all.csv``): ``,``-separated, meta columns
-          ``Subject, Reduction, id``.
-
-        The separator and meta columns are auto-detected from the header.
-
-        Returns
-        -------
-        markers_dict : dict
-            ``{subject_session_key: np.ndarray of shape (n_markers,)}``
-        marker_names : list of str
-        """
+        """Load baseline scalar markers from CSV for the configured reduction."""
         if self._markers_cache is not None:
             return self._markers_cache, self._marker_names_cache
 
@@ -657,7 +600,6 @@ class LinearProber:
             )
         reduction_str = REDUCTION_MAP[self.reduction]
 
-        # Auto-detect separator: try ',' first, fall back to ';'
         with open(self.marker_csv) as f:
             header_line = f.readline()
         if "Reduction" in header_line.split(","):
@@ -666,7 +608,6 @@ class LinearProber:
             sep = ";"
 
         df = pd.read_csv(self.marker_csv, sep=sep)
-
         df_filtered = df[df["Reduction"] == reduction_str].copy()
         if df_filtered.empty:
             raise ValueError(
@@ -706,13 +647,7 @@ class LinearProber:
         return markers_dict, marker_names
 
     def load_patient_labels(self):
-        """Load CRS labels (VS vs MCS) from patient_labels CSV.
-
-        Returns
-        -------
-        labels_dict : dict
-            ``{subject_session_key: label_str}`` where label is VS or MCS.
-        """
+        """Load CRS labels (VS vs MCS) from patient_labels CSV."""
         if self._labels_cache is not None:
             return self._labels_cache
 
@@ -743,15 +678,7 @@ class LinearProber:
         return labels_dict
 
     def collect_regression_data(self, model_name, layer_key):
-        """Build aligned (X, Y, subjects, marker_names) for marker regression.
-
-        Returns
-        -------
-        X : np.ndarray, shape (n, emb_dim)
-        Y : np.ndarray, shape (n, n_markers)
-        subjects : list of str
-        marker_names : list of str
-        """
+        """Build aligned (X, Y, subjects, marker_names) for marker regression."""
         embeddings = self._get_embeddings(model_name, layer_key)
         markers_dict, marker_names = self.load_markers_from_csv()
 
@@ -778,15 +705,7 @@ class LinearProber:
         return X, Y, subjects, marker_names
 
     def collect_classification_data(self, model_name, layer_key):
-        """Build aligned (X, y_encoded, subjects, groups) for classification.
-
-        Returns
-        -------
-        X : np.ndarray, shape (n, emb_dim)
-        y : np.ndarray, shape (n,) -- label-encoded integers
-        subjects : list of str
-        groups : np.ndarray -- subject-level group IDs
-        """
+        """Build aligned (X, y_encoded, subjects, groups) for classification."""
         embeddings = self._get_embeddings(model_name, layer_key)
         labels_dict = self.load_patient_labels()
 
@@ -818,53 +737,37 @@ class LinearProber:
         return X, y, subjects, groups
 
     # ------------------------------------------------------------------
-    # Ridge Regression
+    # RandomForest Regression  (non-linear probe)
     # ------------------------------------------------------------------
 
     def _train_single_regressor(self, X_train, y_train, groups_train):
-        """Inner 3-fold GroupKFold grid search for Ridge regression.
+        """Fit a fixed-hyperparameter RandomForest regressor.
+
+        No inner CV grid search — fixed at n_estimators=200, max_depth=None.
+        For a probing study the exact RF tuning matters little; avoiding the
+        inner grid search reduces compute from O(markers × folds × grid × inner)
+        to O(markers × folds) and is fast enough to run in minutes.
 
         Returns
         -------
-        model : Ridge
-        best_val_r2 : float
-        best_info : dict
+        model : RandomForestRegressor
+        best_val_r2 : float  (nan — not computed without inner CV)
+        best_params : dict
         """
-        alphas = [0.001, 0.01, 0.1, 1.0, 10.0, 100.0]
-        n_unique = len(np.unique(groups_train))
-
-        if np.std(y_train) == 0 or n_unique < 3:
-            best_alpha = 1.0
-            best_val_r2 = float("nan")
-        else:
-            inner_cv = GroupKFold(n_splits=3)
-            best_score = -float("inf")
-            best_alpha = 1.0
-
-            for alpha in alphas:
-                scores = []
-                for tr_idx, va_idx in inner_cv.split(
-                    X_train, y_train, groups=groups_train
-                ):
-                    m = Ridge(alpha=alpha)
-                    m.fit(X_train[tr_idx], y_train[tr_idx])
-                    pred = m.predict(X_train[va_idx])
-                    scores.append(r2_score(y_train[va_idx], pred))
-
-                mean_score = np.mean(scores)
-                if mean_score > best_score:
-                    best_score = mean_score
-                    best_alpha = alpha
-            best_val_r2 = best_score
-
-        model = Ridge(alpha=best_alpha)
+        params = {"n_estimators": 200, "max_depth": None}
+        model = RandomForestRegressor(
+            n_estimators=params["n_estimators"],
+            max_depth=params["max_depth"],
+            random_state=self.random_state,
+            n_jobs=-1,
+        )
         model.fit(X_train, y_train)
-        return model, best_val_r2, {"alpha": best_alpha}
+        return model, float("nan"), params
 
     def run_regression_for_layer(
         self, model_name, layer_key, X, Y, subjects, marker_names
     ):
-        """Run Ridge regression for all markers on a single layer.
+        """Run RandomForest regression for all markers on a single layer.
 
         Returns
         -------
@@ -875,7 +778,6 @@ class LinearProber:
         metrics_per_marker = {}
 
         if self.full_cv:
-            # ── Build fold iterator (same splits as classification for consistency) ──
             if self.precomputed_splits is not None and self.common_sessions is not None:
                 available_set = set(subjects)
                 missing = [s for s in self.common_sessions if s not in available_set]
@@ -912,7 +814,6 @@ class LinearProber:
 
             effective_folds = len(folds_iter)
 
-            # Leakage sanity checks for regression folds
             for fold_idx, fold in enumerate(folds_iter):
                 check_no_subject_leakage(
                     groups, fold["train_idx"], fold["test_idx"],
@@ -1001,7 +902,7 @@ class LinearProber:
                     "pearson_p": float(pp),
                     "mse": float(mse),
                     "mae": float(mae),
-                    "best_alpha": best_info["alpha"],
+                    "best_params": best_info,
                     "n_train": len(valid_train),
                     "n_test": len(valid_test),
                     "skipped": False,
@@ -1010,16 +911,11 @@ class LinearProber:
         return metrics_per_marker
 
     def run_regression(self):
-        """Run Ridge regression for all models and layers.
-
-        Saves ``summary.json`` per model per layer and a cross-model
-        ``feature_importance_raw.png`` per layer.
-        """
+        """Run RandomForest regression for all models and layers."""
         print("=" * 70, flush=True)
-        print("RIDGE REGRESSION (embedding -> marker)", flush=True)
+        print("RANDOMFOREST REGRESSION (embedding -> marker)", flush=True)
         print("=" * 70, flush=True)
 
-        # {layer_key: {model_name: {marker: r2}}}
         layer_r2_across_models = {}
 
         for model_name in self.models:
@@ -1042,7 +938,6 @@ class LinearProber:
                     model_name, layer_key, X, Y, subjects, marker_names
                 )
 
-                # Save summary.json per model per layer
                 layer_dir = op.join(
                     self.output_dir, "regression", layer_key, model_name
                 )
@@ -1052,7 +947,6 @@ class LinearProber:
                     json.dump(metrics, f, indent=2)
                 print(f"   Saved: {summary_path}", flush=True)
 
-                # Collect R2 for cross-model plot
                 r2_dict = {
                     m: v["r2"]
                     for m, v in metrics.items()
@@ -1062,13 +956,11 @@ class LinearProber:
                     layer_r2_across_models[layer_key] = {}
                 layer_r2_across_models[layer_key][model_name] = r2_dict
 
-        # Generate cross-model feature_importance_raw.png per layer
         for layer_key, r2_per_model in layer_r2_across_models.items():
             if len(r2_per_model) < 1:
                 continue
             self._plot_feature_importance_raw(layer_key, r2_per_model)
 
-        # Save aggregated regression summary
         agg_summary = {}
         for layer_key, r2_per_model in layer_r2_across_models.items():
             agg_summary[layer_key] = {}
@@ -1085,15 +977,10 @@ class LinearProber:
         print(f"\n   Aggregated summary: {agg_path}", flush=True)
 
     # ------------------------------------------------------------------
-    # Classification
+    # Classification  (identical to LinearProber)
     # ------------------------------------------------------------------
 
     def _get_inner_cv_iter(self, X_train, y_train, groups_train, inner_splits):
-        """Return inner CV split iterator.
-
-        Uses ``inner_splits`` (pre-computed, relative to X_train) when provided,
-        otherwise generates a 3-fold GroupKFold on the fly.
-        """
         if inner_splits is not None:
             return list(inner_splits)
         n_unique = len(np.unique(groups_train))
@@ -1146,11 +1033,7 @@ class LinearProber:
                 mean_score = np.mean(scores)
                 if mean_score > best_score:
                     best_score = mean_score
-                    best_params = {
-                        "C": C,
-                        "kernel": kernel,
-                        "gamma": gamma,
-                    }
+                    best_params = {"C": C, "kernel": kernel, "gamma": gamma}
 
         svc_kw = dict(
             C=best_params["C"],
@@ -1164,10 +1047,7 @@ class LinearProber:
             svc_kw["gamma"] = best_params["gamma"]
 
         best_model = Pipeline(
-            [
-                ("scaler", StandardScaler()),
-                ("svc", SVC(**svc_kw)),
-            ]
+            [("scaler", StandardScaler()), ("svc", SVC(**svc_kw))]
         )
         best_model.fit(X_train, y_train)
         return best_model, best_params
@@ -1250,15 +1130,7 @@ class LinearProber:
         return best_model, best_params
 
     def _predict_model(self, model, X):
-        """Get predictions and probabilities from a trained model.
-
-        Returns
-        -------
-        probs : np.ndarray -- 1-D probability / decision values
-        preds : np.ndarray -- binary predictions
-        """
         if isinstance(model, Pipeline):
-            # SVM pipeline
             probs = model.decision_function(X)
             preds = model.predict(X)
         elif isinstance(model, RandomForestClassifier):
@@ -1276,26 +1148,14 @@ class LinearProber:
     def run_classification_for_layer(
         self, model_name, layer_key, X, y, subjects, groups
     ):
-        """Nested CV classification for a single model/layer.
-
-        Uses ``self.precomputed_splits`` when available (same fold assignments
-        across all layers and scripts).  Falls back to freshly generated
-        StratifiedGroupKFold when no pre-computed splits are set.
-
-        Returns
-        -------
-        results : dict
-            ``{classifier_name: {auc_mean, auc_std, bal_acc_mean, ...}}``
-        """
+        """Nested CV classification for a single model/layer."""
         classifiers = {
             "svm": self._grid_search_svm,
             "kernel_ridge": self._grid_search_kr,
             "random_forest": self._grid_search_rf,
         }
 
-        # ── Build fold iterator ──────────────────────────────────────────────
         if self.precomputed_splits is not None and self.common_sessions is not None:
-            # Filter precomputed splits to subjects present in this layer's data
             available_set = set(subjects)
             missing = [s for s in self.common_sessions if s not in available_set]
             if missing:
@@ -1306,8 +1166,6 @@ class LinearProber:
                 )
                 folds_iter = None
             else:
-                # Remap: subjects list == common_sessions filtered to available
-                # (order must match X rows)
                 subj_to_row = {s: i for i, s in enumerate(subjects)}
                 folds_iter = []
                 for fold in self.precomputed_splits:
@@ -1346,7 +1204,6 @@ class LinearProber:
 
         effective_folds = len(folds_iter)
 
-        # ── Leakage sanity checks ────────────────────────────────────────────
         for fold_idx, fold in enumerate(folds_iter):
             check_no_subject_leakage(
                 groups, fold["train_idx"], fold["test_idx"],
@@ -1386,7 +1243,6 @@ class LinearProber:
                         flush=True,
                     )
 
-        # Aggregate per-fold metrics
         results = {}
         for clf_name in classifiers:
             if not accum[clf_name]["y_true"]:
@@ -1424,17 +1280,6 @@ class LinearProber:
     def _maybe_generate_and_save_splits(
         self, subjects, y, groups, save_splits_to=None
     ):
-        """Generate splits from the first available layer data and cache them.
-
-        Only called when ``self.precomputed_splits`` is None.  The generated
-        splits are stored on ``self`` for reuse across all subsequent layers.
-
-        Parameters
-        ----------
-        save_splits_to : str or None
-            Explicit save path.  When None, auto-saves to
-            ``{output_dir}/cv_splits/linear_probing_crs_{ts}.json``.
-        """
         labels_for_splits = {s: int(y[i]) for i, s in enumerate(subjects)}
         self.common_sessions = list(subjects)
         self.precomputed_splits = generate_nested_cv_folds(
@@ -1448,31 +1293,22 @@ class LinearProber:
             f"(StratifiedGroupKFold, seed={self.random_state})",
             flush=True,
         )
-        # Save for reproducibility
         save_path = save_splits_to
         if not save_path:
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             splits_dir = op.join(self.output_dir, "cv_splits")
-            save_path = op.join(splits_dir, f"linear_probing_crs_{ts}.json")
+            save_path = op.join(splits_dir, f"non_linear_probing_crs_{ts}.json")
         save_cv_splits(
             self.precomputed_splits, self.common_sessions, labels_for_splits, save_path
         )
         print(f"   CV splits saved to {save_path}", flush=True)
 
     def run_classification(self, save_splits_to=None):
-        """Run nested CV classification for all models and layers.
-
-        Parameters
-        ----------
-        save_splits_to : str or None
-            Path to save generated CV splits.  Only used when
-            ``self.precomputed_splits`` is None.
-        """
+        """Run nested CV classification for all models and layers."""
         print("\n" + "=" * 70, flush=True)
         print("NESTED CV CLASSIFICATION (embedding -> CRS)", flush=True)
         print("=" * 70, flush=True)
 
-        # {model: {layer: {clf: {auc_mean, ...}}}}
         all_results = {}
 
         for model_name in self.models:
@@ -1492,7 +1328,6 @@ class LinearProber:
                     print(f"   [SKIP] {e}", flush=True)
                     continue
 
-                # Auto-generate splits on the first successful data collection
                 if self.full_cv and self.precomputed_splits is None:
                     self._maybe_generate_and_save_splits(
                         subjects, y, groups, save_splits_to=save_splits_to
@@ -1503,7 +1338,6 @@ class LinearProber:
                 )
                 all_results[model_name][layer_key] = results
 
-                # Save per-layer results iteratively
                 layer_dir = op.join(self.output_dir, "classification", layer_key)
                 os.makedirs(layer_dir, exist_ok=True)
                 for clf_name, clf_results in results.items():
@@ -1514,7 +1348,6 @@ class LinearProber:
                     with open(clf_path, "w") as f:
                         json.dump(clf_results, f, indent=2)
 
-                # Print summary line
                 parts = []
                 for c, r in results.items():
                     auc = r.get("auc_mean")
@@ -1524,7 +1357,6 @@ class LinearProber:
                         parts.append(f"{c}: AUC=N/A")
                 print(f"   Results: {', '.join(parts)}", flush=True)
 
-        # Save aggregated classification summary
         summary_path = op.join(
             self.output_dir, "classification", "classification_summary.json"
         )
@@ -1533,19 +1365,14 @@ class LinearProber:
             json.dump(all_results, f, indent=2)
         print(f"\n   Classification summary: {summary_path}", flush=True)
 
-        # Plot
         self._plot_classification_summary(all_results)
 
     # ------------------------------------------------------------------
-    # Plotting
+    # Plotting  (identical to LinearProber)
     # ------------------------------------------------------------------
 
     def _plot_feature_importance_raw(self, layer_key, r2_per_model):
-        """Plot raw R2 comparison across FM models for a single layer.
-
-        Same style as ``feature_importance_comparison.py:_save_raw_only_plot``.
-        One line per FM model.
-        """
+        """Plot raw R2 comparison across FM models for a single layer."""
         marker_order = _ordered_markers_by_family_and_mean(r2_per_model)
         short_names = [_short_name(m) for m in marker_order]
         x = np.arange(len(marker_order))
@@ -1571,7 +1398,7 @@ class LinearProber:
         ax.set_xlabel("Markers", fontsize=17)
         ax.set_ylabel("R\u00b2", fontsize=17)
         ax.set_title(
-            f"Raw R\u00b2 (Ridge regression: embedding \u2192 marker)"
+            f"Raw R\u00b2 (RandomForest regression: embedding \u2192 marker)"
             f" \u2014 {layer_key}",
             fontsize=18,
         )
@@ -1663,21 +1490,15 @@ class LinearProber:
             print(f"   Classification plot saved: {out_path}", flush=True)
 
     # ------------------------------------------------------------------
-    # Aggregation (reads per-layer JSONs from parallel jobs)
+    # Aggregation
     # ------------------------------------------------------------------
 
     def aggregate_results(self):
-        """Re-read per-layer JSON results and produce summaries + plots.
-
-        Call this after all per-layer jobs have finished.  It does NOT
-        re-run any computation — it only reads the JSON files that were
-        already saved by ``run_regression`` / ``run_classification``.
-        """
+        """Re-read per-layer JSON results and produce summaries + plots."""
         print("=" * 70, flush=True)
         print("AGGREGATE MODE — reading per-layer results", flush=True)
         print("=" * 70, flush=True)
 
-        # --- Regression aggregation ---
         reg_root = op.join(self.output_dir, "regression")
         layer_r2_across_models = {}
 
@@ -1725,7 +1546,6 @@ class LinearProber:
                 json.dump(agg_summary, f, indent=2)
             print(f"   Regression summary: {agg_path}", flush=True)
 
-        # --- Classification aggregation ---
         clf_root = op.join(self.output_dir, "classification")
         all_results = {}
 
@@ -1777,16 +1597,9 @@ class LinearProber:
     # ------------------------------------------------------------------
 
     def run(self, skip_regression=False, skip_classification=False, save_splits_to=None):
-        """Run the full linear probing pipeline.
-
-        Parameters
-        ----------
-        save_splits_to : str or None
-            Path to save generated CV splits.  Forwarded to
-            :meth:`run_classification`.
-        """
+        """Run the full non-linear probing pipeline."""
         print("=" * 70, flush=True)
-        print("LINEAR PROBING -- Embedding Analysis", flush=True)
+        print("NON-LINEAR PROBING -- Embedding Analysis", flush=True)
         print(f"  mode          : {self.mode}", flush=True)
         print(f"  data_dir      : {self.data_dir}", flush=True)
         print(f"  output_dir    : {self.output_dir}", flush=True)
@@ -1796,7 +1609,10 @@ class LinearProber:
         print(f"  n_cv_folds    : {self.n_cv_folds}", flush=True)
         print(f"  full_cv       : {self.full_cv}", flush=True)
         if self.precomputed_splits is not None:
-            print(f"  splits        : {len(self.precomputed_splits)} pre-computed folds", flush=True)
+            print(
+                f"  splits        : {len(self.precomputed_splits)} pre-computed folds",
+                flush=True,
+            )
         print("=" * 70, flush=True)
 
         if not skip_regression:
@@ -1811,20 +1627,20 @@ class LinearProber:
         if not skip_classification:
             self.run_classification(save_splits_to=save_splits_to)
 
-        # Save top-level summary
         summary = {
             "models": self.models,
             "layers_filter": self.layers_filter,
             "n_cv_folds": self.n_cv_folds,
             "reduction": self.reduction,
             "full_cv": self.full_cv,
+            "probe_type": "non_linear",
         }
-        summary_path = op.join(self.output_dir, "linear_probing_summary.json")
+        summary_path = op.join(self.output_dir, "non_linear_probing_summary.json")
         with open(summary_path, "w") as f:
             json.dump(summary, f, indent=2)
 
         print("\n" + "=" * 70, flush=True)
-        print("LINEAR PROBING COMPLETE", flush=True)
+        print("NON-LINEAR PROBING COMPLETE", flush=True)
         print(f"  Results at: {self.output_dir}", flush=True)
         print("=" * 70, flush=True)
 
@@ -1835,8 +1651,8 @@ class LinearProber:
 def main():
     parser = argparse.ArgumentParser(
         description=(
-            "Linear probing on multi-layer foundation model embeddings. "
-            "Ridge regression for marker prediction and nested CV "
+            "Non-linear probing on multi-layer foundation model embeddings. "
+            "RandomForest regression for marker prediction and nested CV "
             "classification for CRS (VS vs MCS)."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1844,16 +1660,16 @@ def main():
 Examples
 --------
 # Full run:
-python linear_probing.py \\
+python non_linear_probing.py \\
     --data-dir /data/project/eeg_foundation/data \\
-    --output-dir /data/project/eeg_foundation/data/benchmark_results/new_results/LINEAR_PROBING \\
+    --output-dir /data/project/eeg_foundation/data/benchmark_results/new_results/NON_LINEAR_PROBING \\
     --patient-labels /data/project/eeg_foundation/data/metadata/metadata_patient_labels.csv \\
     --marker-csv /data/project/eeg_foundation/data/original_DoC/nice_scalars_all.csv
 
 # Regression only, single model:
-python linear_probing.py \\
+python non_linear_probing.py \\
     --data-dir /data/project/eeg_foundation/data \\
-    --output-dir /tmp/lp_test \\
+    --output-dir /tmp/nlp_test \\
     --patient-labels /data/project/eeg_foundation/data/metadata/metadata_patient_labels.csv \\
     --marker-csv /data/project/eeg_foundation/data/original_DoC/nice_scalars_all.csv \\
     --models CbraMod --layers layer_0 --skip-classification
@@ -1868,7 +1684,7 @@ python linear_probing.py \\
         "--output-dir",
         default=(
             "/data/project/eeg_foundation/data/benchmark_results"
-            "/new_results/LINEAR_PROBING"
+            "/new_results/NON_LINEAR_PROBING"
         ),
         help="Directory where all results are saved.",
     )
@@ -1919,8 +1735,8 @@ python linear_probing.py \\
         "--benchmark-results-dir",
         default=_BENCHMARK_RESULTS_DEFAULT,
         help=(
-            "Root of benchmark results (used in last_layer mode). "
-            "Default: %(default)s"
+            "Root of benchmark results (used in last_layer mode to locate "
+            "pooled_embeddings). Default: %(default)s"
         ),
     )
     parser.add_argument(
@@ -1928,8 +1744,8 @@ python linear_probing.py \\
         nargs="+",
         default=None,
         help=(
-            "Foundation models to probe. Defaults: multilayer → CbraMod NeuroLM; "
-            "last_layer → CbraMod NeuroLM TOTEM LaBram."
+            "Foundation models to probe. Defaults: multilayer mode → CbraMod "
+            "NeuroLM; last_layer mode → CbraMod NeuroLM TOTEM LaBram."
         ),
     )
     parser.add_argument(
@@ -1940,7 +1756,7 @@ python linear_probing.py \\
     parser.add_argument(
         "--skip-regression",
         action="store_true",
-        help="Skip Ridge regression (marker prediction).",
+        help="Skip RandomForest regression (marker prediction).",
     )
     parser.add_argument(
         "--skip-classification",
@@ -1982,8 +1798,7 @@ python linear_probing.py \\
         default=None,
         help=(
             "Pre-computed CV splits JSON (from generate_nested_cv_folds). "
-            "When provided, all layers use identical outer/inner fold assignments — "
-            "enabling consistent comparison across layers and with other scripts."
+            "When provided, all layers use identical outer/inner fold assignments."
         ),
     )
     parser.add_argument(
@@ -1992,7 +1807,7 @@ python linear_probing.py \\
         help=(
             "Path to save generated CV splits JSON for reuse. "
             "If omitted and no --splits-file given, splits are auto-saved to "
-            "{output_dir}/cv_splits/linear_probing_crs_{timestamp}.json."
+            "{output_dir}/cv_splits/non_linear_probing_crs_{timestamp}.json."
         ),
     )
 
@@ -2012,7 +1827,6 @@ python linear_probing.py \\
     if args.subjects:
         subject_ids = [s.strip() for s in args.subjects.split(",")]
 
-    # ── Load or prepare splits ────────────────────────────────────────────────
     precomputed_splits = None
     common_sessions = None
 
@@ -2023,10 +1837,8 @@ python linear_probing.py \\
             f"({len(common_sessions)} sessions) from {args.splits_file}",
             flush=True,
         )
-    elif not args.pool_only and not args.aggregate_only and not args.single_split:
-        pass
 
-    prober = LinearProber(
+    prober = NonLinearProber(
         data_dir=args.data_dir,
         output_dir=args.output_dir,
         patient_labels_file=args.patient_labels,

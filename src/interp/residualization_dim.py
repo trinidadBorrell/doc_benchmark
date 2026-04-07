@@ -85,7 +85,7 @@ import pandas as pd
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import Ridge
-from sklearn.metrics import balanced_accuracy_score, roc_auc_score
+from sklearn.metrics import balanced_accuracy_score, r2_score, roc_auc_score
 from sklearn.model_selection import GroupKFold, StratifiedGroupKFold
 from sklearn.neural_network import MLPClassifier
 from sklearn.preprocessing import LabelEncoder, StandardScaler
@@ -549,6 +549,85 @@ def _inner_cv_classifier(
     raise ValueError(f"Unknown classifier: {clf_name!r}")
 
 
+# ── R² per embedding dimension ───────────────────────────────────────────────
+
+
+def compute_r2_per_dim(Y, X, groups=None):
+    """Fit DimensionResidualizer on all data and return per-dimension R².
+
+    This is a global fit (not per-fold) intended purely for visualization:
+    it shows which embedding dimensions are linearly predictable from markers.
+
+    Parameters
+    ----------
+    Y : ndarray, shape (n, n_markers)
+    X : ndarray, shape (n, emb_dim)
+    groups : ndarray, shape (n,) or None
+
+    Returns
+    -------
+    r2_values : ndarray, shape (emb_dim,)
+        R² for each embedding dimension.
+    """
+    residualizer = DimensionResidualizer()
+    residualizer.fit(Y, X, groups=groups)
+    Y_imp = residualizer._impute(Y)
+    Y_scaled = residualizer._scaler.transform(Y_imp)
+    X_pred = residualizer._ridge.predict(Y_scaled)  # (n, emb_dim)
+    r2_values = np.array(
+        [r2_score(X[:, i], X_pred[:, i]) for i in range(X.shape[1])]
+    )
+    return r2_values
+
+
+def plot_r2_per_dim(r2_values, model_name, output_path):
+    """Plot R² per embedding dimension (one curve per FM model plot).
+
+    Parameters
+    ----------
+    r2_values : ndarray, shape (emb_dim,)
+    model_name : str
+    output_path : str
+        Full path for the output PNG.
+    """
+    emb_dim = len(r2_values)
+    x = np.arange(emb_dim)
+
+    # Sort dimensions by R² to reveal structure
+    sort_idx = np.argsort(r2_values)
+    r2_sorted = r2_values[sort_idx]
+
+    fig, axes = plt.subplots(1, 2, figsize=(16, 5))
+
+    color = _MODEL_COLORS.get(model_name, "#1f77b4")
+
+    # Left: by index order
+    axes[0].plot(x, r2_values, linewidth=0.8, color=color, alpha=0.85)
+    axes[0].axhline(0, color="gray", linestyle="--", linewidth=0.8, alpha=0.6)
+    axes[0].set_xlabel("Embedding dimension index", fontsize=12)
+    axes[0].set_ylabel("R²", fontsize=12)
+    axes[0].set_title("By dimension index", fontsize=11)
+    axes[0].grid(True, alpha=0.25)
+
+    # Right: sorted ascending by R²
+    axes[1].plot(np.arange(emb_dim), r2_sorted, linewidth=0.8, color=color, alpha=0.85)
+    axes[1].axhline(0, color="gray", linestyle="--", linewidth=0.8, alpha=0.6)
+    axes[1].set_xlabel("Dimension rank (sorted by R²)", fontsize=12)
+    axes[1].set_ylabel("R²", fontsize=12)
+    axes[1].set_title("Sorted ascending", fontsize=11)
+    axes[1].grid(True, alpha=0.25)
+
+    fig.suptitle(
+        f"{model_name} — R² per embedding dimension\n"
+        f"(Ridge regression: markers → embedding, {emb_dim} dims)",
+        fontsize=13,
+    )
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"   Saved: {output_path}", flush=True)
+
+
 # ── Nested CV pipeline ───────────────────────────────────────────────────────
 
 
@@ -926,6 +1005,22 @@ def run_model(
             f" ({res['n_valid_folds']} folds)",
             flush=True,
         )
+
+    # ── R² per embedding dimension (global fit for visualization) ─────────
+    print("  Computing R² per embedding dimension ...", flush=True)
+    groups_all = np.array([s.split("_ses-")[0] for s in common_keys])
+    try:
+        r2_values = compute_r2_per_dim(Y, X, groups=groups_all)
+        r2_plot_path = op.join(output_dir, f"r2_per_dim_{model_name}.png")
+        os.makedirs(output_dir, exist_ok=True)
+        plot_r2_per_dim(r2_values, model_name, r2_plot_path)
+        # Also save the R² values as npz for later inspection
+        np.savez(
+            op.join(output_dir, f"r2_per_dim_{model_name}.npz"),
+            r2_per_dim=r2_values,
+        )
+    except Exception as exc:
+        print(f"  [WARN] R² per dim plot failed: {exc}", flush=True)
 
     return model_results, subjects_info, precomputed_splits, common_keys, labels_for_splits
 

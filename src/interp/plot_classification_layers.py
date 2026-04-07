@@ -1,11 +1,12 @@
 """Plot classification AUC across layers with error bars.
 
-Reads per-layer classification JSONs from ``linear_probing.py`` and draws
-one figure per model:
+Reads per-layer classification JSONs from ``linear_probing.py`` and/or
+``non_linear_probing.py`` and draws one figure per model:
 
 * **x-axis** — layer name
 * **y-axis** — AUC (mean +/- std as error bars)
 * **one group of bars per layer**, one bar per classifier
+* **hatched bars** for non-linear probing when ``--nonlinear-dir`` is given
 
 Optionally includes the last-layer embedding classification results from
 the main pipeline as a reference horizontal band.
@@ -16,6 +17,9 @@ Usage
 
     python plot_classification_layers.py --output-dir /path/to/LINEAR_PROBING
     python plot_classification_layers.py --output-dir /path/to/LINEAR_PROBING --models CbraMod
+    python plot_classification_layers.py \\
+        --output-dir /path/to/LINEAR_PROBING \\
+        --nonlinear-dir /path/to/NON_LINEAR_PROBING
 
 Author: Trinidad Borrell <trinidad.borrell@gmail.com>
 """
@@ -83,7 +87,8 @@ def load_classification_per_layer(output_dir, model):
     """
     clf_root = op.join(output_dir, "classification")
     results = {}
-    for layer in MODEL_LAYERS[model]:
+    layers_to_check = list(MODEL_LAYERS.get(model, [])) + ["last_layer"]
+    for layer in layers_to_check:
         layer_dir = op.join(clf_root, layer)
         if not op.isdir(layer_dir):
             continue
@@ -128,45 +133,54 @@ def load_embedding_classification(model):
 # -- plotter ---------------------------------------------------------------
 
 
-def plot_classification_layers(layer_results, model, output_dir, emb_clf=None):
+def plot_classification_layers(
+    layer_results, model, output_dir, emb_clf=None, nl_layer_results=None
+):
     """Grouped bar plot: AUC per layer per classifier.
 
     Parameters
     ----------
     layer_results : dict
-        ``{layer: {clf: {auc_mean, auc_std}}}``
+        ``{layer: {clf: {auc_mean, auc_std}}}`` — linear probing results.
     model : str
     output_dir : str
     emb_clf : dict or None
         ``{clf: {auc_mean, auc_std}}`` from the last-layer embedding.
+    nl_layer_results : dict or None
+        ``{layer: {clf: {auc_mean, auc_std}}}`` from non-linear probing.
+        Plotted as hatched bars beside the linear bars.
     """
-    if not layer_results and emb_clf is None:
+    if not layer_results and emb_clf is None and not nl_layer_results:
         print(f"   [{model}] No classification results found, skipping.", flush=True)
         return
 
-    layers = [lyr for lyr in MODEL_LAYERS[model] if lyr in layer_results]
+    canonical = list(MODEL_LAYERS.get(model, [])) + ["last_layer"]
+    layers = [lyr for lyr in canonical if lyr in layer_results]
 
-    # Add the embedding as a final "layer" if available
     if emb_clf is not None:
         layers_plot = layers + ["last-layer\nembedding"]
     else:
         layers_plot = list(layers)
 
-    n_layers = len(layers_plot)
+    # When NL results exist, double the bar slots per layer
+    has_nl = bool(nl_layer_results)
     n_clf = len(CLF_NAMES)
-    bar_width = 0.8 / n_clf
+    # Each classifier gets 1 bar (linear) + optionally 1 bar (NL)
+    bars_per_clf = 2 if has_nl else 1
+    total_bars = n_clf * bars_per_clf
+    bar_width = 0.8 / total_bars
+    n_layers = len(layers_plot)
     x = np.arange(n_layers)
 
-    fig, ax = plt.subplots(figsize=(max(8, n_layers * 1.8), 6))
+    fig, ax = plt.subplots(figsize=(max(8, n_layers * (2.2 if has_nl else 1.8)), 6))
 
     for ci, clf in enumerate(CLF_NAMES):
+        # --- linear bars ---
         means, stds = [], []
         for layer in layers:
             r = layer_results.get(layer, {}).get(clf, {})
             means.append(r.get("auc_mean"))
             stds.append(r.get("auc_std"))
-
-        # Append embedding result
         if emb_clf is not None:
             r = emb_clf.get(clf, {})
             means.append(r.get("auc_mean"))
@@ -175,7 +189,8 @@ def plot_classification_layers(layer_results, model, output_dir, emb_clf=None):
         means = np.array(means, dtype=float)
         stds = np.array(stds, dtype=float)
 
-        offset = (ci - n_clf / 2 + 0.5) * bar_width
+        lin_slot = ci * bars_per_clf
+        offset = (lin_slot - total_bars / 2 + 0.5) * bar_width
         bars = ax.bar(
             x + offset,
             means,
@@ -189,11 +204,42 @@ def plot_classification_layers(layer_results, model, output_dir, emb_clf=None):
             linewidth=0.5,
         )
 
-        # If last bar is the embedding, highlight it
         if emb_clf is not None and clf in emb_clf:
             bars[-1].set_edgecolor("black")
             bars[-1].set_linewidth(1.5)
             bars[-1].set_hatch("//")
+
+        # --- non-linear bars (hatched) ---
+        if has_nl:
+            nl_layers = [lyr for lyr in MODEL_LAYERS[model] if lyr in nl_layer_results]
+            nl_means = []
+            nl_stds = []
+            for layer in layers:
+                r = nl_layer_results.get(layer, {}).get(clf, {}) if layer in (nl_layer_results or {}) else {}
+                nl_means.append(r.get("auc_mean"))
+                nl_stds.append(r.get("auc_std"))
+            if emb_clf is not None:
+                nl_means.append(None)
+                nl_stds.append(None)
+
+            nl_means = np.array(nl_means, dtype=float)
+            nl_stds = np.array(nl_stds, dtype=float)
+
+            nl_slot = ci * bars_per_clf + 1
+            nl_offset = (nl_slot - total_bars / 2 + 0.5) * bar_width
+            ax.bar(
+                x + nl_offset,
+                nl_means,
+                bar_width,
+                yerr=nl_stds,
+                label=f"{CLF_LABELS[clf]} (NL)" if ci == 0 or True else "_nolegend_",
+                color=CLF_COLORS[clf],
+                alpha=0.5,
+                capsize=3,
+                edgecolor=CLF_COLORS[clf],
+                linewidth=1.0,
+                hatch="xx",
+            )
 
     ax.axhline(
         0.5, color="gray", linewidth=1.0, linestyle="--", alpha=0.5, label="Chance"
@@ -202,8 +248,9 @@ def plot_classification_layers(layer_results, model, output_dir, emb_clf=None):
     ax.set_xticklabels(layers_plot, rotation=30, ha="right", fontsize=12)
     ax.set_xlabel("Layer", fontsize=14)
     ax.set_ylabel("AUC", fontsize=14)
+    title_suffix = " + NL (hatched)" if has_nl else ""
     ax.set_title(
-        f"{model} \u2014 Classification AUC across layers (VS vs MCS)",
+        f"{model} \u2014 Classification AUC across layers (VS vs MCS){title_suffix}",
         fontsize=15,
     )
     ax.set_ylim(0.3, 1.05)
@@ -221,7 +268,9 @@ def plot_classification_layers(layer_results, model, output_dir, emb_clf=None):
 # -- table renderer --------------------------------------------------------
 
 
-def render_layer_table(layer_results, model, output_dir, emb_clf=None):
+def render_layer_table(
+    layer_results, model, output_dir, emb_clf=None, nl_layer_results=None
+):
     """Render a PNG table: rows = layers, columns = classifiers (AUC mean ± std).
 
     Parameters
@@ -232,8 +281,12 @@ def render_layer_table(layer_results, model, output_dir, emb_clf=None):
     output_dir : str
     emb_clf : dict or None
         ``{clf: {auc_mean, auc_std}}`` from the last-layer embedding.
+    nl_layer_results : dict or None
+        ``{layer: {clf: {auc_mean, auc_std}}}`` from non-linear probing.
+        Shown as additional columns with ``(NL)`` suffix.
     """
-    layers = [lyr for lyr in MODEL_LAYERS[model] if lyr in layer_results]
+    canonical = list(MODEL_LAYERS.get(model, [])) + ["last_layer"]
+    layers = [lyr for lyr in canonical if lyr in layer_results]
     if emb_clf is not None:
         layers_all = layers + ["last-layer embedding"]
     else:
@@ -252,32 +305,52 @@ def render_layer_table(layer_results, model, output_dir, emb_clf=None):
             return f"{mean:.3f}"
         return f"{mean:.3f} \u00b1 {std:.3f}"
 
-    # Build table data
-    col_labels = ["Layer"] + [CLF_LABELS[c] for c in CLF_NAMES]
+    has_nl = bool(nl_layer_results)
+
+    # Column headers: Layer | SVM | KR | RF | SVM(NL) | KR(NL) | RF(NL)
+    linear_cols = [CLF_LABELS[c] for c in CLF_NAMES]
+    nl_cols = [f"{CLF_LABELS[c]} (NL)" for c in CLF_NAMES] if has_nl else []
+    col_labels = ["Layer"] + linear_cols + nl_cols
+
     table_text = []
-    cell_means = []  # for bold-best highlighting
+    cell_means_lin = []
+    cell_means_nl = []
+
     for layer in layers_all:
         if layer == "last-layer embedding":
-            src = emb_clf or {}
+            src_lin = emb_clf or {}
         else:
-            src = layer_results.get(layer, {})
-        row = [layer]
-        row_means = []
-        for clf in CLF_NAMES:
-            r = src.get(clf, {})
-            row.append(_fmt(r))
-            row_means.append(r.get("auc_mean"))
-        table_text.append(row)
-        cell_means.append(row_means)
+            src_lin = layer_results.get(layer, {})
 
-    # Best AUC per classifier column
-    best_per_clf = []
+        row = [layer]
+        row_means_lin = []
+        for clf in CLF_NAMES:
+            r = src_lin.get(clf, {})
+            row.append(_fmt(r))
+            row_means_lin.append(r.get("auc_mean"))
+        cell_means_lin.append(row_means_lin)
+
+        if has_nl:
+            src_nl = nl_layer_results.get(layer, {}) if layer != "last-layer embedding" else {}
+            row_means_nl = []
+            for clf in CLF_NAMES:
+                r = src_nl.get(clf, {})
+                row.append(_fmt(r))
+                row_means_nl.append(r.get("auc_mean"))
+            cell_means_nl.append(row_means_nl)
+
+        table_text.append(row)
+
+    # Best per classifier (over both linear and NL if present)
+    all_col_means = cell_means_lin + (cell_means_nl if has_nl else [])
+
+    best_per_lin_clf = []
     for ci in range(len(CLF_NAMES)):
-        vals = [cell_means[ri][ci] for ri in range(len(layers_all)) if cell_means[ri][ci] is not None]
-        best_per_clf.append(max(vals) if vals else None)
+        vals = [cell_means_lin[ri][ci] for ri in range(len(layers_all)) if cell_means_lin[ri][ci] is not None]
+        best_per_lin_clf.append(max(vals) if vals else None)
 
     n_rows = len(table_text)
-    fig_w = 4 + 2.5 * len(CLF_NAMES)
+    fig_w = 4 + 2.5 * len(col_labels[1:])
     fig_h = 1.2 + 0.45 * max(n_rows, 1)
     fig, ax = plt.subplots(figsize=(fig_w, fig_h))
     ax.axis("off")
@@ -293,29 +366,33 @@ def render_layer_table(layer_results, model, output_dir, emb_clf=None):
     table.set_fontsize(10)
     table.scale(1.0, 1.3)
 
-    # Header style
     for col_idx in range(len(col_labels)):
         cell = table[(0, col_idx)]
         cell.set_facecolor("#f0f0f0")
         cell.get_text().set_weight("bold")
 
-    # Layer name column left-aligned
     for row_idx in range(1, n_rows + 1):
         table[(row_idx, 0)].get_text().set_ha("left")
 
-    # Highlight embedding row
     if emb_clf is not None:
-        emb_row_idx = n_rows  # last row (1-based)
+        emb_row_idx = n_rows
         for col_idx in range(len(col_labels)):
             table[(emb_row_idx, col_idx)].set_facecolor("#fff8dc")
 
-    # Bold best value per classifier
-    for ci, clf in enumerate(CLF_NAMES):
-        best = best_per_clf[ci]
+    # Shade NL columns lightly
+    if has_nl:
+        nl_col_start = 1 + len(CLF_NAMES)
+        for row_idx in range(1, n_rows + 1):
+            for col_idx in range(nl_col_start, len(col_labels)):
+                table[(row_idx, col_idx)].set_facecolor("#f0f8ff")
+
+    # Bold best linear value per classifier
+    for ci in range(len(CLF_NAMES)):
+        best = best_per_lin_clf[ci]
         if best is None:
             continue
-        for ri, layer in enumerate(layers_all):
-            mean_val = cell_means[ri][ci]
+        for ri in range(len(layers_all)):
+            mean_val = cell_means_lin[ri][ci]
             if mean_val is not None and abs(float(mean_val) - float(best)) < 1e-9:
                 table[(ri + 1, ci + 1)].get_text().set_weight("bold")
 
@@ -347,6 +424,15 @@ def main():
         help="Results directory (same --output-dir used for linear_probing.py).",
     )
     parser.add_argument(
+        "--nonlinear-dir",
+        default=None,
+        help=(
+            "Non-linear probing results directory (--output-dir used for "
+            "non_linear_probing.py).  When provided, NL results are overlaid "
+            "as hatched bars AND standalone NL plots are saved to this directory."
+        ),
+    )
+    parser.add_argument(
         "--models",
         nargs="+",
         default=["CbraMod", "NeuroLM"],
@@ -365,13 +451,14 @@ def main():
 
     print("=" * 60, flush=True)
     print("CLASSIFICATION AUC ACROSS LAYERS", flush=True)
-    print(f"  output_dir : {args.output_dir}", flush=True)
-    print(f"  models     : {models}", flush=True)
+    print(f"  output_dir    : {args.output_dir}", flush=True)
+    print(f"  nonlinear_dir : {args.nonlinear_dir}", flush=True)
+    print(f"  models        : {models}", flush=True)
     print("=" * 60, flush=True)
 
     for model in models:
         layer_results = load_classification_per_layer(args.output_dir, model)
-        print(f"   [{model}] Loaded {len(layer_results)} layers", flush=True)
+        print(f"   [{model}] Loaded {len(layer_results)} layers (linear)", flush=True)
 
         emb_clf = load_embedding_classification(model)
         if emb_clf is not None:
@@ -384,12 +471,32 @@ def main():
                 f"   [{model}] No last-layer embedding classification found", flush=True
             )
 
+        nl_layer_results = None
+        if args.nonlinear_dir:
+            nl_layer_results = load_classification_per_layer(args.nonlinear_dir, model)
+            print(
+                f"   [{model}] Loaded {len(nl_layer_results)} layers (non-linear)",
+                flush=True,
+            )
+
+        # Combined plot (saved to linear dir)
         plot_classification_layers(
-            layer_results, model, args.output_dir, emb_clf=emb_clf
+            layer_results, model, args.output_dir,
+            emb_clf=emb_clf, nl_layer_results=nl_layer_results,
         )
         render_layer_table(
-            layer_results, model, args.output_dir, emb_clf=emb_clf
+            layer_results, model, args.output_dir,
+            emb_clf=emb_clf, nl_layer_results=nl_layer_results,
         )
+
+        # Standalone NL plots (saved to nonlinear dir)
+        if args.nonlinear_dir and nl_layer_results:
+            plot_classification_layers(
+                nl_layer_results, model, args.nonlinear_dir, emb_clf=None,
+            )
+            render_layer_table(
+                nl_layer_results, model, args.nonlinear_dir, emb_clf=None,
+            )
 
     print("Done.", flush=True)
 
