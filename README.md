@@ -94,9 +94,18 @@ grep "^>>> Progress" /data/project/eeg_foundation/logs/markers_cbramod_<cluster>
 
 ## Marker Baseline Classifier
 
-`src/model/baseline.py` trains SVM, Random Forest, and Kernel Ridge directly on pre-computed scalar markers (not embeddings) — the classical baseline for comparison.
+`src/model/baseline.py` trains SVM, MLP, Random Forest, and Kernel Ridge directly on pre-computed scalar markers (not embeddings) — the classical baseline for comparison.
 
-Prediction targets: `crs`, `etiology`, `cs_6m`, `cs_1y`, `cs_2y`.
+**Prediction targets and modes:**
+
+| Target | Modes |
+|--------|-------|
+| `crs` | binary VS vs MCS |
+| `etiology` | all subjects · `vs_only` (UWS baseline) · `mcs_only` (MCS baseline) |
+| `etiology_code` | all subjects · `vs_only` · `mcs_only` |
+| `cs_6m/cs_1y/cs_2y` | `multiclass` · `binary` · `binary_death` · `binary_vs_to_mcs` · `binary_mcs_to_conscious` · `binary_improvement` |
+
+`binary_improvement` labels all subjects as IMPROVED/NON_IMPROVED regardless of baseline (VS→MCS/CONSCIOUS or MCS→CONSCIOUS).
 
 ```bash
 python src/model/baseline.py \
@@ -122,7 +131,9 @@ results/{results-subdir}/
 │       ├── original/{scalars,topos}_*.npz
 │       └── recon/{scalars,topos}_*.npz
 ├── MARKER_BASELINE/
-│   └── {target}/{classic_split,nested_cv}/{svm,random_forest,kernel_ridge}/
+│   ├── crs/{classic_split,nested_cv}/{svm,mlp,random_forest,kernel_ridge}/
+│   ├── {etiology,etiology_code}/{classic_split,nested_cv,vs_only/,mcs_only/}/
+│   └── {cs_6m,cs_1y,cs_2y}/{multiclass,binary,binary_death,binary_vs_to_mcs,binary_mcs_to_conscious,binary_improvement}/
 ├── MODEL/
 └── logs/
 ```

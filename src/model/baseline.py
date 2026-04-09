@@ -18,14 +18,25 @@ on the pre-computed scalar markers from
 
 Prediction targets
 ------------------
-All five clinical targets are run in sequence:
+All six clinical targets are run in sequence:
 
 - ``crs``            — binary VS vs MCS  (UWS→VS, MCS+/MCS-→MCS)
-- ``etiology``       — binary acute vs chronic
-- ``etiology_code``  — binary ANOXIA vs TBI
-- ``cs_6m``          — multiclass outcome score at 6 months
-- ``cs_1y``          — multiclass outcome score at 1 year
-- ``cs_2y``          — multiclass outcome score at 2 years
+- ``etiology``       — binary acute vs chronic (+ vs_only / mcs_only subsets)
+- ``etiology_code``  — binary ANOXIA vs TBI (+ vs_only / mcs_only subsets)
+- ``cs_6m``          — outcome score at 6 months (6 label modes)
+- ``cs_1y``          — outcome score at 1 year (6 label modes)
+- ``cs_2y``          — outcome score at 2 years (6 label modes)
+
+Outcome label modes (cs_6m / cs_1y / cs_2y)
+--------------------------------------------
+- ``multiclass``              — VS / MCS / CONSCIOUS / DEATH
+- ``binary``                  — VS vs MCS (others excluded)
+- ``binary_death``            — DEATH vs NON_DEATH
+- ``binary_vs_to_mcs``        — IMPROVED vs OTHER (UWS-baseline subjects only)
+- ``binary_mcs_to_conscious`` — IMPROVED vs OTHER (MCS-baseline subjects only)
+- ``binary_improvement``      — IMPROVED vs NON_IMPROVED (all subjects; VS
+                                baseline improves to MCS/CONSCIOUS; MCS baseline
+                                improves to CONSCIOUS)
 
 Group-based CV prevents subject-level data leakage (all sessions of the
 same patient stay on the same side of every split).
@@ -42,20 +53,23 @@ Output structure
 ::
 
     {main_path}/MARKER_BASELINE/
-    └── {crs,etiology,etiology_code,cs_6m,cs_1y,cs_2y}/
-        ├── classic_split/
-        │   ├── svm/
-        │   │   ├── classification_results.json
-        │   │   ├── classification_results.png
-        │   │   └── subject_predictions.csv
-        │   ├── mlp/
-        │   ├── random_forest/
-        │   └── kernel_ridge/
-        └── nested_cv/
-            ├── svm/
-            ├── mlp/
-            ├── random_forest/
-            └── kernel_ridge/
+    ├── crs/
+    │   ├── classic_split/{svm,mlp,random_forest,kernel_ridge}/
+    │   └── nested_cv/{svm,mlp,random_forest,kernel_ridge}/
+    ├── {etiology,etiology_code}/
+    │   ├── classic_split/   (all subjects)
+    │   ├── nested_cv/
+    │   ├── vs_only/classic_split/   (UWS baseline only)
+    │   ├── vs_only/nested_cv/
+    │   ├── mcs_only/classic_split/  (MCS+/MCS- baseline only)
+    │   └── mcs_only/nested_cv/
+    └── {cs_6m,cs_1y,cs_2y}/
+        ├── multiclass/
+        ├── binary/
+        ├── binary_death/
+        ├── binary_vs_to_mcs/
+        ├── binary_mcs_to_conscious/
+        └── binary_improvement/
 
 Author: Trinidad Borrell <trinidad.borrell@gmail.com>
 """
@@ -210,6 +224,8 @@ class BaselineClassifier:
         self.class_names = []
         self.is_binary = True
         self.feature_names = []
+        self._baseline_states_dict = None  # populated during binary_improvement loading
+        self.baseline_states = None  # aligned to subjects after collect_data
 
     # ------------------------------------------------------------------
     # Data loading
@@ -284,13 +300,15 @@ class BaselineClassifier:
         death_binary=False,
         vs_to_mcs=False,
         mcs_to_conscious=False,
+        binary_improvement=False,
+        baseline_filter=None,
     ):
         """Load labels for a given prediction target from patient_labels.csv.
 
         Parameters
         ----------
         target : str
-            One of 'crs', 'etiology', 'cs_6m', 'cs_1y', 'cs_2y'.
+            One of 'crs', 'etiology', 'etiology_code', 'cs_6m', 'cs_1y', 'cs_2y'.
         binary_outcome : bool
             If True and target is an outcome score (cs_6m/cs_1y/cs_2y),
             collapse classes to binary VS vs MCS:
@@ -299,6 +317,13 @@ class BaselineClassifier:
         death_binary : bool
             If True and target is an outcome score, collapse to binary
             DEATH vs NON_DEATH (all subjects included).
+        binary_improvement : bool
+            If True and target is an outcome score, assign IMPROVED/NON_IMPROVED
+            across all subjects: VS baseline improves to MCS/CONSCIOUS; MCS
+            baseline improves only to CONSCIOUS. Populates _baseline_states_dict.
+        baseline_filter : str or None
+            If 'VS', restrict etiology/etiology_code to UWS-baseline subjects only.
+            If 'MCS', restrict to MCS+/MCS- baseline subjects only.
 
         Returns
         -------
@@ -338,12 +363,24 @@ class BaselineClassifier:
 
         elif target == "etiology":
             col = "etiology_medical_condition"
+            _BL_VS = {"UWS"}
+            _BL_MCS = {"MCS+", "MCS-"}
             for _, row in df.iterrows():
                 subject = row["subject"]
                 session = f"ses-{int(row['session']):02d}"
                 val = row[col]
                 if pd.isna(val) or str(val).strip().lower() in ("n/a", ""):
                     continue
+                if baseline_filter is not None:
+                    bl = row.get("diagnostic_crs_final", None)
+                    if baseline_filter == "VS" and (
+                        pd.isna(bl) or str(bl).strip() not in _BL_VS
+                    ):
+                        continue
+                    if baseline_filter == "MCS" and (
+                        pd.isna(bl) or str(bl).strip() not in _BL_MCS
+                    ):
+                        continue
                 label = str(val).strip().lower()
                 key = f"{subject}_{session}"
                 labels_dict[key] = label
@@ -352,12 +389,24 @@ class BaselineClassifier:
 
         elif target == "etiology_code":
             col = "etiology_code"
+            _BL_VS = {"UWS"}
+            _BL_MCS = {"MCS+", "MCS-"}
             for _, row in df.iterrows():
                 subject = row["subject"]
                 session = f"ses-{int(row['session']):02d}"
                 val = row[col]
                 if pd.isna(val) or str(val).strip().lower() in ("n/a", ""):
                     continue
+                if baseline_filter is not None:
+                    bl = row.get("diagnostic_crs_final", None)
+                    if baseline_filter == "VS" and (
+                        pd.isna(bl) or str(bl).strip() not in _BL_VS
+                    ):
+                        continue
+                    if baseline_filter == "MCS" and (
+                        pd.isna(bl) or str(bl).strip() not in _BL_MCS
+                    ):
+                        continue
                 label = str(val).strip().lower()
                 if label in ("anoxia",):
                     label = "ANOXIA"
@@ -383,8 +432,27 @@ class BaselineClassifier:
                 if pd.isna(val) or str(val).strip().lower() in ("n/a", ""):
                     continue
                 label = str(val).strip()
-                if vs_to_mcs:
-                    baseline_state = row["diagnostic_crs_final"]
+                if binary_improvement:
+                    baseline = row.get("diagnostic_crs_final", None)
+                    if pd.isna(baseline):
+                        continue
+                    bl_str = str(baseline).strip()
+                    if bl_str == "UWS":
+                        baseline_state = "VS"
+                        if label in _MCS_STATES or label == "CONSCIOUS":
+                            label = "IMPROVED"
+                        else:
+                            label = "NON_IMPROVED"
+                    elif bl_str in ("MCS+", "MCS-"):
+                        baseline_state = "MCS"
+                        if label == "CONSCIOUS":
+                            label = "IMPROVED"
+                        else:
+                            label = "NON_IMPROVED"
+                    else:
+                        continue  # unknown baseline state, skip
+                elif vs_to_mcs:
+                    baseline_state = row.get("diagnostic_crs_final", None)
                     if pd.isna(baseline_state) or str(baseline_state).strip() != "UWS":
                         continue  # only baseline VS subjects
                     if label in _MCS_STATES or label == "CONSCIOUS":
@@ -392,7 +460,7 @@ class BaselineClassifier:
                     else:
                         label = "OTHER"
                 elif mcs_to_conscious:
-                    baseline_state = row["diagnostic_crs_final"]
+                    baseline_state = row.get("diagnostic_crs_final", None)
                     if pd.isna(baseline_state) or str(baseline_state).strip() not in (
                         "MCS+",
                         "MCS-",
@@ -426,7 +494,17 @@ class BaselineClassifier:
                 key = f"{subject}_{session}"
                 labels_dict[key] = label
                 available_states.add(label)
-            is_binary = binary_outcome or death_binary or vs_to_mcs or mcs_to_conscious
+                if binary_improvement:
+                    if self._baseline_states_dict is None:
+                        self._baseline_states_dict = {}
+                    self._baseline_states_dict[key] = baseline_state
+            is_binary = (
+                binary_outcome
+                or death_binary
+                or vs_to_mcs
+                or mcs_to_conscious
+                or binary_improvement
+            )
 
         else:
             raise ValueError(f"Unknown target: {target!r}")
@@ -445,6 +523,8 @@ class BaselineClassifier:
         death_binary=False,
         vs_to_mcs=False,
         mcs_to_conscious=False,
+        binary_improvement=False,
+        baseline_filter=None,
     ):
         """Build X, y, subjects arrays for a given prediction target.
 
@@ -457,6 +537,12 @@ class BaselineClassifier:
         death_binary : bool
             Passed through to ``load_labels_for_target``; collapses outcome
             classes to binary DEATH/NON_DEATH when True.
+        binary_improvement : bool
+            Passed through to ``load_labels_for_target``; builds IMPROVED/NON_IMPROVED
+            labels across all baseline states.
+        baseline_filter : str or None
+            Passed through to ``load_labels_for_target``; restricts etiology samples
+            to 'VS' or 'MCS' baseline subjects.
 
         Returns
         -------
@@ -467,6 +553,8 @@ class BaselineClassifier:
         """
         print("Collecting data ...", flush=True)
 
+        self._baseline_states_dict = None  # reset before each collect_data call
+
         features_dict, feature_names, groups_dict = self.load_scalars()
         labels_dict, class_names, is_binary = self.load_labels_for_target(
             target,
@@ -474,6 +562,8 @@ class BaselineClassifier:
             death_binary=death_binary,
             vs_to_mcs=vs_to_mcs,
             mcs_to_conscious=mcs_to_conscious,
+            binary_improvement=binary_improvement,
+            baseline_filter=baseline_filter,
         )
 
         self.feature_names = feature_names
@@ -510,6 +600,14 @@ class BaselineClassifier:
         self.X = np.array(X_list)
         self.y = np.array(y_list)
         self.subjects = subjects_list
+
+        # Build baseline_states array for binary_improvement CV stratification
+        if self._baseline_states_dict is not None:
+            self.baseline_states = [
+                self._baseline_states_dict.get(s, "UNKNOWN") for s in subjects_list
+            ]
+        else:
+            self.baseline_states = None
 
         self.label_encoder = LabelEncoder()
         self.y_encoded = self.label_encoder.fit_transform(self.y)
@@ -1299,6 +1397,8 @@ class BaselineClassifier:
         death_binary=False,
         vs_to_mcs=False,
         mcs_to_conscious=False,
+        binary_improvement=False,
+        baseline_filter=None,
     ):
         """Classic single-split: GroupShuffleSplit outer, inner grid search.
 
@@ -1310,13 +1410,25 @@ class BaselineClassifier:
             If True, collapses outcome classes to binary VS/MCS.
         death_binary : bool
             If True, collapses outcome classes to binary DEATH/NON_DEATH.
+        binary_improvement : bool
+            If True, builds IMPROVED/NON_IMPROVED labels across all baseline states.
+        baseline_filter : str or None
+            If 'VS' or 'MCS', restrict etiology samples to that baseline group.
         """
-        if death_binary:
+        if binary_improvement:
+            mode_tag = " [binary_improvement]"
+        elif death_binary:
             mode_tag = " [binary_death]"
         elif binary_outcome:
             mode_tag = " [binary]"
+        elif vs_to_mcs:
+            mode_tag = " [binary_vs_to_mcs]"
+        elif mcs_to_conscious:
+            mode_tag = " [binary_mcs_to_conscious]"
         else:
             mode_tag = ""
+        if baseline_filter:
+            mode_tag += f" [{baseline_filter.lower()}_only]"
         print("=" * 80, flush=True)
         print(
             f"MARKER BASELINE — Classic Split | target={target}{mode_tag} | "
@@ -1333,6 +1445,8 @@ class BaselineClassifier:
             death_binary=death_binary,
             vs_to_mcs=vs_to_mcs,
             mcs_to_conscious=mcs_to_conscious,
+            binary_improvement=binary_improvement,
+            baseline_filter=baseline_filter,
         )
 
         unique_groups = np.unique(groups)
@@ -1590,6 +1704,8 @@ class BaselineClassifier:
         death_binary=False,
         vs_to_mcs=False,
         mcs_to_conscious=False,
+        binary_improvement=False,
+        baseline_filter=None,
         precomputed_splits=None,
         common_sessions=None,
     ):
@@ -1602,6 +1718,11 @@ class BaselineClassifier:
             If True, collapses outcome classes to binary VS/MCS.
         death_binary : bool
             If True, collapses outcome classes to binary DEATH/NON_DEATH.
+        binary_improvement : bool
+            If True, builds IMPROVED/NON_IMPROVED labels; CV is stratified by
+            baseline state (VS/MCS) to ensure balanced folds.
+        baseline_filter : str or None
+            If 'VS' or 'MCS', restrict etiology samples to that baseline group.
         precomputed_splits:
             Optional list of fold dicts from :func:`cv_utils.generate_nested_cv_folds`.
             When provided (with *common_sessions*), all models use identical fold
@@ -1611,12 +1732,20 @@ class BaselineClassifier:
             Required when *precomputed_splits* is not None.
         """
         n_folds = self.n_cv_folds
-        if death_binary:
+        if binary_improvement:
+            mode_tag = " [binary_improvement]"
+        elif death_binary:
             mode_tag = " [binary_death]"
         elif binary_outcome:
             mode_tag = " [binary]"
+        elif vs_to_mcs:
+            mode_tag = " [binary_vs_to_mcs]"
+        elif mcs_to_conscious:
+            mode_tag = " [binary_mcs_to_conscious]"
         else:
             mode_tag = ""
+        if baseline_filter:
+            mode_tag += f" [{baseline_filter.lower()}_only]"
 
         print("=" * 80, flush=True)
         print(
@@ -1634,22 +1763,57 @@ class BaselineClassifier:
             death_binary=death_binary,
             vs_to_mcs=vs_to_mcs,
             mcs_to_conscious=mcs_to_conscious,
+            binary_improvement=binary_improvement,
+            baseline_filter=baseline_filter,
         )
 
         # Filter and reorder to common session pool when precomputed splits provided.
+        # Outcome targets have fewer sessions than the CRS pool used to build the
+        # splits — silently use the intersection and remap fold indices rather than
+        # raising an error.
         if common_sessions is not None:
             session_to_idx = {s: i for i, s in enumerate(subjects)}
-            missing = [s for s in common_sessions if s not in session_to_idx]
-            if missing:
-                raise ValueError(
-                    f"{len(missing)} common sessions missing from DK baseline: "
-                    f"{missing[:5]}{'...' if len(missing) > 5 else ''}"
+            missing_count = sum(1 for s in common_sessions if s not in session_to_idx)
+            if missing_count:
+                print(
+                    f"   Note: {missing_count} of {len(common_sessions)} common sessions "
+                    f"not available for target '{target}' — using intersection only.",
+                    flush=True,
                 )
-            keep = [session_to_idx[s] for s in common_sessions]
+            filtered_common = [s for s in common_sessions if s in session_to_idx]
+            keep = [session_to_idx[s] for s in filtered_common]
             X = X[keep]
             y = y[keep]
+            if self.baseline_states is not None:
+                self.baseline_states = [self.baseline_states[i] for i in keep]
             subjects = [subjects[i] for i in keep]
             groups = groups[keep]
+
+            # Remap precomputed fold indices from the full common_sessions ordering
+            # to the filtered ordering so they remain valid for this target.
+            if precomputed_splits is not None:
+                old_pos = {s: i for i, s in enumerate(common_sessions)}
+                old_to_new = {
+                    old_pos[s]: new_i for new_i, s in enumerate(filtered_common)
+                }
+                remapped = []
+                for fold in precomputed_splits:
+                    new_train = np.array(
+                        [old_to_new[i] for i in fold["train_idx"] if i in old_to_new],
+                        dtype=int,
+                    )
+                    new_test = np.array(
+                        [old_to_new[i] for i in fold["test_idx"] if i in old_to_new],
+                        dtype=int,
+                    )
+                    remapped.append(
+                        {
+                            "train_idx": new_train,
+                            "test_idx": new_test,
+                            "inner_splits": None,  # recomputed per fold
+                        }
+                    )
+                precomputed_splits = remapped
 
         unique_groups = np.unique(groups)
         n_unique = len(unique_groups)
@@ -1685,8 +1849,16 @@ class BaselineClassifier:
                 )
             else:
                 sgkf = GroupKFold(n_splits=effective_folds)
+            # For binary_improvement, stratify by baseline state (VS/MCS) so
+            # each fold has a representative mix of initial conditions.
+            if binary_improvement and self.baseline_states is not None:
+                from sklearn.preprocessing import LabelEncoder as _LE
+
+                stratify_y = _LE().fit_transform(self.baseline_states)
+            else:
+                stratify_y = y
             folds = []
-            for tr_idx, te_idx in sgkf.split(X, y, groups=groups):
+            for tr_idx, te_idx in sgkf.split(X, stratify_y, groups=groups):
                 folds.append(
                     {
                         "train_idx": tr_idx,
@@ -1969,13 +2141,20 @@ class BaselineClassifier:
     ):
         """Run classification for all targets.
 
-        For binary targets (crs, etiology, etiology_code) a single run is used.
-        For outcome targets (cs_6m, cs_1y, cs_2y) five runs are performed:
+        For outcome targets (cs_6m, cs_1y, cs_2y) six runs are performed:
           - ``{target}/multiclass/``              — full multi-class
           - ``{target}/binary/``                  — VS vs MCS binary collapse
           - ``{target}/binary_death/``            — DEATH vs NON_DEATH
-          - ``{target}/binary_vs_to_mcs/``        — VS→MCS transition
-          - ``{target}/binary_mcs_to_conscious/`` — MCS→CONSCIOUS transition
+          - ``{target}/binary_vs_to_mcs/``        — VS→MCS transition only
+          - ``{target}/binary_mcs_to_conscious/`` — MCS→CONSCIOUS transition only
+          - ``{target}/binary_improvement/``      — IMPROVED vs NON_IMPROVED (all)
+
+        For etiology targets (etiology, etiology_code) three runs are performed:
+          - ``{target}/``          — all subjects
+          - ``{target}/vs_only/``  — UWS baseline subjects only
+          - ``{target}/mcs_only/`` — MCS+/MCS- baseline subjects only
+
+        For the crs target a single run is used.
 
         Parameters
         ----------
@@ -1984,6 +2163,7 @@ class BaselineClassifier:
             assignments (CRS-based, shared across targets).
         """
         _OUTCOME_TARGETS = {"cs_6m", "cs_1y", "cs_2y"}
+        _ETIOLOGY_TARGETS = {"etiology", "etiology_code"}
         base_output_dir = self.output_dir
 
         for target in TARGETS:
@@ -1993,12 +2173,14 @@ class BaselineClassifier:
 
             if target in _OUTCOME_TARGETS:
                 modes = [
-                    # (mode_name, binary_outcome, death_binary, vs_to_mcs, mcs_to_conscious)
-                    ("multiclass", False, False, False, False),
-                    ("binary", True, False, False, False),
-                    ("binary_death", False, True, False, False),
-                    ("binary_vs_to_mcs", False, False, True, False),
-                    ("binary_mcs_to_conscious", False, False, False, True),
+                    # (mode_name, binary_outcome, death_binary, vs_to_mcs,
+                    #  mcs_to_conscious, binary_improvement, baseline_filter)
+                    ("multiclass", False, False, False, False, False, None),
+                    ("binary", True, False, False, False, False, None),
+                    ("binary_death", False, True, False, False, False, None),
+                    ("binary_vs_to_mcs", False, False, True, False, False, None),
+                    ("binary_mcs_to_conscious", False, False, False, True, False, None),
+                    ("binary_improvement", False, False, False, False, True, None),
                 ]
                 for (
                     mode,
@@ -2006,6 +2188,8 @@ class BaselineClassifier:
                     death_binary,
                     vs_to_mcs,
                     mcs_to_conscious,
+                    binary_improvement,
+                    baseline_filter,
                 ) in modes:
                     print(f"\n--- {target} / {mode} ---", flush=True)
                     self.output_dir = op.join(base_output_dir, target, mode)
@@ -2018,6 +2202,8 @@ class BaselineClassifier:
                                 death_binary=death_binary,
                                 vs_to_mcs=vs_to_mcs,
                                 mcs_to_conscious=mcs_to_conscious,
+                                binary_improvement=binary_improvement,
+                                baseline_filter=baseline_filter,
                                 precomputed_splits=precomputed_splits,
                                 common_sessions=common_sessions,
                             )
@@ -2029,12 +2215,49 @@ class BaselineClassifier:
                                 death_binary=death_binary,
                                 vs_to_mcs=vs_to_mcs,
                                 mcs_to_conscious=mcs_to_conscious,
+                                binary_improvement=binary_improvement,
+                                baseline_filter=baseline_filter,
                             )
                     except ValueError as exc:
                         print(
                             f"   Skipping target '{target}' ({mode}): {exc}",
                             flush=True,
                         )
+
+            elif target in _ETIOLOGY_TARGETS:
+                etiology_modes = [
+                    # (mode_name, baseline_filter)
+                    ("", None),
+                    ("vs_only", "VS"),
+                    ("mcs_only", "MCS"),
+                ]
+                for mode_name, bl_filter in etiology_modes:
+                    subdir = (
+                        op.join(base_output_dir, target, mode_name)
+                        if mode_name
+                        else op.join(base_output_dir, target)
+                    )
+                    label = f" / {mode_name}" if mode_name else ""
+                    print(f"\n--- {target}{label} ---", flush=True)
+                    self.output_dir = subdir
+                    os.makedirs(self.output_dir, exist_ok=True)
+                    try:
+                        if self.full_cv:
+                            self.run_full_cv(
+                                target,
+                                baseline_filter=bl_filter,
+                                precomputed_splits=precomputed_splits,
+                                common_sessions=common_sessions,
+                            )
+                        else:
+                            self.run_classification(
+                                target,
+                                test_size,
+                                baseline_filter=bl_filter,
+                            )
+                    except ValueError as exc:
+                        print(f"   Skipping target '{target}'{label}: {exc}", flush=True)
+
             else:
                 self.output_dir = op.join(base_output_dir, target)
                 os.makedirs(self.output_dir, exist_ok=True)
