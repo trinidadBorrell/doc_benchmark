@@ -5,7 +5,7 @@ Linear Probing — Ridge Regression & Nested CV Classification
 ===========================================================
 
 This script probes multi-layer embeddings from foundation models (CbraMod,
-NeuroLM) in two complementary ways:
+NeuroLM, LaBram) in two complementary ways:
 
 1. **Ridge Regression** (per layer):
    For each marker, train a Ridge regressor that predicts the marker scalar
@@ -135,7 +135,7 @@ LAST_LAYER_RESULT_DIRS = {
     "LaBram": "LaBram",
 }
 
-MULTILAYER_MODELS = ["CbraMod", "NeuroLM"]
+MULTILAYER_MODELS = ["CbraMod", "NeuroLM", "LaBram"]
 LAST_LAYER_MODELS = ["CbraMod", "NeuroLM", "TOTEM", "LaBram"]
 
 MODEL_LAYER_KEYS = {
@@ -158,16 +158,66 @@ MODEL_LAYER_KEYS = {
     },
     "NeuroLM": {
         "data_subdir": "NeuroLM/multi_layer_embeddings",
-        "layers": ["vq_emb", "gpt_0", "gpt_3", "gpt_6", "gpt_9", "gpt_11"],
+        "layers": [
+            # VQ encoder
+            "vq_emb",
+            "vq_enc_patch_emb",
+            "vq_enc_block_2", "vq_enc_block_5", "vq_enc_block_8", "vq_enc_block_11",
+            # VQ quantizer
+            "vq_encode_task", "vq_quantize",
+            # VQ decoder (freq pathway, 4 blocks total)
+            "vq_dec_freq_block_0", "vq_dec_freq_block_1",
+            "vq_dec_freq_block_2", "vq_dec_freq_block_3",
+            # GPT-2 backbone
+            "gpt_0", "gpt_3", "gpt_6", "gpt_9", "gpt_11",
+        ],
         # Raw shape: (n_tokens, n_channels, emb_dim)
         # Disk pool: mean over tokens -> (n_channels, emb_dim)
         # RAM pool:  mean over channels -> (emb_dim,)
         "disk_pool_axes": (0,),
         "n_channels": 256,
-        # vq_emb has a different embedding dim (768) than the GPT layers (1024).
-        # Use a dict for per-layer overrides; scalar is the default.
+        # GPT layers are 1024-dim; VQ encoder/decoder blocks are 768-dim;
+        # quantizer layers are 128-dim.
         "emb_dim": 1024,
-        "emb_dim_override": {"vq_emb": 768},
+        "emb_dim_override": {
+            "vq_emb": 768,
+            "vq_enc_patch_emb": 768,
+            "vq_enc_block_2": 768, "vq_enc_block_5": 768,
+            "vq_enc_block_8": 768, "vq_enc_block_11": 768,
+            "vq_encode_task": 128, "vq_quantize": 128,
+            "vq_dec_freq_block_0": 768, "vq_dec_freq_block_1": 768,
+            "vq_dec_freq_block_2": 768, "vq_dec_freq_block_3": 768,
+        },
+    },
+    "LaBram": {
+        "data_subdir": "LaBram/multi_layer_embeddings",
+        "layers": [
+            "vqnsp_enc_patch_embed",
+            "vqnsp_enc_block_2",
+            "vqnsp_enc_block_5",
+            "vqnsp_enc_block_8",
+            "vqnsp_enc_block_11",
+            "vqnsp_encode_task",
+            "vqnsp_quantize",
+            "vqnsp_dec_block_0",
+            "vqnsp_dec_block_1",
+            "vqnsp_dec_block_2",
+            "vqnsp_decode_task",
+            "labram_patch_embed",
+            "labram_block_2",
+            "labram_block_5",
+            "labram_block_8",
+            "labram_block_11",
+            "labram_norm",
+        ],
+        # Embeddings are pre-pooled 1-D vectors; no axis pooling is needed.
+        # Shape per layer: (200,) for most, (64,) for encode/quantize tasks.
+        "no_pooling": True,
+        "emb_dim": 200,
+        "emb_dim_override": {
+            "vqnsp_encode_task": 64,
+            "vqnsp_quantize": 64,
+        },
     },
 }
 
@@ -428,13 +478,20 @@ class LinearProber:
                     continue
                 arr = npz[layer_key]
                 raw_shape = arr.shape
-                pooled = arr.mean(axis=config["disk_pool_axes"])
-                pooled = np.asarray(pooled, dtype=np.float32)
-                print(
-                    f"      [POOL] {layer_key}: {raw_shape} "
-                    f"--mean(axis={config['disk_pool_axes']})--> {pooled.shape}",
-                    flush=True,
-                )
+                if config.get("no_pooling"):
+                    pooled = np.asarray(arr, dtype=np.float32)
+                    print(
+                        f"      [NO_POOL] {layer_key}: {raw_shape} (stored as-is)",
+                        flush=True,
+                    )
+                else:
+                    pooled = arr.mean(axis=config["disk_pool_axes"])
+                    pooled = np.asarray(pooled, dtype=np.float32)
+                    print(
+                        f"      [POOL] {layer_key}: {raw_shape} "
+                        f"--mean(axis={config['disk_pool_axes']})--> {pooled.shape}",
+                        flush=True,
+                    )
                 result[layer_key] = pooled
         finally:
             if hasattr(npz, "close"):
@@ -460,7 +517,14 @@ class LinearProber:
         cache_root = op.join(self.output_dir, "pooled_embeddings", model_name)
 
         if not op.isdir(emb_dir):
-            print(f"   [WARN] Embedding dir not found: {emb_dir}", flush=True)
+            if op.isdir(cache_root):
+                print(
+                    f"   [{model_name}] Raw embeddings not found at {emb_dir}; "
+                    f"using existing cache at {cache_root}",
+                    flush=True,
+                )
+            else:
+                print(f"   [WARN] Embedding dir not found: {emb_dir}", flush=True)
             return
 
         _dim_note = (
@@ -468,13 +532,20 @@ class LinearProber:
             if config.get("emb_dim_override")
             else str(config["emb_dim"])
         )
-        print(
-            f"   [{model_name}] Pooling strategy: "
-            f"disk_pool_axes={config['disk_pool_axes']} -> "
-            f"saved shape per layer = ({config['n_channels']}, emb_dim={_dim_note}), "
-            f"channel pooling deferred to RAM",
-            flush=True,
-        )
+        if config.get("no_pooling"):
+            print(
+                f"   [{model_name}] Pooling strategy: no_pooling=True -> "
+                f"embeddings stored as-is, emb_dim={_dim_note}",
+                flush=True,
+            )
+        else:
+            print(
+                f"   [{model_name}] Pooling strategy: "
+                f"disk_pool_axes={config['disk_pool_axes']} -> "
+                f"saved shape per layer = ({config['n_channels']}, emb_dim={_dim_note}), "
+                f"channel pooling deferred to RAM",
+                flush=True,
+            )
 
         n_cached = 0
         n_pooled = 0
@@ -578,8 +649,12 @@ class LinearProber:
             )
             return embeddings
 
+        no_pooling = config.get("no_pooling", False)
         layer_emb_dim = config.get("emb_dim_override", {}).get(layer_key, config["emb_dim"])
-        expected_disk_shape = (config["n_channels"], layer_emb_dim)
+        if no_pooling:
+            expected_disk_shape = (layer_emb_dim,)
+        else:
+            expected_disk_shape = (config["n_channels"], layer_emb_dim)
         n_loaded = 0
 
         for sub_dir in sorted(os.listdir(cache_root)):
@@ -607,8 +682,10 @@ class LinearProber:
                             flush=True,
                         )
                         continue
-                    # Channel pooling in RAM
-                    vec = arr.mean(axis=0)  # (n_channels, emb_dim) -> (emb_dim,)
+                    if no_pooling:
+                        vec = arr  # already (emb_dim,)
+                    else:
+                        vec = arr.mean(axis=0)  # (n_channels, emb_dim) -> (emb_dim,)
                     key = f"{subject_id}_{ses_dir}"
                     embeddings[key] = vec
                     n_loaded += 1
@@ -618,11 +695,18 @@ class LinearProber:
                         flush=True,
                     )
 
-        print(
-            f"   [{model_name}/{layer_key}] Loaded {n_loaded} subjects: "
-            f"disk {expected_disk_shape} --mean(axis=0)--> ({layer_emb_dim},)",
-            flush=True,
-        )
+        if no_pooling:
+            print(
+                f"   [{model_name}/{layer_key}] Loaded {n_loaded} subjects: "
+                f"shape {expected_disk_shape} (no channel pooling)",
+                flush=True,
+            )
+        else:
+            print(
+                f"   [{model_name}/{layer_key}] Loaded {n_loaded} subjects: "
+                f"disk {expected_disk_shape} --mean(axis=0)--> ({layer_emb_dim},)",
+                flush=True,
+            )
         return embeddings
 
     # ------------------------------------------------------------------

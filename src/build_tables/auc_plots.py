@@ -90,6 +90,15 @@ _OTHER_TASKS = [
     {"metric": "cs_1y/binary_mcs_to_conscious","metric_path": "cs_1y/binary_mcs_to_conscious"},
     {"metric": "cs_2y/binary_mcs_to_conscious","metric_path": "cs_2y/binary_mcs_to_conscious"},
     {"metric": "cs_6m/binary_mcs_to_conscious","metric_path": "cs_6m/binary_mcs_to_conscious"},
+    # Binary improvement: IMPROVED vs NON_IMPROVED (all baseline states)
+    {"metric": "cs_1y/binary_improvement",     "metric_path": "cs_1y/binary_improvement"},
+    {"metric": "cs_2y/binary_improvement",     "metric_path": "cs_2y/binary_improvement"},
+    {"metric": "cs_6m/binary_improvement",     "metric_path": "cs_6m/binary_improvement"},
+    # Etiology filtered by baseline state
+    {"metric": "etiology/vs_only",             "metric_path": "etiology/vs_only"},
+    {"metric": "etiology/mcs_only",            "metric_path": "etiology/mcs_only"},
+    {"metric": "etiology_code/vs_only",        "metric_path": "etiology_code/vs_only"},
+    {"metric": "etiology_code/mcs_only",       "metric_path": "etiology_code/mcs_only"},
 ]
 
 _METRIC_TITLE = {
@@ -105,6 +114,13 @@ _METRIC_TITLE = {
     "cs_1y/binary_mcs_to_conscious": "CS 1Y — MCS to Conscious",
     "cs_2y/binary_mcs_to_conscious": "CS 2Y — MCS to Conscious",
     "cs_6m/binary_mcs_to_conscious": "CS 6M — MCS to Conscious",
+    "cs_1y/binary_improvement":      "CS 1Y — Improvement",
+    "cs_2y/binary_improvement":      "CS 2Y — Improvement",
+    "cs_6m/binary_improvement":      "CS 6M — Improvement",
+    "etiology/vs_only":              "Etiology (VS only)",
+    "etiology/mcs_only":             "Etiology (MCS only)",
+    "etiology_code/vs_only":         "Etiology Code (VS only)",
+    "etiology_code/mcs_only":        "Etiology Code (MCS only)",
 }
 
 # ── Score reading ──────────────────────────────────────────────────────────────

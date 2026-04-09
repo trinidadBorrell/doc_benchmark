@@ -61,6 +61,43 @@ TASKS = [
         "metric_path": "cs_6m/binary_mcs_to_conscious",
         "variant": "binary_mcs_to_conscious",
     },
+    # Binary improvement: IMPROVED vs NON_IMPROVED (all baseline states)
+    {
+        "metric": "cs_1y/binary_improvement",
+        "metric_path": "cs_1y/binary_improvement",
+        "variant": "binary_improvement",
+    },
+    {
+        "metric": "cs_2y/binary_improvement",
+        "metric_path": "cs_2y/binary_improvement",
+        "variant": "binary_improvement",
+    },
+    {
+        "metric": "cs_6m/binary_improvement",
+        "metric_path": "cs_6m/binary_improvement",
+        "variant": "binary_improvement",
+    },
+    # Etiology filtered by baseline state
+    {
+        "metric": "etiology/vs_only",
+        "metric_path": "etiology/vs_only",
+        "variant": "etiology_vs_only",
+    },
+    {
+        "metric": "etiology/mcs_only",
+        "metric_path": "etiology/mcs_only",
+        "variant": "etiology_mcs_only",
+    },
+    {
+        "metric": "etiology_code/vs_only",
+        "metric_path": "etiology_code/vs_only",
+        "variant": "etiology_code_vs_only",
+    },
+    {
+        "metric": "etiology_code/mcs_only",
+        "metric_path": "etiology_code/mcs_only",
+        "variant": "etiology_code_mcs_only",
+    },
 ]
 
 MODELS = ["MARKER_BASELINE", "TOTEM", "CBraMod", "LaBram", "NeuroLM"]
@@ -87,6 +124,13 @@ METRIC_TITLE = {
     "cs_1y/binary_mcs_to_conscious": "CS 1Y - Binary MCS to Conscious",
     "cs_2y/binary_mcs_to_conscious": "CS 2Y - Binary MCS to Conscious",
     "cs_6m/binary_mcs_to_conscious": "CS 6M - Binary MCS to Conscious",
+    "cs_1y/binary_improvement": "CS 1Y - Improvement",
+    "cs_2y/binary_improvement": "CS 2Y - Improvement",
+    "cs_6m/binary_improvement": "CS 6M - Improvement",
+    "etiology/vs_only": "Etiology (VS only)",
+    "etiology/mcs_only": "Etiology (MCS only)",
+    "etiology_code/vs_only": "Etiology Code (VS only)",
+    "etiology_code/mcs_only": "Etiology Code (MCS only)",
 }
 
 CLASSIFIER_ORDER = ["svm", "mlp", "kernel_ridge", "random_forest"]

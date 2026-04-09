@@ -43,6 +43,25 @@ plt.rcParams["figure.dpi"] = 120
 MODEL_LAYERS = {
     "CbraMod": ["patch_emb", "layer_0", "layer_3", "layer_6", "layer_9", "layer_11"],
     "NeuroLM": ["vq_emb", "gpt_0", "gpt_3", "gpt_6", "gpt_9", "gpt_11"],
+    "LaBram": [
+        "vqnsp_enc_patch_embed",
+        "vqnsp_enc_block_2",
+        "vqnsp_enc_block_5",
+        "vqnsp_enc_block_8",
+        "vqnsp_enc_block_11",
+        "vqnsp_encode_task",
+        "vqnsp_quantize",
+        "vqnsp_dec_block_0",
+        "vqnsp_dec_block_1",
+        "vqnsp_dec_block_2",
+        "vqnsp_decode_task",
+        "labram_patch_embed",
+        "labram_block_2",
+        "labram_block_5",
+        "labram_block_8",
+        "labram_block_11",
+        "labram_norm",
+    ],
 }
 
 # Accept both spellings in CLI (CbraMod and CBraMod)
@@ -50,6 +69,7 @@ MODEL_ALIASES = {
     "CbraMod": "CbraMod",
     "CBraMod": "CbraMod",
     "NeuroLM": "NeuroLM",
+    "LaBram": "LaBram",
 }
 
 CLF_NAMES = ["svm", "kernel_ridge", "random_forest"]
@@ -70,6 +90,10 @@ EMBEDDING_CLF_PATHS = {
     "NeuroLM": op.join(
         _BENCHMARK_ROOT,
         "NeuroLM/doc_patients/MLP_EMBEDDING/crs/nested_cv",
+    ),
+    "LaBram": op.join(
+        _BENCHMARK_ROOT,
+        "LaBram/doc_patients/MLP_EMBEDDING/crs/nested_cv",
     ),
 }
 
@@ -435,7 +459,7 @@ def main():
     parser.add_argument(
         "--models",
         nargs="+",
-        default=["CbraMod", "NeuroLM"],
+        default=["CbraMod", "NeuroLM", "LaBram"],
         help="Models to include.",
     )
     args = parser.parse_args()

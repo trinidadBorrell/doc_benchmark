@@ -421,6 +421,8 @@ class EmbeddingClassifier:
         death_binary=False,
         vs_to_mcs=False,
         mcs_to_conscious=False,
+        binary_improvement=False,
+        baseline_filter=None,
     ):
         """Load patient labels for a given prediction target.
 
@@ -444,6 +446,16 @@ class EmbeddingClassifier:
         mcs_to_conscious : bool
             If True and target is an outcome score, classify baseline-MCS
             subjects as IMPROVED (outcome CONSCIOUS) vs OTHER.
+        binary_improvement : bool
+            If True and target is an outcome score, classify ALL subjects as
+            IMPROVED (any upward change: VS→MCS/CONSCIOUS or MCS→CONSCIOUS)
+            vs NON_IMPROVED (stayed same, deteriorated, or DEATH).
+            ``self._baseline_states_dict`` is set as a side-effect so that
+            ``run_full_cv`` can stratify folds by initial condition.
+        baseline_filter : str or None
+            If ``'VS'``, restrict etiology/etiology_code to UWS baseline only.
+            If ``'MCS'``, restrict to MCS+/MCS- baseline only.
+            Only applied to etiology and etiology_code targets.
 
         Returns
         -------
@@ -461,6 +473,7 @@ class EmbeddingClassifier:
 
         labels_dict = {}
         available_states = set()
+        self._baseline_states_dict = None  # populated only for binary_improvement
 
         if target == "crs":
             for _, row in df.iterrows():
@@ -482,12 +495,24 @@ class EmbeddingClassifier:
 
         elif target == "etiology":
             col = "etiology_medical_condition"
+            _BL_VS = {"UWS"}
+            _BL_MCS = {"MCS+", "MCS-"}
             for _, row in df.iterrows():
                 subject = row["subject"]
                 session = f"ses-{int(row['session']):02d}"
                 val = row[col]
                 if pd.isna(val) or str(val).strip().lower() in ("n/a", ""):
                     continue
+                if baseline_filter is not None:
+                    bl = row.get("diagnostic_crs_final", None)
+                    if baseline_filter == "VS" and (
+                        pd.isna(bl) or str(bl).strip() not in _BL_VS
+                    ):
+                        continue
+                    if baseline_filter == "MCS" and (
+                        pd.isna(bl) or str(bl).strip() not in _BL_MCS
+                    ):
+                        continue
                 label = str(val).strip().lower()
                 key = f"{subject}_{session}"
                 labels_dict[key] = label
@@ -496,12 +521,24 @@ class EmbeddingClassifier:
 
         elif target == "etiology_code":
             col = "etiology_code"
+            _BL_VS = {"UWS"}
+            _BL_MCS = {"MCS+", "MCS-"}
             for _, row in df.iterrows():
                 subject = row["subject"]
                 session = f"ses-{int(row['session']):02d}"
                 val = row[col]
                 if pd.isna(val) or str(val).strip().lower() in ("n/a", ""):
                     continue
+                if baseline_filter is not None:
+                    bl = row.get("diagnostic_crs_final", None)
+                    if baseline_filter == "VS" and (
+                        pd.isna(bl) or str(bl).strip() not in _BL_VS
+                    ):
+                        continue
+                    if baseline_filter == "MCS" and (
+                        pd.isna(bl) or str(bl).strip() not in _BL_MCS
+                    ):
+                        continue
                 label = str(val).strip().lower()
                 if label == "anoxia":
                     label = "ANOXIA"
@@ -524,7 +561,28 @@ class EmbeddingClassifier:
                 if pd.isna(val) or str(val).strip().lower() in ("n/a", ""):
                     continue
                 label = str(val).strip()
-                if vs_to_mcs:
+                if binary_improvement:
+                    baseline = row.get("diagnostic_crs_final", None)
+                    if pd.isna(baseline):
+                        continue
+                    bl_str = str(baseline).strip()
+                    if bl_str == "UWS":
+                        baseline_state = "VS"
+                        # VS improves if outcome is MCS or CONSCIOUS
+                        if label in _MCS_STATES or label == "CONSCIOUS":
+                            label = "IMPROVED"
+                        else:
+                            label = "NON_IMPROVED"
+                    elif bl_str in ("MCS+", "MCS-"):
+                        baseline_state = "MCS"
+                        # MCS improves only if outcome is CONSCIOUS
+                        if label == "CONSCIOUS":
+                            label = "IMPROVED"
+                        else:
+                            label = "NON_IMPROVED"
+                    else:
+                        continue  # unknown baseline state, skip
+                elif vs_to_mcs:
                     baseline = row.get("diagnostic_crs_final", None)
                     if pd.isna(baseline) or str(baseline).strip() != "UWS":
                         continue  # only baseline VS subjects
@@ -567,7 +625,14 @@ class EmbeddingClassifier:
                 key = f"{subject}_{session}"
                 labels_dict[key] = label
                 available_states.add(label)
-            is_binary = binary_outcome or death_binary or vs_to_mcs or mcs_to_conscious
+                if binary_improvement:
+                    if self._baseline_states_dict is None:
+                        self._baseline_states_dict = {}
+                    self._baseline_states_dict[key] = baseline_state
+            is_binary = (
+                binary_outcome or death_binary or vs_to_mcs or mcs_to_conscious
+                or binary_improvement
+            )
 
         else:
             raise ValueError(f"Unknown target: {target!r}")
@@ -723,6 +788,8 @@ class EmbeddingClassifier:
         death_binary=False,
         vs_to_mcs=False,
         mcs_to_conscious=False,
+        binary_improvement=False,
+        baseline_filter=None,
     ):
         """Match embeddings with labels and build feature / label arrays.
 
@@ -748,6 +815,7 @@ class EmbeddingClassifier:
         """
         print("Collecting data ...", flush=True)
 
+        self.baseline_states = None  # populated for binary_improvement
         if target == "crs" and labels_file is None:
             labels_dict, available_states = self.load_patient_labels()
             self.is_binary = True
@@ -761,6 +829,8 @@ class EmbeddingClassifier:
                     death_binary=death_binary,
                     vs_to_mcs=vs_to_mcs,
                     mcs_to_conscious=mcs_to_conscious,
+                    binary_improvement=binary_improvement,
+                    baseline_filter=baseline_filter,
                 )
             )
 
@@ -820,6 +890,14 @@ class EmbeddingClassifier:
         self.X = np.array(X_list)
         self.y = np.array(y_list)
         self.subjects = subjects_list
+
+        # Build baseline_states array (VS/MCS) for binary_improvement stratification
+        if self._baseline_states_dict is not None:
+            self.baseline_states = [
+                self._baseline_states_dict.get(s, "UNKNOWN") for s in subjects_list
+            ]
+        else:
+            self.baseline_states = None
 
         self.y_encoded = self.label_encoder.fit_transform(self.y)
         self.class_names = self.label_encoder.classes_
@@ -1051,7 +1129,7 @@ class EmbeddingClassifier:
             param_grid,
             cv=inner_splits,
             scoring="balanced_accuracy",
-            n_jobs=-1,
+            n_jobs=1,
             refit=True,
         )
         gs.fit(X_train, y_train)
@@ -1111,7 +1189,7 @@ class EmbeddingClassifier:
                     max_depth=max_d,
                     class_weight="balanced",
                     random_state=self.random_state,
-                    n_jobs=-1,
+                    n_jobs=1,
                 )
                 rf.fit(X_train[tr_idx], y_train[tr_idx])
                 proba = rf.predict_proba(X_train[va_idx])[:, 1]
@@ -1134,7 +1212,7 @@ class EmbeddingClassifier:
             max_depth=best_params["max_depth"],
             class_weight="balanced",
             random_state=self.random_state,
-            n_jobs=-1,
+            n_jobs=1,
         )
         best_model.fit(X_train, y_train)
         return best_model, best_params
@@ -1256,7 +1334,7 @@ class EmbeddingClassifier:
             param_grid,
             cv=inner_splits,
             scoring="balanced_accuracy",
-            n_jobs=-1,
+            n_jobs=1,
             refit=True,
         )
         gs.fit(X_train, y_train)
@@ -1711,6 +1789,8 @@ class EmbeddingClassifier:
         death_binary=False,
         vs_to_mcs=False,
         mcs_to_conscious=False,
+        binary_improvement=False,
+        baseline_filter=None,
     ):
         """Run classification with all 3 models on the same train/test split.
 
@@ -1723,7 +1803,9 @@ class EmbeddingClassifier:
         5. Save results + plots per model
         """
         mode_tag = f" [{target}"
-        if death_binary:
+        if binary_improvement:
+            mode_tag += "  binary_improvement"
+        elif death_binary:
             mode_tag += "  binary_death"
         elif binary_outcome:
             mode_tag += "  binary"
@@ -1731,6 +1813,8 @@ class EmbeddingClassifier:
             mode_tag += "  binary_vs_to_mcs"
         elif mcs_to_conscious:
             mode_tag += "  binary_mcs_to_conscious"
+        if baseline_filter:
+            mode_tag += f"  {baseline_filter.lower()}_only"
         mode_tag += "]"
         print("=" * 80, flush=True)
         print(f"EMBEDDING CLASSIFICATION{mode_tag} — 3 MODELS", flush=True)
@@ -1750,6 +1834,8 @@ class EmbeddingClassifier:
             death_binary=death_binary,
             vs_to_mcs=vs_to_mcs,
             mcs_to_conscious=mcs_to_conscious,
+            binary_improvement=binary_improvement,
+            baseline_filter=baseline_filter,
         )
 
         # 2. Subject groups (prevent leakage)
@@ -1983,6 +2069,8 @@ class EmbeddingClassifier:
         death_binary=False,
         vs_to_mcs=False,
         mcs_to_conscious=False,
+        binary_improvement=False,
+        baseline_filter=None,
         precomputed_splits=None,
         common_sessions=None,
     ):
@@ -2007,7 +2095,9 @@ class EmbeddingClassifier:
         """
         n_folds = self.n_cv_folds
         mode_tag = f" [{target}"
-        if death_binary:
+        if binary_improvement:
+            mode_tag += "  binary_improvement"
+        elif death_binary:
             mode_tag += "  binary_death"
         elif binary_outcome:
             mode_tag += "  binary"
@@ -2015,6 +2105,8 @@ class EmbeddingClassifier:
             mode_tag += "  binary_vs_to_mcs"
         elif mcs_to_conscious:
             mode_tag += "  binary_mcs_to_conscious"
+        if baseline_filter:
+            mode_tag += f"  {baseline_filter.lower()}_only"
         mode_tag += "]"
 
         print("=" * 80, flush=True)
@@ -2037,6 +2129,8 @@ class EmbeddingClassifier:
             death_binary=death_binary,
             vs_to_mcs=vs_to_mcs,
             mcs_to_conscious=mcs_to_conscious,
+            binary_improvement=binary_improvement,
+            baseline_filter=baseline_filter,
         )
 
         # 2. If common_sessions provided, filter + reorder to match the
@@ -2089,10 +2183,16 @@ class EmbeddingClassifier:
                 )
             else:
                 sgkf = GroupKFold(n_splits=effective_folds)
+            # For binary_improvement, stratify by baseline state (VS/MCS) so
+            # each fold has a representative mix of initial conditions.
+            if binary_improvement and self.baseline_states is not None:
+                stratify_y = LabelEncoder().fit_transform(self.baseline_states)
+            else:
+                stratify_y = y
             # Build fold list in the same dict format as cv_utils for
             # uniform handling in the loop below.
             folds = []
-            for tr_idx, te_idx in sgkf.split(X, y, groups=groups):
+            for tr_idx, te_idx in sgkf.split(X, stratify_y, groups=groups):
                 folds.append(
                     {
                         "train_idx": tr_idx,
@@ -2529,12 +2629,17 @@ class EmbeddingClassifier:
         Targets: crs, etiology, etiology_code, cs_6m, cs_1y, cs_2y.
 
         For crs, etiology, etiology_code results land under {output_dir}/{target}/.
-        For outcome targets (cs_6m, cs_1y, cs_2y) five runs are performed:
+        For outcome targets (cs_6m, cs_1y, cs_2y) six runs are performed:
           - {output_dir}/{target}/multiclass/              — 4-class
           - {output_dir}/{target}/binary/                  — VS vs MCS only
           - {output_dir}/{target}/binary_death/            — DEATH vs NON_DEATH
           - {output_dir}/{target}/binary_vs_to_mcs/        — IMPROVED vs OTHER (baseline VS)
           - {output_dir}/{target}/binary_mcs_to_conscious/ — IMPROVED vs OTHER (baseline MCS)
+          - {output_dir}/{target}/binary_improvement/      — IMPROVED vs NON_IMPROVED (all)
+        For etiology/etiology_code three runs are performed:
+          - {output_dir}/{target}/                         — all subjects
+          - {output_dir}/{target}/vs_only/                 — baseline VS only
+          - {output_dir}/{target}/mcs_only/                — baseline MCS only
 
         Parameters
         ----------
@@ -2543,6 +2648,7 @@ class EmbeddingClassifier:
         test_size : float
         """
         _OUTCOME_TARGETS = {"cs_6m", "cs_1y", "cs_2y"}
+        _ETIOLOGY_TARGETS = {"etiology", "etiology_code"}
         targets = ["crs", "etiology", "etiology_code", "cs_6m", "cs_1y", "cs_2y"]
         base_output_dir = self.output_dir
 
@@ -2552,16 +2658,24 @@ class EmbeddingClassifier:
             print(f"{'=' * 80}", flush=True)
 
             if target in _OUTCOME_TARGETS:
-                # (mode_name, binary_outcome, death_binary, vs_to_mcs, mcs_to_conscious)
+                # (mode_name, binary_outcome, death_binary, vs_to_mcs, mcs_to_conscious,
+                #  binary_improvement, baseline_filter)
                 modes = [
-                    ("multiclass", False, False, False, False),
-                    ("binary", True, False, False, False),
-                    ("binary_death", False, True, False, False),
-                    ("binary_vs_to_mcs", False, False, True, False),
-                    ("binary_mcs_to_conscious", False, False, False, True),
+                    ("multiclass", False, False, False, False, False, None),
+                    ("binary", True, False, False, False, False, None),
+                    ("binary_death", False, True, False, False, False, None),
+                    ("binary_vs_to_mcs", False, False, True, False, False, None),
+                    ("binary_mcs_to_conscious", False, False, False, True, False, None),
+                    ("binary_improvement", False, False, False, False, True, None),
+                ]
+            elif target in _ETIOLOGY_TARGETS:
+                modes = [
+                    ("", False, False, False, False, False, None),
+                    ("vs_only", False, False, False, False, False, "VS"),
+                    ("mcs_only", False, False, False, False, False, "MCS"),
                 ]
             else:
-                modes = [("", False, False, False, False)]
+                modes = [("", False, False, False, False, False, None)]
 
             for (
                 mode,
@@ -2569,6 +2683,8 @@ class EmbeddingClassifier:
                 death_binary,
                 vs_to_mcs,
                 mcs_to_conscious,
+                binary_improvement,
+                baseline_filter,
             ) in modes:
                 if mode:
                     print(f"\n--- {target} / {mode} ---", flush=True)
@@ -2586,6 +2702,8 @@ class EmbeddingClassifier:
                             death_binary=death_binary,
                             vs_to_mcs=vs_to_mcs,
                             mcs_to_conscious=mcs_to_conscious,
+                            binary_improvement=binary_improvement,
+                            baseline_filter=baseline_filter,
                         )
                     else:
                         self.run_classification(
@@ -2596,6 +2714,8 @@ class EmbeddingClassifier:
                             death_binary=death_binary,
                             vs_to_mcs=vs_to_mcs,
                             mcs_to_conscious=mcs_to_conscious,
+                            binary_improvement=binary_improvement,
+                            baseline_filter=baseline_filter,
                         )
                 except ValueError as e:
                     label = f"'{target}'" + (f" ({mode})" if mode else "")
@@ -2975,8 +3095,8 @@ Reduction map for --marker-reduction:
     parser.add_argument(
         "--targets",
         nargs="+",
-        default=["crs", "etiology", "cs_6m", "cs_1y", "cs_2y"],
-        choices=["crs", "etiology", "cs_6m", "cs_1y", "cs_2y"],
+        default=["etiology", "cs_6m", "cs_1y", "cs_2y"],
+        choices=["crs", "etiology","etiology_code", "cs_6m", "cs_1y", "cs_2y"],
         help=(
             "Prediction targets to run in multi-model batch mode (default: crs). "
             "Each target gets its own common session pool and split file, "
@@ -2998,6 +3118,30 @@ Reduction map for --marker-reduction:
         help=(
             "Path where the generated common CV splits should be saved. "
             "Only used in batch mode when --splits-file is not given."
+        ),
+    )
+    parser.add_argument(
+        "--batch-modes",
+        nargs="+",
+        default=None,
+        choices=[
+            "multiclass",
+            "binary",
+            "binary_death",
+            "binary_vs_to_mcs",
+            "binary_mcs_to_conscious",
+            "binary_improvement",
+            "vs_only",
+            "mcs_only",
+        ],
+        help=(
+            "Subset of classification modes to run in batch mode. "
+            "By default all modes are run for each target type. "
+            "Outcome targets (cs_6m/cs_1y/cs_2y): multiclass, binary, binary_death, "
+            "binary_vs_to_mcs, binary_mcs_to_conscious, binary_improvement. "
+            "Etiology targets: vs_only, mcs_only (plus all-subjects run). "
+            "Use this to skip already-completed modes, e.g. "
+            "--batch-modes binary_improvement vs_only mcs_only"
         ),
     )
 
@@ -3049,116 +3193,219 @@ Reduction map for --marker-reduction:
         # Loop over targets — each gets its own common pool and split file
         # because label availability differs across targets.
         # ------------------------------------------------------------------
+        _OUTCOME_TARGETS_BATCH = {"cs_6m", "cs_1y", "cs_2y"}
+        _ETIOLOGY_TARGETS_BATCH = {"etiology", "etiology_code"}
+
+        def _build_labels_dict(
+            target, lf, binary_outcome, death_binary, vs_to_mcs, mcs_to_conscious,
+            binary_improvement=False, baseline_filter=None,
+        ):
+            """Return an integer labels dict for cv_utils given a mode.
+
+            For binary_improvement, returns baseline-state labels (VS/MCS → 0/1)
+            so that fold generation stratifies by initial condition rather than
+            by the improvement label itself.
+            """
+            if target == "crs":
+                return load_crs_labels(args.patient_labels)
+            _tmp_clf = EmbeddingClassifier(
+                data_dir=_first_path,
+                patient_labels_file=lf,
+                output_dir="/tmp",
+            )
+            str_labels, _, _ = _tmp_clf.load_patient_labels_for_target(
+                lf,
+                target,
+                binary_outcome=binary_outcome,
+                death_binary=death_binary,
+                vs_to_mcs=vs_to_mcs,
+                mcs_to_conscious=mcs_to_conscious,
+                binary_improvement=binary_improvement,
+                baseline_filter=baseline_filter,
+            )
+            if binary_improvement and _tmp_clf._baseline_states_dict is not None:
+                # Stratify folds by initial condition (VS/MCS), not by
+                # improvement label — ensures each fold has a mix of both.
+                bl_dict = {
+                    k: v for k, v in _tmp_clf._baseline_states_dict.items()
+                    if k in str_labels
+                }
+                _le = LabelEncoder()
+                _keys = list(bl_dict.keys())
+                _ints = _le.fit_transform(list(bl_dict.values()))
+                return {k: int(v) for k, v in zip(_keys, _ints)}
+            _le = LabelEncoder()
+            _keys = list(str_labels.keys())
+            _ints = _le.fit_transform(list(str_labels.values()))
+            return {k: int(v) for k, v in zip(_keys, _ints)}
+
         for target in args.targets:
             print(f"\n{'=' * 80}", flush=True)
             print(f"TARGET: {target}", flush=True)
             print(f"{'=' * 80}", flush=True)
 
-            # Build integer labels dict for cv_utils.
-            if target == "crs":
-                labels_dict = load_crs_labels(args.patient_labels)
-            else:
-                lf = args.patient_labels_full or args.patient_labels
-                _tmp_clf = EmbeddingClassifier(
-                    data_dir=_first_path,
-                    patient_labels_file=lf,
-                    output_dir="/tmp",
-                )
-                str_labels, _, _ = _tmp_clf.load_patient_labels_for_target(lf, target)
-                _le = LabelEncoder()
-                _keys = list(str_labels.keys())
-                _ints = _le.fit_transform(list(str_labels.values()))
-                labels_dict = {k: int(v) for k, v in zip(_keys, _ints)}
-
-            # Build target-specific common session pool.
-            print("\nBuilding common session pool ...", flush=True)
-            common_sessions = build_common_session_pool(source_loaders, labels_dict)
-            print(f"Common pool: {len(common_sessions)} sessions", flush=True)
-
-            # Load pre-computed splits (only honoured for a single-target run to
-            # avoid accidentally reusing splits built for a different label set).
-            if args.splits_file and len(args.targets) > 1:
-                print(
-                    f"[WARNING] --splits-file ignored for target '{target}': "
-                    "splits files encode target-specific labels and sessions, "
-                    "so they can only be used when running a single target. "
-                    f"Pass --targets {target} to reuse this file for one target.",
-                    flush=True,
-                )
-            if (
-                args.splits_file
-                and op.isfile(args.splits_file)
-                and len(args.targets) == 1
-            ):
-                print(
-                    f"Loading pre-computed splits from {args.splits_file}", flush=True
-                )
-                precomputed_splits, common_sessions, labels_dict = load_cv_splits(
-                    args.splits_file
-                )
-            else:
-                print("Generating common nested CV splits ...", flush=True)
-                precomputed_splits = generate_nested_cv_folds(
-                    common_sessions=common_sessions,
-                    labels=labels_dict,
-                    n_outer=args.n_cv_folds,
-                    random_state=args.random_state,
-                )
-                # Always auto-save with timestamp so different runs don't overwrite.
-                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                os.makedirs(splits_save_dir, exist_ok=True)
-                auto_path = op.join(
-                    splits_save_dir, f"mlp_embedding_{target}_{ts}.json"
-                )
-                save_cv_splits(
-                    folds=precomputed_splits,
-                    common_sessions=common_sessions,
-                    labels=labels_dict,
-                    path=auto_path,
-                )
-                print(f"Splits auto-saved to: {auto_path}", flush=True)
-
+            lf = args.patient_labels_full or args.patient_labels
             labels_file_for_target = (
-                args.patient_labels
-                if target == "crs"
-                else (args.patient_labels_full or args.patient_labels)
+                args.patient_labels if target == "crs" else lf
             )
 
-            # Run each model on the target-specific shared splits.
-            for model_name, emb_path in model_dirs.items():
-                print(f"\n{'─' * 60}", flush=True)
-                print(f"Model: {model_name}  |  target: {target}", flush=True)
-                model_out = (
-                    op.join(
-                        args.output_dir,
-                        model_name,
-                        "doc_patients",
-                        "MLP_EMBEDDING",
-                        target,
-                    )
-                    if args.output_dir
-                    else None
-                )
-                if model_out:
-                    os.makedirs(model_out, exist_ok=True)
+            # Determine which classification modes to run for this target.
+            # Each mode is a 7-tuple:
+            # (mode_suffix, binary_outcome, death_binary, vs_to_mcs,
+            #  mcs_to_conscious, binary_improvement, baseline_filter)
+            if target in _OUTCOME_TARGETS_BATCH:
+                all_outcome_modes = [
+                    ("multiclass", False, False, False, False, False, None),
+                    ("binary", True, False, False, False, False, None),
+                    ("binary_death", False, True, False, False, False, None),
+                    ("binary_vs_to_mcs", False, False, True, False, False, None),
+                    ("binary_mcs_to_conscious", False, False, False, True, False, None),
+                    ("binary_improvement", False, False, False, False, True, None),
+                ]
+                if args.batch_modes is not None:
+                    batch_modes = [m for m in all_outcome_modes if m[0] in args.batch_modes]
+                else:
+                    batch_modes = all_outcome_modes
+            elif target in _ETIOLOGY_TARGETS_BATCH:
+                all_etiology_modes = [
+                    ("all", False, False, False, False, False, None),
+                    ("vs_only", False, False, False, False, False, "VS"),
+                    ("mcs_only", False, False, False, False, False, "MCS"),
+                ]
+                if args.batch_modes is not None:
+                    batch_modes = [
+                        m for m in all_etiology_modes
+                        if m[0] == "all" or m[0] in args.batch_modes
+                    ]
+                else:
+                    batch_modes = all_etiology_modes
+            else:
+                batch_modes = [("multiclass", False, False, False, False, False, None)]
 
-                classifier = EmbeddingClassifier(
-                    data_dir=emb_path,
-                    patient_labels_file=labels_file_for_target,
-                    output_dir=model_out,
-                    random_state=args.random_state,
-                    full_cv=True,
-                    n_cv_folds=args.n_cv_folds,
+            for (
+                mode_suffix,
+                binary_outcome,
+                death_binary,
+                vs_to_mcs,
+                mcs_to_conscious,
+                binary_improvement,
+                baseline_filter,
+            ) in batch_modes:
+                print(f"\n  --- Mode: {mode_suffix} ---", flush=True)
+
+                # Build mode-specific integer labels dict.
+                labels_dict = _build_labels_dict(
+                    target, lf, binary_outcome, death_binary, vs_to_mcs,
+                    mcs_to_conscious, binary_improvement, baseline_filter,
                 )
-                try:
-                    classifier.run_full_cv(
-                        target=target,
-                        labels_file=labels_file_for_target if target != "crs" else None,
-                        precomputed_splits=precomputed_splits,
-                        common_sessions=common_sessions,
+
+                # Build mode-specific common session pool.
+                print("\nBuilding common session pool ...", flush=True)
+                common_sessions = build_common_session_pool(source_loaders, labels_dict)
+                print(f"Common pool: {len(common_sessions)} sessions", flush=True)
+
+                # Load pre-computed splits (only honoured for a single-target,
+                # single-mode run — multiclass only — to avoid accidentally reusing
+                # splits built for a different label set or mode).
+                use_splits_file = (
+                    args.splits_file
+                    and op.isfile(args.splits_file)
+                    and len(args.targets) == 1
+                    and mode_suffix == "multiclass"
+                )
+                if args.splits_file and not use_splits_file and mode_suffix == "multiclass":
+                    print(
+                        f"[WARNING] --splits-file ignored for target '{target}': "
+                        "only honoured for single-target multiclass runs.",
+                        flush=True,
                     )
-                except Exception as exc:
-                    print(f"  [FAILED] {model_name}/{target}: {exc}", flush=True)
+                if use_splits_file:
+                    print(
+                        f"Loading pre-computed splits from {args.splits_file}", flush=True
+                    )
+                    precomputed_splits, common_sessions, labels_dict = load_cv_splits(
+                        args.splits_file
+                    )
+                else:
+                    print("Generating common nested CV splits ...", flush=True)
+                    precomputed_splits = generate_nested_cv_folds(
+                        common_sessions=common_sessions,
+                        labels=labels_dict,
+                        n_outer=args.n_cv_folds,
+                        random_state=args.random_state,
+                    )
+                    # Always auto-save with timestamp.
+                    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    os.makedirs(splits_save_dir, exist_ok=True)
+                    auto_path = op.join(
+                        splits_save_dir,
+                        f"mlp_embedding_{target}_{mode_suffix}_{ts}.json",
+                    )
+                    save_cv_splits(
+                        folds=precomputed_splits,
+                        common_sessions=common_sessions,
+                        labels=labels_dict,
+                        path=auto_path,
+                    )
+                    print(f"Splits auto-saved to: {auto_path}", flush=True)
+
+                # Run each model on the mode-specific shared splits.
+                for model_name, emb_path in model_dirs.items():
+                    print(f"\n{'─' * 60}", flush=True)
+                    print(
+                        f"Model: {model_name}  |  target: {target}  |  mode: {mode_suffix}",
+                        flush=True,
+                    )
+                    base_target_out = (
+                        op.join(
+                            args.output_dir,
+                            model_name,
+                            "doc_patients",
+                            "MLP_EMBEDDING",
+                            target,
+                        )
+                        if args.output_dir
+                        else None
+                    )
+                    # Non-multiclass/non-all modes go into a subdirectory so
+                    # they don't overwrite the main results and so that
+                    # build_tables.py can find them at the expected path
+                    # (e.g. .../cs_6m/binary_vs_to_mcs/nested_cv/...).
+                    _no_subdir = mode_suffix in ("multiclass", "all", "")
+                    model_out = (
+                        op.join(base_target_out, mode_suffix)
+                        if base_target_out and not _no_subdir
+                        else base_target_out
+                    )
+                    if model_out:
+                        os.makedirs(model_out, exist_ok=True)
+
+                    classifier = EmbeddingClassifier(
+                        data_dir=emb_path,
+                        patient_labels_file=labels_file_for_target,
+                        output_dir=model_out,
+                        random_state=args.random_state,
+                        full_cv=True,
+                        n_cv_folds=args.n_cv_folds,
+                    )
+                    try:
+                        classifier.run_full_cv(
+                            target=target,
+                            labels_file=labels_file_for_target if target != "crs" else None,
+                            precomputed_splits=precomputed_splits,
+                            common_sessions=common_sessions,
+                            binary_outcome=binary_outcome,
+                            death_binary=death_binary,
+                            vs_to_mcs=vs_to_mcs,
+                            mcs_to_conscious=mcs_to_conscious,
+                            binary_improvement=binary_improvement,
+                            baseline_filter=baseline_filter,
+                        )
+                    except Exception as exc:
+                        print(
+                            f"  [FAILED] {model_name}/{target}/{mode_suffix}: {exc}",
+                            flush=True,
+                        )
 
         return
 

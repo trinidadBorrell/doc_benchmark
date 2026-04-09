@@ -64,6 +64,7 @@ import numpy as np
 import pandas as pd
 from scipy.spatial.distance import pdist, squareform
 from scipy.stats import spearmanr
+from sklearn.neighbors import NearestNeighbors
 from sklearn.preprocessing import StandardScaler
 
 plt.rcParams["font.family"] = "serif"
@@ -116,7 +117,7 @@ def _load_domain_knowledge_embeddings(
             f"Choose from {list(REDUCTION_MAP)}."
         )
     reduction_str = REDUCTION_MAP[reduction_letter]
-    df = pd.read_csv(marker_csv, sep=";")
+    df = pd.read_csv(marker_csv, sep=",")
     df_filt = df[df["Reduction"] == reduction_str].copy()
     if df_filt.empty:
         raise ValueError(f"No rows for Reduction={reduction_str!r} in {marker_csv}")
@@ -346,12 +347,27 @@ def compute_rdm(X: np.ndarray, metric: str = "correlation") -> np.ndarray:
     Parameters
     ----------
     X      : (N, D) embedding matrix
-    metric : distance metric — 'correlation' or 'euclidean'
+    metric : distance metric — 'correlation', 'euclidean', or 'mahalanobis'
+             For 'mahalanobis', SVD-based whitening is used: center X, compute
+             the thin SVD, and return Euclidean distances on the whitened
+             coordinates Z = U[:, :rank] * sqrt(N-1).  This is mathematically
+             equivalent to Mahalanobis distance in the sample subspace and
+             avoids forming the D×D covariance matrix (critical when N << D).
 
     Returns
     -------
     rdm : (N, N) symmetric distance matrix (zeros on diagonal)
     """
+    if metric == "mahalanobis":
+        X_c = X - X.mean(axis=0)
+        n = X_c.shape[0]
+        U, s, _ = np.linalg.svd(X_c, full_matrices=False)
+        tol = s.max() * max(X_c.shape) * np.finfo(float).eps * 10
+        rank = int(np.sum(s > tol))
+        if rank == 0:
+            return np.zeros((n, n))
+        Z = U[:, :rank] * np.sqrt(max(n - 1, 1))
+        return squareform(pdist(Z, metric="euclidean"))
     return squareform(pdist(X, metric=metric))
 
 
@@ -425,6 +441,7 @@ def run_rsa_analysis(
 
     ci_lo = float(np.percentile(boot_rhos, 2.5))
     ci_hi = float(np.percentile(boot_rhos, 97.5))
+    boot_std = float(np.std(boot_rhos))
 
     # Permutation test: permute FM subjects (permutes both rows and cols)
     perm_rhos = []
@@ -450,6 +467,7 @@ def run_rsa_analysis(
         "rho": rho,
         "ci_lower": ci_lo,
         "ci_upper": ci_hi,
+        "boot_std": boot_std,
         "p_perm": p_perm,
         "rho_dk_label": float(rho_dk_label) if not np.isnan(rho_dk_label) else 0.0,
         "rho_fm_label": float(rho_fm_label) if not np.isnan(rho_fm_label) else 0.0,
@@ -532,8 +550,8 @@ def save_rsa_summary(rsa_results_all: Dict[str, Dict], output_dir: str):
 
     fig, ax = plt.subplots(figsize=(max(6, len(models) * 1.5), 5))
     x = np.arange(len(models))
-    err_lo = [rho_vals[i] - ci_lo[i] for i in range(len(models))]
-    err_hi = [ci_hi[i] - rho_vals[i] for i in range(len(models))]
+    err_lo = [max(0.0, rho_vals[i] - ci_lo[i]) for i in range(len(models))]
+    err_hi = [max(0.0, ci_hi[i] - rho_vals[i]) for i in range(len(models))]
     ax.bar(
         x,
         rho_vals,
@@ -785,8 +803,8 @@ def save_cka_summary(cka_results_all: Dict[str, Dict], output_dir: str):
     ci_hi = [cka_results_all[m]["ci_upper"] for m in models]
     fig, ax = plt.subplots(figsize=(max(6, len(models) * 1.5), 5))
     x = np.arange(len(models))
-    err_lo = [cka_vals[i] - ci_lo[i] for i in range(len(models))]
-    err_hi = [ci_hi[i] - cka_vals[i] for i in range(len(models))]
+    err_lo = [max(0.0, cka_vals[i] - ci_lo[i]) for i in range(len(models))]
+    err_hi = [max(0.0, ci_hi[i] - cka_vals[i]) for i in range(len(models))]
     ax.bar(
         x,
         cka_vals,
@@ -1295,6 +1313,544 @@ def save_dimensionality_csv(
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# Component 5 — MKNN (Mutual k-Nearest Neighbors)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def compute_mknn_score(
+    X_dk: np.ndarray,
+    X_fm: np.ndarray,
+    k: int,
+) -> Tuple[float, np.ndarray]:
+    """Mutual k-Nearest Neighbor score between DK and FM spaces.
+
+    For each subject i, find its k nearest neighbors in DK space and in FM
+    space independently (excluding self).  The per-subject MKNN score is the
+    fraction of those neighbors that appear in *both* lists:
+
+        mknn_i(k) = |kNN_DK(i) ∩ kNN_FM(i)| / k
+
+    A score of 1 means the two spaces share the exact same k neighbors for
+    that subject; 0 means no overlap.
+
+    Parameters
+    ----------
+    X_dk : (N, P) domain-knowledge features (no NaNs)
+    X_fm : (N, D) foundation model embeddings
+    k    : number of neighbors
+
+    Returns
+    -------
+    mean_score : float — mean MKNN score across all subjects
+    per_subject : (N,) array of per-subject MKNN scores
+    """
+    n = X_dk.shape[0]
+    k_eff = min(k, n - 1)
+
+    nn_dk = NearestNeighbors(n_neighbors=k_eff + 1, algorithm="auto").fit(X_dk)
+    nn_fm = NearestNeighbors(n_neighbors=k_eff + 1, algorithm="auto").fit(X_fm)
+
+    _, idx_dk = nn_dk.kneighbors(X_dk)  # (N, k_eff+1) — first col is self
+    _, idx_fm = nn_fm.kneighbors(X_fm)
+
+    idx_dk = idx_dk[:, 1:]  # (N, k_eff) — exclude self
+    idx_fm = idx_fm[:, 1:]
+
+    per_subject = np.array(
+        [len(set(idx_dk[i]) & set(idx_fm[i])) / k_eff for i in range(n)]
+    )
+    return float(per_subject.mean()), per_subject
+
+
+def run_mknn_analysis(
+    X_dk: np.ndarray,
+    X_fm: np.ndarray,
+    output_dir: str,
+    fm_model_name: str,
+    k_values: List[int] = None,
+    n_bootstrap: int = 1000,
+    random_state: int = 42,
+) -> Dict:
+    """Run MKNN analysis between DK and FM representation spaces.
+
+    Computes the Mutual k-NN score for each k in k_values with bootstrap CIs.
+
+    Parameters
+    ----------
+    X_dk         : (N, P) domain-knowledge features (no NaNs)
+    X_fm         : (N, D) foundation model embeddings
+    output_dir   : where to save JSON results
+    fm_model_name: e.g. "NeuroLM"
+    k_values     : list of k values to evaluate (default: [10, 20, 30])
+    n_bootstrap  : bootstrap iterations for CI
+    random_state : seed
+
+    Returns
+    -------
+    dict keyed by k (as str), each with mean, ci_lower, ci_upper
+    """
+    if k_values is None:
+        k_values = [10, 20, 30]
+
+    os.makedirs(output_dir, exist_ok=True)
+    n = X_dk.shape[0]
+    rng = np.random.RandomState(random_state)
+
+    results: Dict = {"fm_model_name": fm_model_name, "n_subjects": int(n), "k_results": {}}
+
+    for k in k_values:
+        mean_score, per_subj = compute_mknn_score(X_dk, X_fm, k)
+
+        # Bootstrap CI (resample subjects)
+        boot_scores = []
+        for _ in range(n_bootstrap):
+            idx_b = rng.choice(n, n, replace=True)
+            b_mean, _ = compute_mknn_score(X_dk[idx_b], X_fm[idx_b], k)
+            boot_scores.append(b_mean)
+
+        ci_lo = float(np.percentile(boot_scores, 2.5))
+        ci_hi = float(np.percentile(boot_scores, 97.5))
+        boot_std = float(np.std(boot_scores))
+
+        results["k_results"][str(k)] = {
+            "k": int(k),
+            "mean": float(mean_score),
+            "ci_lower": float(ci_lo),
+            "ci_upper": float(ci_hi),
+            "boot_std": boot_std,
+        }
+        log.info(
+            "MKNN k=%d  mean=%.3f [%.3f, %.3f] — %s",
+            k,
+            mean_score,
+            ci_lo,
+            ci_hi,
+            fm_model_name,
+        )
+
+    out_json = op.join(output_dir, f"mknn_results_{fm_model_name}.json")
+    with open(out_json, "w") as f:
+        json.dump(results, f, indent=2)
+    log.info("MKNN results saved: %s", out_json)
+
+    plots_dir = op.join(op.dirname(output_dir), "plots")
+    os.makedirs(plots_dir, exist_ok=True)
+    _plot_mknn_bar(results, fm_model_name, plots_dir)
+
+    return results
+
+
+def _plot_mknn_bar(results: Dict, fm_model_name: str, plots_dir: str):
+    """Bar plot of MKNN scores for each k value with bootstrap CIs."""
+    k_res = results["k_results"]
+    k_vals = sorted(k_res.keys(), key=int)
+    means = [k_res[k]["mean"] for k in k_vals]
+    ci_lo = [k_res[k]["ci_lower"] for k in k_vals]
+    ci_hi = [k_res[k]["ci_upper"] for k in k_vals]
+
+    x = np.arange(len(k_vals))
+    err_lo = [max(0.0, means[i] - ci_lo[i]) for i in range(len(k_vals))]
+    err_hi = [max(0.0, ci_hi[i] - means[i]) for i in range(len(k_vals))]
+
+    fig, ax = plt.subplots(figsize=(6, 5))
+    ax.bar(
+        x,
+        means,
+        yerr=[err_lo, err_hi],
+        color="#1f77b4",
+        alpha=0.85,
+        capsize=8,
+        error_kw={"elinewidth": 2, "capthick": 2},
+    )
+    ax.set_xticks(x)
+    ax.set_xticklabels([f"k={k}" for k in k_vals])
+    ax.set_ylabel("Mean MKNN score (fraction shared neighbors)")
+    ax.set_title(f"MKNN — DK vs {fm_model_name}")
+    ax.set_ylim(0, 1.05)
+    ax.grid(True, alpha=0.3, axis="y")
+    plt.tight_layout()
+    save_path = op.join(plots_dir, f"mknn_barplot_{fm_model_name}")
+    plt.savefig(f"{save_path}.png", dpi=150, bbox_inches="tight")
+    plt.close()
+
+
+def save_mknn_summary(mknn_results_all: Dict[str, Dict], output_dir: str):
+    """Save combined MKNN summary JSON and grouped bar plot for all models."""
+    summary_path = op.join(output_dir, "mknn_summary.json")
+    with open(summary_path, "w") as f:
+        json.dump(mknn_results_all, f, indent=2)
+    log.info("MKNN summary saved: %s", summary_path)
+
+    models = list(mknn_results_all.keys())
+    if not models:
+        return
+
+    # Collect all k values present
+    all_k = sorted(
+        {k for m in models for k in mknn_results_all[m]["k_results"]}, key=int
+    )
+    n_k = len(all_k)
+    n_m = len(models)
+
+    x = np.arange(n_m)
+    width = 0.8 / n_k
+    offsets = np.linspace(-(n_k - 1) / 2, (n_k - 1) / 2, n_k) * width
+
+    fig, ax = plt.subplots(figsize=(max(6, n_m * 1.8), 5))
+    k_colors = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728"]
+
+    for ki, k_str in enumerate(all_k):
+        means = []
+        err_lo = []
+        err_hi = []
+        for m in models:
+            kr = mknn_results_all[m]["k_results"].get(k_str, {})
+            mean = kr.get("mean", float("nan"))
+            ci_lo = kr.get("ci_lower", mean)
+            ci_hi = kr.get("ci_upper", mean)
+            means.append(mean)
+            err_lo.append(max(0.0, mean - ci_lo))
+            err_hi.append(max(0.0, ci_hi - mean))
+
+        ax.bar(
+            x + offsets[ki],
+            means,
+            width=width,
+            yerr=[err_lo, err_hi],
+            label=f"k={k_str}",
+            color=k_colors[ki % len(k_colors)],
+            alpha=0.85,
+            capsize=5,
+            error_kw={"elinewidth": 1.5, "capthick": 1.5},
+        )
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(models)
+    ax.set_ylabel("Mean MKNN score (fraction shared neighbors)")
+    ax.set_title("MKNN(DK, FM) per Foundation Model")
+    ax.set_ylim(0, 1.05)
+    ax.legend(fontsize=9)
+    ax.grid(True, alpha=0.3, axis="y")
+    plt.tight_layout()
+
+    plots_dir = op.join(op.dirname(output_dir), "plots")
+    os.makedirs(plots_dir, exist_ok=True)
+    plt.savefig(op.join(plots_dir, "mknn_barplot_all.png"), dpi=150, bbox_inches="tight")
+    plt.close()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Component 6 — PWCCA (Projection-Weighted CCA)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def compute_pwcca(X: np.ndarray, Y: np.ndarray, max_components: int = 20) -> float:
+    """Projection-Weighted Canonical Correlation Analysis (Morcos et al. 2018).
+
+    Reduces both representations to their top `max_components` PCA directions
+    before computing CCA.  This truncation is essential when N is small: without
+    it, the whitened subspaces together span more than R^N and canonical
+    correlations trivially become 1.  Keeping ``max_components << N`` (default
+    20) ensures the two subspaces are genuinely compared.
+
+    Parameters
+    ----------
+    X              : (N, P) — first representation (centered, no NaNs)
+    Y              : (N, Q) — second representation (centered, no NaNs)
+    max_components : max PCA components to retain per space (default 20)
+
+    Returns
+    -------
+    float in [0, 1]
+    """
+    X = X - X.mean(axis=0)
+    Y = Y - Y.mean(axis=0)
+
+    # Thin SVD — avoids D×D covariance (O(N²·D))
+    Ux, sx, _ = np.linalg.svd(X, full_matrices=False)
+    Uy, sy, _ = np.linalg.svd(Y, full_matrices=False)
+
+    # Drop near-zero components, then truncate to max_components
+    tol_x = sx[0] * max(X.shape) * np.finfo(float).eps * 10
+    tol_y = sy[0] * max(Y.shape) * np.finfo(float).eps * 10
+    rx = min(int(np.sum(sx > tol_x)), max_components)
+    ry = min(int(np.sum(sy > tol_y)), max_components)
+    if rx == 0 or ry == 0:
+        return 0.0
+
+    Ux = Ux[:, :rx]
+    Uy = Uy[:, :ry]
+
+    # Canonical correlations: SVD of the cross-whitened gram Ux^T Uy
+    Uz, rho, _ = np.linalg.svd(Ux.T @ Uy, full_matrices=False)
+    k = min(rx, ry)
+    rho = np.clip(rho[:k], 0.0, 1.0)
+    Uz = Uz[:, :k]
+
+    # Projection weights: L1 norm of X projections onto each canonical direction
+    weights = np.sum(np.abs(Ux @ Uz), axis=0)  # (k,)
+    w_sum = weights.sum()
+    if w_sum < 1e-12:
+        return 0.0
+
+    return float(np.dot(weights, rho) / w_sum)
+
+
+def compute_pwcca_bootstrap(
+    X: np.ndarray,
+    Y: np.ndarray,
+    max_components: int = 20,
+    n_bootstrap: int = 1000,
+    random_state: int = 42,
+) -> Tuple[float, float, float]:
+    """PWCCA with bootstrap 95% CI.
+
+    Returns
+    -------
+    pwcca : float
+    ci_lower : float
+    ci_upper : float
+    """
+    pwcca = compute_pwcca(X, Y, max_components)
+    rng = np.random.RandomState(random_state)
+    n = X.shape[0]
+    boot = []
+    for _ in range(n_bootstrap):
+        idx = rng.choice(n, n, replace=True)  # same subjects for both spaces
+        boot.append(compute_pwcca(X[idx], Y[idx], max_components))
+    return pwcca, float(np.percentile(boot, 2.5)), float(np.percentile(boot, 97.5))
+
+
+def run_pwcca_analysis(
+    X_dk: np.ndarray,
+    X_fm: np.ndarray,
+    output_dir: str,
+    fm_model_name: str,
+    max_components: int = 20,
+    n_bootstrap: int = 1000,
+    random_state: int = 42,
+) -> Dict:
+    """Compute PWCCA between DK and FM representations with bootstrap CI.
+
+    Parameters
+    ----------
+    X_dk           : (N, P) domain-knowledge features (no NaNs)
+    X_fm           : (N, D) foundation model embeddings
+    output_dir     : where to save JSON results
+    fm_model_name  : e.g. "NeuroLM"
+    max_components : PCA truncation before CCA (default 20)
+    n_bootstrap    : bootstrap iterations
+    random_state   : seed
+
+    Returns
+    -------
+    dict with pwcca, ci_lower, ci_upper, n_subjects, fm_model_name
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    n = X_dk.shape[0]
+    if n < 10:
+        log.warning("PWCCA: only %d subjects — results unreliable.", n)
+
+    pwcca, ci_lo, ci_hi = compute_pwcca_bootstrap(
+        X_dk, X_fm,
+        max_components=max_components,
+        n_bootstrap=n_bootstrap,
+        random_state=random_state,
+    )
+
+    results = {
+        "fm_model_name": fm_model_name,
+        "pwcca": float(pwcca),
+        "ci_lower": float(ci_lo),
+        "ci_upper": float(ci_hi),
+        "n_subjects": int(n),
+        "n_dk_dims": int(X_dk.shape[1]),
+        "n_fm_dims": int(X_fm.shape[1]),
+        "max_components": int(max_components),
+    }
+
+    out_json = op.join(output_dir, f"pwcca_results_{fm_model_name}.json")
+    with open(out_json, "w") as f:
+        json.dump(results, f, indent=2)
+    log.info(
+        "PWCCA %.3f [%.3f, %.3f] — %s", pwcca, ci_lo, ci_hi, fm_model_name
+    )
+    return results
+
+
+def save_pwcca_summary(pwcca_results_all: Dict[str, Dict], output_dir: str):
+    """Save combined PWCCA summary JSON and bar plot for all models."""
+    summary_path = op.join(output_dir, "pwcca_summary.json")
+    with open(summary_path, "w") as f:
+        json.dump(pwcca_results_all, f, indent=2)
+    log.info("PWCCA summary saved: %s", summary_path)
+
+    models = list(pwcca_results_all.keys())
+    vals = [pwcca_results_all[m]["pwcca"] for m in models]
+    ci_lo = [pwcca_results_all[m]["ci_lower"] for m in models]
+    ci_hi = [pwcca_results_all[m]["ci_upper"] for m in models]
+
+    x = np.arange(len(models))
+    err_lo = [max(0.0, vals[i] - ci_lo[i]) for i in range(len(models))]
+    err_hi = [max(0.0, ci_hi[i] - vals[i]) for i in range(len(models))]
+
+    fig, ax = plt.subplots(figsize=(max(6, len(models) * 1.5), 5))
+    ax.bar(
+        x, vals,
+        yerr=[err_lo, err_hi],
+        color=[_EMBED_COLORS[i % len(_EMBED_COLORS)] for i in range(len(models))],
+        alpha=0.85, capsize=8,
+        error_kw={"elinewidth": 2, "capthick": 2},
+    )
+    ax.set_xticks(x)
+    ax.set_xticklabels(models)
+    ax.set_ylabel("PWCCA")
+    ax.set_title("PWCCA(DK, FM) per Foundation Model")
+    ax.set_ylim(0, 1.05)
+    ax.grid(True, alpha=0.3, axis="y")
+    plt.tight_layout()
+    plots_dir = op.join(op.dirname(output_dir), "plots")
+    os.makedirs(plots_dir, exist_ok=True)
+    plt.savefig(
+        op.join(plots_dir, "pwcca_barplot_all.png"), dpi=150, bbox_inches="tight"
+    )
+    plt.close()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Combined alignment overview plot
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_METRIC_STYLES = {
+    "RSA":     {"color": "#1f77b4", "marker": "o", "label": "RSA (Mahalanobis ρ)"},
+    "MKNN_20": {"color": "#ff7f0e", "marker": "s", "label": "MKNN k=20"},
+}
+
+
+def plot_alignment_overview(
+    models: List[str],
+    rsa_results: Dict[str, Dict],
+    mknn_results: Dict[str, Dict],
+    pwcca_results: Dict[str, Dict],
+    plots_dir: str,
+    k_values: List[int] = None,
+):
+    """Dot plot: x = FM models, y = alignment score, two metrics shown.
+
+    Shows RSA (Mahalanobis ρ) and MKNN k=20 only, each as a dot with
+    ±1 bootstrap std error bars (symmetric, robust to bootstrap bias).
+    If boot_std is missing from a JSON (old run), falls back to
+    (ci_upper - ci_lower) / 3.92 as an approximation.
+
+    Style mirrors the AUC comparison reference plot.
+    """
+    metric_keys = ["MKNN_20"]
+    n_metrics = len(metric_keys)
+    n_models = len(models)
+    if n_models == 0:
+        return
+
+    spread = 0.25          # total horizontal spread per model group
+    offsets = np.array([-spread / 2, spread / 2])
+    x_pos = np.arange(n_models)
+
+    fig, ax = plt.subplots(figsize=(max(7, n_models * 2.0), 6))
+
+    for mi, key in enumerate(metric_keys):
+        style = _METRIC_STYLES[key]
+        color = style["color"]
+        xs, ys, yerrs = [], [], []
+
+        for xi, model in enumerate(models):
+            if key == "RSA":
+                r = rsa_results.get(model, {})
+                pt = r.get("rho", float("nan"))
+                std = r.get("boot_std", float("nan"))
+                if np.isnan(std):
+                    lo, hi = r.get("ci_lower", float("nan")), r.get("ci_upper", float("nan"))
+                    std = (hi - lo) / 3.92 if not (np.isnan(lo) or np.isnan(hi)) else 0.0
+            else:  # MKNN_20
+                r = mknn_results.get(model, {}).get("k_results", {}).get("20", {})
+                pt = r.get("mean", float("nan"))
+                std = r.get("boot_std", float("nan"))
+                if np.isnan(std):
+                    lo, hi = r.get("ci_lower", float("nan")), r.get("ci_upper", float("nan"))
+                    std = (hi - lo) / 3.92 if not (np.isnan(lo) or np.isnan(hi)) else 0.0
+
+            if np.isnan(pt):
+                continue
+            xs.append(x_pos[xi] + offsets[mi])
+            ys.append(pt)
+            yerrs.append(max(0.0, std))
+
+        if not ys:
+            continue
+
+        ax.errorbar(
+            xs, ys,
+            yerr=yerrs,
+            fmt="none",
+            ecolor=color,
+            elinewidth=2.0,
+            capsize=6,
+            capthick=2.0,
+            zorder=2,
+        )
+        ax.scatter(
+            xs, ys,
+            color=color,
+            marker=style["marker"],
+            s=120,
+            zorder=3,
+            label=style["label"],
+            edgecolors="white",
+            linewidths=0.8,
+        )
+
+    ax.set_xticks(x_pos)
+    ax.set_xticklabels(models, fontsize=12)
+    ax.set_xlabel("Foundation Model", fontsize=13)
+    ax.set_ylabel("Alignment score (mean ± std)", fontsize=13)
+    ax.set_title(
+        "DK–FM embedding space alignment\nper Foundation Model",
+        fontsize=13, pad=8,
+    )
+
+    # Collect all point values to set y limits sensibly
+    all_pts, all_stds = [], []
+    for key in metric_keys:
+        for model in models:
+            if key == "RSA":
+                r = rsa_results.get(model, {})
+                pt = r.get("rho", float("nan"))
+                std = r.get("boot_std", 0.0) or 0.0
+            else:
+                r = mknn_results.get(model, {}).get("k_results", {}).get("20", {})
+                pt = r.get("mean", float("nan"))
+                std = r.get("boot_std", 0.0) or 0.0
+            if not np.isnan(pt):
+                all_pts.append(pt)
+                all_stds.append(std)
+
+    if all_pts:
+        y_lo = max(0.0, min(p - s for p, s in zip(all_pts, all_stds)) - 0.02)
+        y_hi = min(1.0, max(p + s for p, s in zip(all_pts, all_stds)) + 0.05)
+        ax.set_ylim(y_lo, y_hi)
+
+    ax.grid(True, alpha=0.3, axis="y", linestyle="--", zorder=0)
+    ax.set_xlim(-0.5, n_models - 0.5)
+    ax.legend(loc="lower right", fontsize=10, framealpha=0.9)
+    plt.tight_layout()
+
+    os.makedirs(plots_dir, exist_ok=True)
+    plt.savefig(
+        op.join(plots_dir, "alignment_overview.png"), dpi=150, bbox_inches="tight"
+    )
+    plt.close()
+    log.info("Alignment overview saved: %s/alignment_overview.png", plots_dir)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Summary table
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -1426,8 +1982,46 @@ def main():
     parser.add_argument(
         "--rsa-distance",
         default="correlation",
-        choices=["correlation", "euclidean"],
+        choices=["correlation", "euclidean", "mahalanobis"],
         help="Distance metric for RDMs (default: correlation).",
+    )
+    parser.add_argument(
+        "--skip-mknn",
+        action="store_true",
+        help="Skip MKNN analysis (Component 5).",
+    )
+    parser.add_argument(
+        "--mknn-k",
+        nargs="+",
+        type=int,
+        default=[10, 20, 30],
+        help="k values for MKNN (default: 10 20 30).",
+    )
+    parser.add_argument(
+        "--n-bootstrap-mknn",
+        type=int,
+        default=1000,
+        help="Bootstrap iterations for MKNN CI (default: 1000).",
+    )
+    parser.add_argument(
+        "--skip-pwcca",
+        action="store_true",
+        help="Skip PWCCA analysis (Component 6).",
+    )
+    parser.add_argument(
+        "--n-bootstrap-pwcca",
+        type=int,
+        default=1000,
+        help="Bootstrap iterations for PWCCA CI (default: 1000).",
+    )
+    parser.add_argument(
+        "--pwcca-max-components",
+        type=int,
+        default=20,
+        help=(
+            "Max PCA components per space before CCA (default: 20). "
+            "Must be << N to avoid trivial subspace overlap."
+        ),
     )
 
     args = parser.parse_args()
@@ -1458,6 +2052,8 @@ def main():
     rsa_tri_per_model: Dict[str, Tuple[np.ndarray, np.ndarray]] = {}
     dim_results_all: Dict[str, Dict] = {}
     dim_eigs_per_model: Dict[str, Dict[str, np.ndarray]] = {}
+    mknn_results_all: Dict[str, Dict] = {}
+    pwcca_results_all: Dict[str, Dict] = {}
 
     for fm_name in args.foundation_models:
         print(f"\n{'─' * 60}", flush=True)
@@ -1506,8 +2102,10 @@ def main():
         c2_dir = op.join(args.output_dir, "component2_rsa")
         c3_dir = op.join(args.output_dir, "component3_cka")
         c4_dir = op.join(args.output_dir, "component4_dimensionality")
+        c5_dir = op.join(args.output_dir, "component5_mknn")
+        c6_dir = op.join(args.output_dir, "component6_pwcca")
         summary_dir = op.join(args.output_dir, "summary")
-        for d in [c1_dir, c2_dir, c3_dir, c4_dir, summary_dir]:
+        for d in [c1_dir, c2_dir, c3_dir, c4_dir, c5_dir, c6_dir, summary_dir]:
             os.makedirs(d, exist_ok=True)
 
         # ── Ridge probe (Component 1 support — weights + R² per marker) ───
@@ -1584,6 +2182,53 @@ def main():
                     exc_info=True,
                 )
 
+        # ── Component 5: MKNN ─────────────────────────────────────────────
+        if not args.skip_mknn:
+            log.info("Running MKNN for %s (k=%s) ...", fm_name, args.mknn_k)
+            try:
+                # Impute NaNs in DK (same as other components)
+                col_means = np.nanmean(X_dk, axis=0)
+                nan_mask = np.isnan(X_dk)
+                X_dk_clean_mknn = X_dk.copy()
+                X_dk_clean_mknn[nan_mask] = np.take(
+                    col_means, np.where(nan_mask)[1]
+                )
+                mknn_result = run_mknn_analysis(
+                    X_dk=X_dk_clean_mknn,
+                    X_fm=X_fm,
+                    output_dir=c5_dir,
+                    fm_model_name=fm_name,
+                    k_values=args.mknn_k,
+                    n_bootstrap=args.n_bootstrap_mknn,
+                    random_state=args.random_state,
+                )
+                mknn_results_all[fm_name] = mknn_result
+            except Exception as exc:
+                log.error("MKNN failed for %s: %s", fm_name, exc, exc_info=True)
+
+        # ── Component 6: PWCCA ────────────────────────────────────────────
+        if not args.skip_pwcca:
+            log.info("Running PWCCA for %s ...", fm_name)
+            try:
+                col_means = np.nanmean(X_dk, axis=0)
+                nan_mask = np.isnan(X_dk)
+                X_dk_clean_pwcca = X_dk.copy()
+                X_dk_clean_pwcca[nan_mask] = np.take(
+                    col_means, np.where(nan_mask)[1]
+                )
+                pwcca_result = run_pwcca_analysis(
+                    X_dk=X_dk_clean_pwcca,
+                    X_fm=X_fm,
+                    output_dir=c6_dir,
+                    fm_model_name=fm_name,
+                    max_components=args.pwcca_max_components,
+                    n_bootstrap=args.n_bootstrap_pwcca,
+                    random_state=args.random_state,
+                )
+                pwcca_results_all[fm_name] = pwcca_result
+            except Exception as exc:
+                log.error("PWCCA failed for %s: %s", fm_name, exc, exc_info=True)
+
         # ── Summary table ─────────────────────────────────────────────────
         build_summary_table(
             marker_names=marker_names,
@@ -1608,6 +2253,23 @@ def main():
         save_dimensionality_csv(dim_results_all, c4_dir)
         _plot_eigenspectrum_all(dim_eigs_per_model, plots_dir)
         _plot_ev_curve_all(dim_eigs_per_model, plots_dir)
+
+    if mknn_results_all and not args.skip_mknn:
+        save_mknn_summary(mknn_results_all, c5_dir)
+
+    if pwcca_results_all and not args.skip_pwcca:
+        save_pwcca_summary(pwcca_results_all, c6_dir)
+
+    # ── Combined alignment overview plot ──────────────────────────────────
+    if rsa_results_all or mknn_results_all or pwcca_results_all:
+        plot_alignment_overview(
+            models=args.foundation_models,
+            rsa_results=rsa_results_all,
+            mknn_results=mknn_results_all,
+            pwcca_results=pwcca_results_all,
+            plots_dir=plots_dir,
+            k_values=args.mknn_k if not args.skip_mknn else [],
+        )
 
     # ── Component 1: Noise-ceiling-corrected R² comparison ────────────────
     if not args.skip_ridge_r2:
