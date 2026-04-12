@@ -80,6 +80,13 @@ condor_submit jobs/markers.submit \
     main_path=/data/project/eeg_foundation/data/NeuroLM-output/fif_data_target \
     results_subdir=NeuroLM/doc_patients \
     data_source=bids
+
+# BIOT
+condor_submit jobs/markers.submit \
+    dataset=biot \
+    main_path=/data/project/eeg_foundation/data/BIOT \
+    results_subdir=BIOT/doc_patients \
+    data_source=bids
 ```
 
 4 nodes × 4 threads = up to 16 subjects processed concurrently. Jobs skip already-finished subjects (`finished.txt`) and use atomic locks (`processing.lock`) to avoid duplicate work.
@@ -197,7 +204,7 @@ python src/global_analysis/statistical_analysis.py \
 
 ### Embedding Interpretability (`src/interp/`)
 
-Layer-by-layer probing studies to understand what neurophysiological information is encoded at each depth of the foundation models.
+Layer-by-layer probing studies to understand what neurophysiological information is encoded at each depth of the foundation models. Supported models: **CBraMod, LaBram, NeuroLM, TOTEM, BIOT**. BIOT uses 6 layers (`pre_transformer`, `transformer_0–3`, `final_emb`; 256-dim embeddings, 36 channels) with raw data read directly from `/data/project/eeg_foundation/data/BIOT/`.
 
 | Script | Purpose |
 |--------|---------|
@@ -263,7 +270,7 @@ python src/interp/launch_pool_jobs.py --model CBraMod --n-jobs 8
 
 ### Embedding Comparison Studies (`src/model/`)
 
-Cross-model studies comparing foundation model embeddings against each other and against domain-knowledge markers. All use shared CV splits for fair comparison.
+Cross-model studies comparing foundation model embeddings against each other and against domain-knowledge markers. All use shared CV splits for fair comparison. Supported models: **CBraMod, LaBram, NeuroLM, TOTEM, BIOT**.
 
 | Script | Purpose |
 |--------|---------|
@@ -295,6 +302,22 @@ python src/model/dk_embeddings_classification.py \
     --patient-labels /data/.../metadata_patient_labels.csv \
     --output-dir results/dk_embeddings/
 ```
+
+#### PCA Study — FM embedding dimensionality reduction
+
+Applies per-fold PCA to the FM embedding block (reducing to DK marker dimensionality) before the combined FM+DK classifier, producing two additional output variants: `EMBEDDING_DK_COMBINED_FM_PCA` (PCA-reduced FM ∥ DK) and `EMBEDDING_FM_PCA_ONLY` (PCA-reduced FM alone). Shared CV splits ensure fair comparison with the non-PCA run.
+
+Run all models in parallel as HTCondor jobs (one job per FM model, all 6 targets per job):
+
+```bash
+condor_submit jobs/pca_study.submit
+
+# Monitor
+condor_q
+tail -f /data/project/eeg_foundation/logs/pca_TOTEM_<cluster>.*.out
+```
+
+Each job corresponds to one line in `jobs/pca_models.txt` (TOTEM, LaBram, NeuroLM, CBraMod, BIOT). Results land in `{results_root}/{FM}/doc_patients/EMBEDDING_DK_COMBINED_FM_PCA/` and `EMBEDDING_FM_PCA_ONLY/`.
 
 ---
 
