@@ -133,10 +133,12 @@ LAST_LAYER_RESULT_DIRS = {
     "NeuroLM": "NeuroLM",
     "TOTEM": "TOTEM",
     "LaBram": "LaBram",
+    "BIOT": "BIOT",
+    "EEGPT": "EEGPT",
 }
 
-MULTILAYER_MODELS = ["CbraMod", "NeuroLM", "LaBram"]
-LAST_LAYER_MODELS = ["CbraMod", "NeuroLM", "TOTEM", "LaBram"]
+MULTILAYER_MODELS = ["CbraMod", "NeuroLM", "TOTEM", "LaBram", "BIOT", "EEGPT"]
+LAST_LAYER_MODELS = ["CbraMod", "NeuroLM", "TOTEM", "LaBram", "BIOT", "EEGPT"]
 
 MODEL_LAYER_KEYS = {
     "CbraMod": {
@@ -189,6 +191,34 @@ MODEL_LAYER_KEYS = {
             "vq_dec_freq_block_2": 768, "vq_dec_freq_block_3": 768,
         },
     },
+    "TOTEM": {
+        "data_subdir": "TOTEM",
+        "layers": [
+            "totem_enc_conv1",
+            "totem_enc_conv2",
+            "totem_enc_conv3",
+            "totem_enc_residual",
+            "totem_enc_z",
+            "totem_vq_quantized",
+            "totem_dec_conv1",
+            "totem_dec_residual",
+        ],
+        # Raw shape: (256, dim) — already pooled to per-channel vectors
+        # Disk pool: mean over channels → (dim,)
+        "disk_pool_axes": (0,),
+        "n_channels": 256,
+        "emb_dim": 128,
+        "emb_dim_override": {
+            "totem_enc_conv1":    64,
+            "totem_enc_z":        64,
+            "totem_vq_quantized": 64,
+            "totem_enc_conv2":    128,
+            "totem_enc_conv3":    128,
+            "totem_enc_residual": 128,
+            "totem_dec_conv1":    128,
+            "totem_dec_residual": 128,
+        },
+    },
     "LaBram": {
         "data_subdir": "LaBram/multi_layer_embeddings",
         "layers": [
@@ -219,6 +249,54 @@ MODEL_LAYER_KEYS = {
             "vqnsp_quantize": 64,
         },
     },
+    "BIOT": {
+        # Raw data lives outside results_root — specify absolute path directly.
+        "abs_data_dir": "/data/project/eeg_foundation/data/BIOT",
+        "data_subdir": "BIOT",  # used only for pooled cache path
+        # BIOT sessions contain both *_layers.npz and *_embeddings.npz.
+        # We must load the layers file to get all intermediate representations.
+        "npz_suffix": "_layers.npz",
+        "layers": [
+            "pre_transformer",
+            "transformer_0",
+            "transformer_1",
+            "transformer_2",
+            "transformer_3",
+            "final_emb",
+        ],
+        # Transformer layers: (n_epochs, 36, 256) → mean over epochs → (36, 256)
+        # final_emb:          (n_epochs, 256)     → mean over epochs → (256,)
+        "disk_pool_axes": (0,),
+        "n_channels": 36,
+        "emb_dim": 256,
+        # final_emb has no channel dimension after disk pooling → skip RAM channel pool.
+        "layer_no_chan_pool": ["final_emb"],
+    },
+    "EEGPT": {
+        "data_subdir": "EEGPT/multi_layer_embeddings",
+        "npz_suffix": "_eegpt_layer_embeddings.npz",
+        "layers": [
+            "patch_emb",
+            "layer_0", "layer_2", "layer_4", "layer_6", "layer_7",
+            "encoder_out",
+        ],
+        # Defaults apply only when a layer is not in the per-layer
+        # overrides below.  These defaults cover layer_0..7.
+        "disk_pool_axes": (0,),
+        "n_channels": 64,
+        "emb_dim": 512,
+        # Per-layer overrides (shapes differ across layer types).
+        # patch_emb:   (n_windows, 16, 60, 512) -> mean(0,1) -> (60, 512)
+        # encoder_out: (n_windows, 16,  4, 512) -> mean(0,1) -> ( 4, 512)
+        "disk_pool_axes_per_layer": {
+            "patch_emb":   (0, 1),
+            "encoder_out": (0, 1),
+        },
+        "n_channels_per_layer": {
+            "patch_emb":   60,
+            "encoder_out": 4,
+        },
+    },
 }
 
 REDUCTION_MAP = {
@@ -234,6 +312,8 @@ _MODEL_COLORS = {
     "NeuroLM": "#1f77b4",
     "TOTEM": "#ff7f0e",
     "LaBram": "#d62728",
+    "BIOT": "#9467bd",
+    "EEGPT": "#8c564b",
 }
 
 FAMILY_ORDER = ["evoked", "wsmi", "information_theory", "power_spectral_density"]
@@ -479,17 +559,22 @@ class LinearProber:
                 arr = npz[layer_key]
                 raw_shape = arr.shape
                 if config.get("no_pooling"):
+                    # Whole-model flag: store as-is (e.g. LaBram pre-pooled 1-D).
                     pooled = np.asarray(arr, dtype=np.float32)
                     print(
                         f"      [NO_POOL] {layer_key}: {raw_shape} (stored as-is)",
                         flush=True,
                     )
                 else:
-                    pooled = arr.mean(axis=config["disk_pool_axes"])
+                    # Apply disk pool for all layers, including layer_no_chan_pool ones.
+                    # layer_no_chan_pool only skips the *RAM* channel-mean step later.
+                    _axes_override = config.get("disk_pool_axes_per_layer", {})
+                    _axes = _axes_override.get(layer_key, config["disk_pool_axes"])
+                    pooled = arr.mean(axis=_axes)
                     pooled = np.asarray(pooled, dtype=np.float32)
                     print(
                         f"      [POOL] {layer_key}: {raw_shape} "
-                        f"--mean(axis={config['disk_pool_axes']})--> {pooled.shape}",
+                        f"--mean(axis={_axes})--> {pooled.shape}",
                         flush=True,
                     )
                 result[layer_key] = pooled
@@ -513,7 +598,7 @@ class LinearProber:
             E.g. ``["sub-001", "sub-002"]``.
         """
         config = MODEL_LAYER_KEYS[model_name]
-        emb_dir = op.join(self.data_dir, config["data_subdir"])
+        emb_dir = config.get("abs_data_dir", op.join(self.data_dir, config["data_subdir"]))
         cache_root = op.join(self.output_dir, "pooled_embeddings", model_name)
 
         if not op.isdir(emb_dir):
@@ -577,14 +662,19 @@ class LinearProber:
                     n_cached += 1
                     continue
 
-                # Find the .npz file (prefer non-original)
+                # Find the .npz file (prefer non-original).
+                # If config specifies npz_suffix (e.g. "_layers.npz"), restrict to
+                # that suffix to avoid accidentally loading a different file type.
+                _npz_suffix = config.get("npz_suffix", ".npz")
                 npz_files = [
                     f
                     for f in os.listdir(ses_path)
-                    if f.endswith(".npz") and "original" not in f.lower()
+                    if f.endswith(_npz_suffix) and "original" not in f.lower()
                 ]
                 if not npz_files:
-                    npz_files = [f for f in os.listdir(ses_path) if f.endswith(".npz")]
+                    npz_files = [
+                        f for f in os.listdir(ses_path) if f.endswith(_npz_suffix)
+                    ]
                 if not npz_files:
                     n_skipped += 1
                     continue
@@ -649,12 +739,16 @@ class LinearProber:
             )
             return embeddings
 
-        no_pooling = config.get("no_pooling", False)
+        _no_chan_pool_layers = config.get("layer_no_chan_pool", [])
+        no_pooling = config.get("no_pooling", False) or (layer_key in _no_chan_pool_layers)
         layer_emb_dim = config.get("emb_dim_override", {}).get(layer_key, config["emb_dim"])
         if no_pooling:
             expected_disk_shape = (layer_emb_dim,)
         else:
-            expected_disk_shape = (config["n_channels"], layer_emb_dim)
+            _nc_override = config.get("n_channels_per_layer", {}).get(
+                layer_key, config["n_channels"]
+            )
+            expected_disk_shape = (_nc_override, layer_emb_dim)
         n_loaded = 0
 
         for sub_dir in sorted(os.listdir(cache_root)):

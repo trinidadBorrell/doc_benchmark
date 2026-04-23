@@ -1,5 +1,6 @@
 notebooks/
 results/
+narrative/
 
 cookbooks/old_scripts/
 cookbooks/cleanup_hdf5_markers.py
@@ -27,7 +28,7 @@ src/markers/text_for_trini.txt
 src/global_analysis/global_analysis.py
 src/global_analysis/README_SCRIPTS.txt
 src/report_completed_results.py
-
+src/paper_plots/
 src/interp/run_analysis_nonlinear.sh
 src/interp/run_pool_nonlinear.sh
 src/interp/run_analysis.sh

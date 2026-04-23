@@ -40,7 +40,25 @@ plt.rcParams["figure.dpi"] = 120
 # Must match linear_probing.py
 MODEL_LAYERS = {
     "CbraMod": ["patch_emb", "layer_0", "layer_3", "layer_6", "layer_9", "layer_11"],
-    "NeuroLM": ["vq_emb", "gpt_0", "gpt_3", "gpt_6", "gpt_9", "gpt_11"],
+    "NeuroLM": [
+        # VQ encoder
+        "vq_emb",
+        "vq_enc_patch_emb",
+        "vq_enc_block_2", "vq_enc_block_5", "vq_enc_block_8", "vq_enc_block_11",
+        # VQ quantizer
+        "vq_encode_task", "vq_quantize",
+        # VQ decoder (freq, 4 blocks)
+        "vq_dec_freq_block_0", "vq_dec_freq_block_1",
+        "vq_dec_freq_block_2", "vq_dec_freq_block_3",
+        # GPT-2 backbone
+        "gpt_0", "gpt_3", "gpt_6", "gpt_9", "gpt_11",
+    ],
+    "TOTEM": [
+        "totem_enc_conv1", "totem_enc_conv2", "totem_enc_conv3",
+        "totem_enc_residual", "totem_enc_z",
+        "totem_vq_quantized",
+        "totem_dec_conv1", "totem_dec_residual",
+    ],
     "LaBram": [
         "vqnsp_enc_patch_embed",
         "vqnsp_enc_block_2",
@@ -59,6 +77,14 @@ MODEL_LAYERS = {
         "labram_block_8",
         "labram_block_11",
         "labram_norm",
+    ],
+    "BIOT": [
+        "pre_transformer",
+        "transformer_0",
+        "transformer_1",
+        "transformer_2",
+        "transformer_3",
+        "final_emb",
     ],
 }
 
@@ -79,9 +105,17 @@ EMBEDDING_REGRESSOR_PATHS = {
         _BENCHMARK_ROOT,
         "NeuroLM/doc_patients/MLP_EMBEDDING/regressor_results/summary.json",
     ),
+    "TOTEM": op.join(
+        _BENCHMARK_ROOT,
+        "TOTEM/doc_patients/MLP_EMBEDDING/regressor_results/summary.json",
+    ),
     "LaBram": op.join(
         _BENCHMARK_ROOT,
         "LaBram/doc_patients/MLP_EMBEDDING/regressor_results/summary.json",
+    ),
+    "BIOT": op.join(
+        _BENCHMARK_ROOT,
+        "BIOT/doc_patients/MLP_EMBEDDING/regressor_results/summary.json",
     ),
 }
 EMBEDDING_CLF_PATHS = {
@@ -93,9 +127,17 @@ EMBEDDING_CLF_PATHS = {
         _BENCHMARK_ROOT,
         "NeuroLM/doc_patients/MLP_EMBEDDING/crs/nested_cv",
     ),
+    "TOTEM": op.join(
+        _BENCHMARK_ROOT,
+        "TOTEM/doc_patients/MLP_EMBEDDING/crs/nested_cv",
+    ),
     "LaBram": op.join(
         _BENCHMARK_ROOT,
         "LaBram/doc_patients/MLP_EMBEDDING/crs/nested_cv",
+    ),
+    "BIOT": op.join(
+        _BENCHMARK_ROOT,
+        "BIOT/doc_patients/MLP_EMBEDDING/crs/nested_cv",
     ),
 }
 
@@ -818,7 +860,7 @@ def main():
     parser.add_argument(
         "--models",
         nargs="+",
-        default=["CbraMod", "NeuroLM", "LaBram"],
+        default=["CbraMod", "NeuroLM", "TOTEM", "LaBram", "BIOT"],
         help="Models to include.",
     )
     parser.add_argument(

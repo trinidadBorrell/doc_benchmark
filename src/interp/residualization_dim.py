@@ -104,6 +104,7 @@ except ImportError:
 try:
     from ..model.cv_utils import (
         check_no_subject_leakage,
+        filter_excluded_markers,
         generate_nested_cv_folds,
         load_cv_splits,
         save_cv_splits,
@@ -114,6 +115,7 @@ except ImportError:
         sys.path.insert(0, _model_dir)
     from cv_utils import (
         check_no_subject_leakage,
+        filter_excluded_markers,
         generate_nested_cv_folds,
         load_cv_splits,
         save_cv_splits,
@@ -127,7 +129,7 @@ plt.rcParams["axes.labelsize"] = "medium"
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
-FM_MODELS = ["LaBram", "CBraMod", "NeuroLM", "TOTEM"]
+FM_MODELS = ["LaBram", "CBraMod", "NeuroLM", "TOTEM", "BIOT", "EEGPT"]
 
 DEFAULT_RESULTS_ROOT = "/data/project/eeg_foundation/data/benchmark_results/new_results"
 DEFAULT_MARKER_CSV = (
@@ -144,12 +146,48 @@ REDUCTION_MAP = {
     "D": "icm/lg/egi256gfp/std",
 }
 
+# All (target, label_mode, subset, output_subdir, title_suffix) combinations.
+# subset is 'VS', 'MCS', or None. label_mode is only relevant for cs_* targets.
+TARGET_CONFIGS = [
+    # ── CRS ──────────────────────────────────────────────────────────────
+    ("crs",           None,                      None,  "crs",                            "VS vs MCS"),
+    # ── Etiology ─────────────────────────────────────────────────────────
+    ("etiology",      None,                      None,  "etiology/all",                   "Etiology (all)"),
+    ("etiology",      None,                      "VS",  "etiology/vs_only",               "Etiology (VS baseline)"),
+    ("etiology",      None,                      "MCS", "etiology/mcs_only",              "Etiology (MCS baseline)"),
+    ("etiology_code", None,                      None,  "etiology_code/all",              "Etiology Code (all)"),
+    ("etiology_code", None,                      "VS",  "etiology_code/vs_only",          "Etiology Code (VS baseline)"),
+    ("etiology_code", None,                      "MCS", "etiology_code/mcs_only",         "Etiology Code (MCS baseline)"),
+    # ── cs_6m ────────────────────────────────────────────────────────────
+    ("cs_6m", "multiclass",              None, "cs_6m/multiclass",               "6m Outcome (4-class)"),
+    ("cs_6m", "binary",                  None, "cs_6m/binary",                   "6m Outcome (VS vs MCS)"),
+    ("cs_6m", "binary_death",            None, "cs_6m/binary_death",             "6m Outcome (DEATH vs non)"),
+    ("cs_6m", "binary_vs_to_mcs",        None, "cs_6m/binary_vs_to_mcs",         "6m Outcome (VS→MCS)"),
+    ("cs_6m", "binary_mcs_to_conscious", None, "cs_6m/binary_mcs_to_conscious",  "6m Outcome (MCS→CONSCIOUS)"),
+    ("cs_6m", "binary_improvement",      None, "cs_6m/binary_improvement",       "6m Outcome (IMPROVED)"),
+    # ── cs_1y ────────────────────────────────────────────────────────────
+    ("cs_1y", "multiclass",              None, "cs_1y/multiclass",               "1y Outcome (4-class)"),
+    ("cs_1y", "binary",                  None, "cs_1y/binary",                   "1y Outcome (VS vs MCS)"),
+    ("cs_1y", "binary_death",            None, "cs_1y/binary_death",             "1y Outcome (DEATH vs non)"),
+    ("cs_1y", "binary_vs_to_mcs",        None, "cs_1y/binary_vs_to_mcs",         "1y Outcome (VS→MCS)"),
+    ("cs_1y", "binary_mcs_to_conscious", None, "cs_1y/binary_mcs_to_conscious",  "1y Outcome (MCS→CONSCIOUS)"),
+    ("cs_1y", "binary_improvement",      None, "cs_1y/binary_improvement",       "1y Outcome (IMPROVED)"),
+    # ── cs_2y ────────────────────────────────────────────────────────────
+    ("cs_2y", "multiclass",              None, "cs_2y/multiclass",               "2y Outcome (4-class)"),
+    ("cs_2y", "binary",                  None, "cs_2y/binary",                   "2y Outcome (VS vs MCS)"),
+    ("cs_2y", "binary_death",            None, "cs_2y/binary_death",             "2y Outcome (DEATH vs non)"),
+    ("cs_2y", "binary_vs_to_mcs",        None, "cs_2y/binary_vs_to_mcs",         "2y Outcome (VS→MCS)"),
+    ("cs_2y", "binary_mcs_to_conscious", None, "cs_2y/binary_mcs_to_conscious",  "2y Outcome (MCS→CONSCIOUS)"),
+    ("cs_2y", "binary_improvement",      None, "cs_2y/binary_improvement",       "2y Outcome (IMPROVED)"),
+]
+
 _MODEL_COLORS = {
     "CBraMod": "#2ca02c",
     "CbraMod": "#2ca02c",
     "NeuroLM": "#1f77b4",
     "TOTEM": "#ff7f0e",
     "LaBram": "#d62728",
+    "BIOT": "#9467bd",
 }
 
 _CLASSIFIER_MARKERS = {
@@ -239,6 +277,16 @@ def load_markers(marker_csv, reduction="A"):
             continue
         markers_dict[key] = np.array([row[m] for m in marker_names], dtype=float)
 
+    marker_names, markers_dict, n_dropped = filter_excluded_markers(
+        marker_names, markers_dict
+    )
+    if n_dropped:
+        print(
+            f"   Excluded {n_dropped} paradigm-locked markers "
+            f"(TimeLockedContrast/WindowDecoding) → {len(marker_names)} markers remain",
+            flush=True,
+        )
+
     print(
         f"   Loaded markers for {len(markers_dict)} subjects "
         f"({len(marker_names)} markers, reduction={reduction_str})",
@@ -247,33 +295,155 @@ def load_markers(marker_csv, reduction="A"):
     return markers_dict, marker_names
 
 
-def load_patient_labels(labels_file):
-    """Load CRS labels (VS vs MCS).
+def load_labels_for_target(labels_file, target, label_mode=None, subset=None):
+    """Load classification labels for the specified target and mode.
+
+    Parameters
+    ----------
+    labels_file : str
+        Path to metadata_patient_labels.csv.
+    target : str
+        One of: ``'crs'``, ``'etiology'``, ``'etiology_code'``,
+        ``'cs_6m'``, ``'cs_1y'``, ``'cs_2y'``.
+    label_mode : str or None
+        For ``cs_*`` targets: ``'multiclass'``, ``'binary'``,
+        ``'binary_death'``, ``'binary_vs_to_mcs'``,
+        ``'binary_mcs_to_conscious'``, ``'binary_improvement'``.
+        Ignored for other targets.
+    subset : str or None
+        For ``etiology`` / ``etiology_code``: ``None`` (all subjects),
+        ``'VS'`` (UWS-baseline only), or ``'MCS'`` (MCS+/MCS- baseline only).
 
     Returns
     -------
     labels_dict : dict
-        ``{subject_session_key: label_str}`` where label is ``"VS"`` or ``"MCS"``.
+        ``{subject_session_key: label_str}``
+    is_multiclass : bool
+        True only when ``label_mode == 'multiclass'``.
     """
+    _BL_VS = {"UWS"}
+    _BL_MCS = {"MCS+", "MCS-"}
+    _VS_STATES = {"VS", "VS/MCS"}
+    _MCS_STATES = {"MCS+", "MCS-", "MCS"}
+
     df = pd.read_csv(labels_file)
     df = df.dropna(subset=["subject", "session"])
 
     labels_dict = {}
+    is_multiclass = label_mode == "multiclass"
+
     for _, row in df.iterrows():
         subject = row["subject"]
         session = f"ses-{int(row['session']):02d}"
-        state = row["diagnostic_crs_final"]
-        if pd.isna(state) or str(state).strip().lower() in ("n/a", ""):
-            continue
-        if state == "UWS":
-            state = "VS"
-        elif state in ["MCS+", "MCS-"]:
-            state = "MCS"
-        else:
-            continue
         key = f"{subject}_{session}"
-        labels_dict[key] = state
-    return labels_dict
+
+        if target == "crs":
+            state = row["diagnostic_crs_final"]
+            if pd.isna(state) or str(state).strip().lower() in ("n/a", ""):
+                continue
+            if state == "UWS":
+                state = "VS"
+            elif state in ("MCS+", "MCS-"):
+                state = "MCS"
+            else:
+                continue
+            labels_dict[key] = state
+
+        elif target in ("etiology", "etiology_code"):
+            col = (
+                "etiology_medical_condition" if target == "etiology" else "etiology_code"
+            )
+            val = row[col]
+            if pd.isna(val) or str(val).strip().lower() in ("n/a", ""):
+                continue
+            if subset is not None:
+                bl = row.get("diagnostic_crs_final", None)
+                if subset == "VS" and (pd.isna(bl) or str(bl).strip() not in _BL_VS):
+                    continue
+                if subset == "MCS" and (pd.isna(bl) or str(bl).strip() not in _BL_MCS):
+                    continue
+            if target == "etiology":
+                label = str(val).strip().lower()
+            else:
+                label = str(val).strip().lower()
+                if label == "anoxia":
+                    label = "ANOXIA"
+                elif label == "tbi":
+                    label = "TBI"
+                else:
+                    continue
+            labels_dict[key] = label
+
+        elif target in ("cs_6m", "cs_1y", "cs_2y"):
+            val = row[target]
+            if pd.isna(val) or str(val).strip().lower() in ("n/a", ""):
+                continue
+            label = str(val).strip()
+            bl_raw = row.get("diagnostic_crs_final", None)
+            bl_str = str(bl_raw).strip() if not pd.isna(bl_raw) else ""
+
+            if label_mode == "multiclass":
+                if label in _VS_STATES:
+                    label = "VS"
+                elif label in _MCS_STATES:
+                    label = "MCS"
+                elif label in ("CONSCIOUS", "DEATH"):
+                    pass
+                else:
+                    continue
+
+            elif label_mode == "binary":
+                if label in _VS_STATES:
+                    label = "VS"
+                elif label in _MCS_STATES:
+                    label = "MCS"
+                else:
+                    continue
+
+            elif label_mode == "binary_death":
+                if label == "DEATH":
+                    label = "DEATH"
+                elif label in _VS_STATES or label in _MCS_STATES or label == "CONSCIOUS":
+                    label = "NON_DEATH"
+                else:
+                    continue
+
+            elif label_mode == "binary_vs_to_mcs":
+                if bl_str != "UWS":
+                    continue
+                if label in _MCS_STATES or label == "CONSCIOUS":
+                    label = "IMPROVED"
+                else:
+                    label = "OTHER"
+
+            elif label_mode == "binary_mcs_to_conscious":
+                if bl_str not in ("MCS+", "MCS-"):
+                    continue
+                if label == "CONSCIOUS":
+                    label = "IMPROVED"
+                else:
+                    label = "OTHER"
+
+            elif label_mode == "binary_improvement":
+                if bl_str == "UWS":
+                    label = "IMPROVED" if label in _MCS_STATES or label == "CONSCIOUS" else "NON_IMPROVED"
+                elif bl_str in ("MCS+", "MCS-"):
+                    label = "IMPROVED" if label == "CONSCIOUS" else "NON_IMPROVED"
+                else:
+                    continue
+            else:
+                continue
+
+            labels_dict[key] = label
+
+    mode_str = f", mode={label_mode!r}" if label_mode else ""
+    sub_str = f", subset={subset!r}" if subset else ""
+    print(
+        f"   Loaded {len(labels_dict)} sessions "
+        f"(target={target!r}{mode_str}{sub_str})",
+        flush=True,
+    )
+    return labels_dict, is_multiclass
 
 
 # ── DimensionResidualizer ────────────────────────────────────────────────────
@@ -400,8 +570,14 @@ class DimensionResidualizer(BaseEstimator, TransformerMixin):
 # ── Classifier construction ───────────────────────────────────────────────────
 
 
-def _safe_auc(y_true, y_score, y_pred):
-    """AUC with balanced_accuracy fallback for single-class folds."""
+def _safe_auc(y_true, y_score, y_pred, is_multiclass=False):
+    """AUC with balanced_accuracy fallback.
+
+    For multiclass targets uses balanced_accuracy directly (avoids
+    the complexity of multiclass AUC scoring).
+    """
+    if is_multiclass:
+        return balanced_accuracy_score(y_true, y_pred)
     try:
         return roc_auc_score(y_true, y_score)
     except ValueError:
@@ -409,13 +585,20 @@ def _safe_auc(y_true, y_score, y_pred):
 
 
 def _decision_scores(clf, clf_name, X):
-    """Return a 1-D score array suitable for roc_auc_score."""
+    """Return a 1-D score array suitable for roc_auc_score.
+
+    For multiclass targets the caller uses balanced_accuracy_score and ignores
+    this score, but we still return something to avoid exceptions.
+    """
     if clf_name in ("mlp", "random_forest"):
-        return clf.predict_proba(X)[:, 1]
+        proba = clf.predict_proba(X)
+        if proba.shape[1] == 2:
+            return proba[:, 1]
+        return proba[:, 0]  # ignored for multiclass; caller uses preds
     if clf_name == "svm":
         raw = clf.decision_function(X)
         if raw.ndim > 1:
-            raw = raw[:, 1]
+            return raw[:, 0]  # ignored for multiclass
         return raw
     # kernel_ridge
     return clf.decision_function(X)
@@ -641,6 +824,9 @@ def run_nested_cv(
     n_folds,
     random_state,
     precomputed_splits=None,
+    is_multiclass=False,
+    pca=False,
+    pca_components=27,
 ):
     """Nested CV with dimension-wise residualization.
 
@@ -658,7 +844,7 @@ def run_nested_cv(
        predicted values — the scaler/Ridge parameters come from training only.
     3. Inner loop: hyperparameter search for classifier using pre-computed
        inner splits when available, else 3-fold GroupKFold.
-    4. Evaluate AUC on ``X_test_res``.
+    4. Evaluate AUC on ``X_test_res`` (or balanced accuracy for multiclass).
 
     Parameters
     ----------
@@ -667,7 +853,7 @@ def run_nested_cv(
     Y : ndarray (n, n_markers)
         Marker scalars (NaN allowed).
     y_cls : ndarray (n,)
-        Integer class labels {0, 1}.
+        Integer class labels.
     subjects : list of str
         Subject-session keys (used for group extraction).
     marker_names : list of str
@@ -680,6 +866,8 @@ def run_nested_cv(
         Pre-computed folds from :func:`generate_nested_cv_folds` /
         :func:`load_cv_splits`.  When provided, ``n_folds`` and
         ``random_state`` are ignored for the outer loop.
+    is_multiclass : bool
+        When True, use balanced_accuracy_score as the metric instead of AUC.
 
     Returns
     -------
@@ -738,6 +926,19 @@ def run_nested_cv(
         X_train_res = residualizer.transform(Y_train, X_train_raw)
         X_test_res = residualizer.transform(Y_test, X_test_raw)
 
+        # ── Optional: per-fold train-only PCA on residualized embeddings ──
+        pca_n_comp = None
+        pca_var_exp = None
+        if pca:
+            from sklearn.decomposition import PCA as _PCA
+            n_train = X_train_res.shape[0]
+            n_feat = X_train_res.shape[1]
+            pca_n_comp = int(min(pca_components, max(n_train - 1, 1), n_feat))
+            _pca = _PCA(n_components=pca_n_comp, random_state=random_state)
+            X_train_res = _pca.fit_transform(X_train_res)
+            X_test_res = _pca.transform(X_test_res)
+            pca_var_exp = float(_pca.explained_variance_ratio_.sum())
+
         # ── Step 3 & 4: fit and evaluate classifiers ───────────────────────
         for clf_name in classifiers:
             try:
@@ -751,7 +952,7 @@ def run_nested_cv(
                 )
                 scores = _decision_scores(clf, clf_name, X_test_res)
                 preds = clf.predict(X_test_res)
-                auc_val = _safe_auc(y_test, scores, preds)
+                auc_val = _safe_auc(y_test, scores, preds, is_multiclass=is_multiclass)
             except Exception as exc:
                 print(
                     f"      [WARN] {clf_name} fold {fold_idx + 1} failed: {exc}",
@@ -760,21 +961,28 @@ def run_nested_cv(
                 auc_val = float("nan")
                 preds = np.zeros(len(y_test), dtype=int)
 
+            metric_name = "Bal.Acc" if is_multiclass else "AUC"
             fold_aucs[clf_name].append(float(auc_val))
-            fold_details[clf_name].append(
-                {
-                    "fold": fold_idx + 1,
-                    "auc": float(auc_val),
-                    "train_subjects": [subjects[i] for i in train_idx],
-                    "test_subjects": [subjects[i] for i in test_idx],
-                    "n_train_VS": int(np.sum(y_train == 0)),
-                    "n_train_MCS": int(np.sum(y_train == 1)),
-                    "n_test_VS": int(np.sum(y_test == 0)),
-                    "n_test_MCS": int(np.sum(y_test == 1)),
-                }
-            )
+            fold_detail = {
+                "fold": fold_idx + 1,
+                "auc": float(auc_val),
+                "train_subjects": [subjects[i] for i in train_idx],
+                "test_subjects": [subjects[i] for i in test_idx],
+                "class_counts_train": {
+                    str(c): int(np.sum(y_train == c))
+                    for c in np.unique(y_train)
+                },
+                "class_counts_test": {
+                    str(c): int(np.sum(y_test == c))
+                    for c in np.unique(y_test)
+                },
+            }
+            if pca:
+                fold_detail["n_pca_components"] = pca_n_comp
+                fold_detail["pca_explained_variance"] = pca_var_exp
+            fold_details[clf_name].append(fold_detail)
             print(
-                f"      [{clf_name}] AUC = {auc_val:.3f}",
+                f"      [{clf_name}] {metric_name} = {auc_val:.3f}",
                 flush=True,
             )
 
@@ -795,7 +1003,9 @@ def run_nested_cv(
 # ── Plotting ──────────────────────────────────────────────────────────────────
 
 
-def plot_auc_comparison(all_results, output_path, classifiers):
+def plot_auc_comparison(
+    all_results, output_path, classifiers, title_suffix="Classification", is_multiclass=False
+):
     """Plot mean AUC ± std per FM model.
 
     Parameters
@@ -805,6 +1015,10 @@ def plot_auc_comparison(all_results, output_path, classifiers):
     output_path : str
         Full path for the output PNG.
     classifiers : list of str
+    title_suffix : str
+        Appended to the plot title to identify the target/mode.
+    is_multiclass : bool
+        If True, label the y-axis as balanced accuracy and set chance at 1/n_classes.
     """
     model_names = [m for m in FM_MODELS if m in all_results]
     if not model_names:
@@ -836,16 +1050,18 @@ def plot_auc_comparison(all_results, output_path, classifiers):
             linewidth=1.5,
         )
 
+    chance = 0.25 if is_multiclass else 0.5
     ax.axhline(
-        0.5, color="gray", linestyle="--", linewidth=1, alpha=0.7, label="chance"
+        chance, color="gray", linestyle="--", linewidth=1, alpha=0.7, label="chance"
     )
     ax.set_xticks(x)
     ax.set_xticklabels(model_names, fontsize=11)
     ax.set_ylim(0.0, 1.0)
-    ax.set_ylabel("AUC (mean ± std)", fontsize=12)
+    metric_label = "Balanced Accuracy (mean ± std)" if is_multiclass else "AUC (mean ± std)"
+    ax.set_ylabel(metric_label, fontsize=12)
     ax.set_xlabel("Foundation Model", fontsize=12)
     ax.set_title(
-        "VS vs MCS classification after dimension-wise marker residualization\n"
+        f"{title_suffix} — dimension-wise marker residualization\n"
         "(nested CV, last-layer embeddings)",
         fontsize=11,
     )
@@ -858,6 +1074,74 @@ def plot_auc_comparison(all_results, output_path, classifiers):
     print(f"   Saved: {output_path}", flush=True)
 
 
+def plot_summary_heatmap(summary_data, output_path, best_clf="svm"):
+    """Plot a heatmap of best-classifier mean AUC across all targets × FM models.
+
+    Parameters
+    ----------
+    summary_data : list of dict
+        Each dict: ``{"subdir": str, "title": str, "model": str,
+        "clf": str, "mean_auc": float}``.
+    output_path : str
+    best_clf : str
+        Which classifier column to use for the heatmap (default: "svm").
+    """
+    # Collect all targets and models in display order
+    targets_seen = []
+    models_seen = []
+    data_map = {}  # (title, model) -> mean_auc
+    for row in summary_data:
+        title = row["title"]
+        model = row["model"]
+        if title not in targets_seen:
+            targets_seen.append(title)
+        if model not in models_seen and model in FM_MODELS:
+            models_seen.append(model)
+        data_map[(title, model)] = max(
+            data_map.get((title, model), float("nan")), row["mean_auc"]
+        )
+
+    # Respect FM_MODELS ordering
+    models_seen = [m for m in FM_MODELS if m in models_seen]
+
+    if not targets_seen or not models_seen:
+        return
+
+    matrix = np.full((len(targets_seen), len(models_seen)), np.nan)
+    for ti, title in enumerate(targets_seen):
+        for mi, model in enumerate(models_seen):
+            val = data_map.get((title, model), np.nan)
+            matrix[ti, mi] = val
+
+    fig_h = max(6, len(targets_seen) * 0.45)
+    fig_w = max(5, len(models_seen) * 1.2)
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+
+    im = ax.imshow(matrix, aspect="auto", cmap="RdYlGn", vmin=0.4, vmax=1.0)
+    plt.colorbar(im, ax=ax, label="Mean AUC / Bal.Acc")
+
+    ax.set_xticks(np.arange(len(models_seen)))
+    ax.set_xticklabels(models_seen, fontsize=10, rotation=30, ha="right")
+    ax.set_yticks(np.arange(len(targets_seen)))
+    ax.set_yticklabels(targets_seen, fontsize=8)
+
+    for ti in range(len(targets_seen)):
+        for mi in range(len(models_seen)):
+            val = matrix[ti, mi]
+            if not np.isnan(val):
+                ax.text(mi, ti, f"{val:.2f}", ha="center", va="center", fontsize=7,
+                        color="black" if 0.45 < val < 0.9 else "white")
+
+    ax.set_title(
+        "Dim-wise residualization — best-classifier mean score\n(all targets × all FM models)",
+        fontsize=11,
+    )
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"   Saved: {output_path}", flush=True)
+
+
 # ── Main pipeline ─────────────────────────────────────────────────────────────
 
 
@@ -865,7 +1149,8 @@ def run_model(
     model_name,
     results_root,
     marker_csv,
-    patient_labels_file,
+    labels_dict,
+    is_multiclass,
     output_dir,
     reduction,
     classifiers,
@@ -873,35 +1158,39 @@ def run_model(
     random_state,
     precomputed_splits=None,
     common_sessions_ref=None,
+    compute_r2=True,
+    pca=False,
+    pca_components=27,
 ):
-    """Run the full dimension residualization + classification pipeline for one FM model.
+    """Run dimension residualization + classification for one FM model and one target.
 
     Parameters
     ----------
+    labels_dict : dict
+        ``{subject_session_key: label_str}`` — pre-loaded for the current target.
+    is_multiclass : bool
+        When True, uses balanced_accuracy_score instead of AUC.
     precomputed_splits : list of fold dicts or None
-        Pre-computed CV splits to use.  When provided together with
-        ``common_sessions_ref``, data is aligned to that session list and
-        splits indices are used directly (no new folds are generated).
+        Pre-computed CV splits.  When provided with ``common_sessions_ref``,
+        data is aligned to that session list.
     common_sessions_ref : list of str or None
-        Ordered session list from the splits file.  Acts as the reference
-        for X/Y/y_cls array alignment so fold indices are valid.
+        Reference session order so fold indices remain valid across models.
+    compute_r2 : bool
+        If True, compute and save R² per embedding dimension.
 
     Returns
     -------
     model_results : dict or None
     subjects_info : dict or None
     splits_used : list of fold dicts
-        The folds actually used (pre-computed or freshly generated).
     common_keys_used : list of str
-        Session list corresponding to the returned splits.
-    labels_for_splits : dict
-        ``{session_key: int_label}`` for ``common_keys_used``.
+    labels_for_splits : dict  ``{session_key: int_label}``
     """
     print(f"\n{'=' * 60}", flush=True)
     print(f"  Foundation model: {model_name}", flush=True)
     print(f"{'=' * 60}", flush=True)
 
-    # ── Load data ─────────────────────────────────────────────────────────
+    # ── Load embeddings & markers ─────────────────────────────────────────
     print("  Loading embeddings ...", flush=True)
     embeddings = load_embeddings(results_root, model_name)
     if not embeddings:
@@ -910,9 +1199,6 @@ def run_model(
 
     print("  Loading markers ...", flush=True)
     markers_dict, marker_names = load_markers(marker_csv, reduction)
-
-    print("  Loading patient labels ...", flush=True)
-    labels_dict = load_patient_labels(patient_labels_file)
 
     # ── Align subjects ────────────────────────────────────────────────────
     if precomputed_splits is not None and common_sessions_ref is not None:
@@ -949,8 +1235,8 @@ def run_model(
         )
         return None, None, None, None, None
 
-    X = np.stack([embeddings[k] for k in common_keys])       # (n, emb_dim)
-    Y = np.stack([markers_dict[k] for k in common_keys])     # (n, n_markers)
+    X = np.stack([embeddings[k] for k in common_keys])    # (n, emb_dim)
+    Y = np.stack([markers_dict[k] for k in common_keys])  # (n, n_markers)
     label_strings = [labels_dict[k] for k in common_keys]
 
     le = LabelEncoder()
@@ -986,6 +1272,7 @@ def run_model(
         )
 
     # ── Nested CV ─────────────────────────────────────────────────────────
+    metric_name = "Bal.Acc" if is_multiclass else "AUC"
     print("  Running nested CV ...", flush=True)
     model_results = run_nested_cv(
         X=X,
@@ -997,35 +1284,41 @@ def run_model(
         n_folds=n_folds,
         random_state=random_state,
         precomputed_splits=precomputed_splits,
+        is_multiclass=is_multiclass,
+        pca=pca,
+        pca_components=pca_components,
     )
 
     for clf_name, res in model_results.items():
         print(
-            f"  [{clf_name}] AUC = {res['mean_auc']:.3f} ± {res['std_auc']:.3f}"
+            f"  [{clf_name}] {metric_name} = {res['mean_auc']:.3f} ± {res['std_auc']:.3f}"
             f" ({res['n_valid_folds']} folds)",
             flush=True,
         )
 
-    # ── R² per embedding dimension (global fit for visualization) ─────────
-    print("  Computing R² per embedding dimension ...", flush=True)
-    groups_all = np.array([s.split("_ses-")[0] for s in common_keys])
-    try:
-        r2_values = compute_r2_per_dim(Y, X, groups=groups_all)
-        r2_plot_path = op.join(output_dir, f"r2_per_dim_{model_name}.png")
-        os.makedirs(output_dir, exist_ok=True)
-        plot_r2_per_dim(r2_values, model_name, r2_plot_path)
-        # Also save the R² values as npz for later inspection
-        np.savez(
-            op.join(output_dir, f"r2_per_dim_{model_name}.npz"),
-            r2_per_dim=r2_values,
-        )
-    except Exception as exc:
-        print(f"  [WARN] R² per dim plot failed: {exc}", flush=True)
+    # ── R² per embedding dimension (global fit, only for CRS to save time) ──
+    if compute_r2:
+        print("  Computing R² per embedding dimension ...", flush=True)
+        groups_all = np.array([s.split("_ses-")[0] for s in common_keys])
+        try:
+            r2_values = compute_r2_per_dim(Y, X, groups=groups_all)
+            os.makedirs(output_dir, exist_ok=True)
+            r2_plot_path = op.join(output_dir, f"r2_per_dim_{model_name}.png")
+            plot_r2_per_dim(r2_values, model_name, r2_plot_path)
+            np.savez(
+                op.join(output_dir, f"r2_per_dim_{model_name}.npz"),
+                r2_per_dim=r2_values,
+            )
+        except Exception as exc:
+            print(f"  [WARN] R² per dim plot failed: {exc}", flush=True)
 
     return model_results, subjects_info, precomputed_splits, common_keys, labels_for_splits
 
 
-def save_results(all_results, subjects_per_model, output_dir, reduction, n_folds):
+def save_results(
+    all_results, subjects_per_model, output_dir, reduction, n_folds,
+    target="crs", label_mode=None, subset=None, is_multiclass=False,
+):
     """Save JSON and CSV summaries of all results.
 
     Parameters
@@ -1037,6 +1330,8 @@ def save_results(all_results, subjects_per_model, output_dir, reduction, n_folds
     output_dir : str
     reduction : str
     n_folds : int
+    target, label_mode, subset, is_multiclass
+        Target configuration for metadata embedding.
     """
     os.makedirs(output_dir, exist_ok=True)
 
@@ -1044,6 +1339,11 @@ def save_results(all_results, subjects_per_model, output_dir, reduction, n_folds
         "method": "dimension_residualization",
         "reduction": reduction,
         "n_folds": n_folds,
+        "target": target,
+        "label_mode": label_mode,
+        "subset": subset,
+        "is_multiclass": is_multiclass,
+        "metric": "balanced_accuracy" if is_multiclass else "roc_auc",
         "results": {},
     }
     for model_name, clf_results in all_results.items():
@@ -1079,9 +1379,13 @@ def save_results(all_results, subjects_per_model, output_dir, reduction, n_folds
                     "std_auc": round(res["std_auc"], 4),
                     "n_folds_valid": res["n_valid_folds"],
                     "n_subjects": n_subjects,
-                    "n_VS": class_counts.get("VS", "?"),
-                    "n_MCS": class_counts.get("MCS", "?"),
+                    "n_classes": len(class_counts),
+                    "classes": str(list(class_counts.keys())),
                     "reduction": reduction,
+                    "target": target,
+                    "label_mode": label_mode or "",
+                    "subset": subset or "",
+                    "is_multiclass": is_multiclass,
                 }
             )
 
@@ -1098,7 +1402,8 @@ def main():
     parser = argparse.ArgumentParser(
         description=(
             "Residualize FM embeddings dimension-wise w.r.t. EEG markers "
-            "(markers → each embedding dim), then classify VS/MCS."
+            "(markers → each embedding dim), then classify. "
+            "Supports all clinical targets from baseline.py."
         )
     )
     parser.add_argument(
@@ -1141,6 +1446,20 @@ def main():
         help="Classifiers to evaluate (default: all four).",
     )
     parser.add_argument(
+        "--pca",
+        action="store_true",
+        help=(
+            "Apply per-fold train-only PCA to residualized FM embeddings before "
+            "classification. Components fit on the training split only to avoid leakage."
+        ),
+    )
+    parser.add_argument(
+        "--pca-components",
+        type=int,
+        default=27,
+        help="Number of PCA components when --pca is set (default: 27).",
+    )
+    parser.add_argument(
         "--n-folds",
         type=int,
         default=5,
@@ -1166,8 +1485,38 @@ def main():
         default=None,
         help=(
             "Path to save the CV splits JSON when generating new splits. "
-            "If omitted, splits are auto-saved to "
-            "{output_dir}/cv_splits/residualization_dim_crs_{timestamp}.json."
+            "If omitted, splits are auto-saved inside {output_dir}/cv_splits/."
+        ),
+    )
+    # ── Target selection ──────────────────────────────────────────────────────
+    _target_choices = ["crs", "etiology", "etiology_code", "cs_6m", "cs_1y", "cs_2y"]
+    parser.add_argument(
+        "--target",
+        choices=_target_choices,
+        default="crs",
+        help="Prediction target (default: crs). Ignored when --all-targets is set.",
+    )
+    parser.add_argument(
+        "--label-mode",
+        default=None,
+        choices=[
+            "multiclass", "binary", "binary_death",
+            "binary_vs_to_mcs", "binary_mcs_to_conscious", "binary_improvement",
+        ],
+        help="Label mode for cs_* targets (default: binary).",
+    )
+    parser.add_argument(
+        "--subset",
+        default=None,
+        choices=["VS", "MCS"],
+        help="Restrict etiology/etiology_code to VS or MCS baseline subjects.",
+    )
+    parser.add_argument(
+        "--all-targets",
+        action="store_true",
+        help=(
+            "Run all 25 target × mode configurations sequentially and produce "
+            "a summary heatmap across all targets and FM models."
         ),
     )
     args = parser.parse_args()
@@ -1175,44 +1524,106 @@ def main():
     models_to_run = FM_MODELS if args.model == "all" else [args.model]
     os.makedirs(args.output_dir, exist_ok=True)
 
-    # ── Load or prepare splits ────────────────────────────────────────────────
-    precomputed_splits = None
-    common_sessions_ref = None
-    labels_ref = None
+    # ── Build list of target configs to run ───────────────────────────────────
+    if args.all_targets:
+        configs_to_run = TARGET_CONFIGS
+    else:
+        # Default label_mode for cs_* if not specified
+        lm = args.label_mode
+        if lm is None and args.target in ("cs_6m", "cs_1y", "cs_2y"):
+            lm = "binary"
+        # Find matching config entry for title_suffix; fall back to inline
+        title_suffix = args.target
+        for tgt, lmode, sub, subdir, tsuffix in TARGET_CONFIGS:
+            if tgt == args.target and lmode == lm and sub == args.subset:
+                title_suffix = tsuffix
+                break
+        configs_to_run = [(args.target, lm, args.subset, None, title_suffix)]
 
-    if args.splits_file and op.isfile(args.splits_file):
-        precomputed_splits, common_sessions_ref, labels_ref = load_cv_splits(
-            args.splits_file
-        )
+    # ── Main loop over target configs ─────────────────────────────────────────
+    summary_rows = []  # for cross-target heatmap
+
+    for cfg_target, cfg_mode, cfg_subset, cfg_subdir, cfg_title in configs_to_run:
+        if cfg_subdir is not None:
+            target_output_dir = op.join(args.output_dir, cfg_subdir)
+        else:
+            target_output_dir = args.output_dir
+        os.makedirs(target_output_dir, exist_ok=True)
+
         print(
-            f"Loaded {len(precomputed_splits)} pre-computed outer folds "
-            f"({len(common_sessions_ref)} sessions) from {args.splits_file}",
+            f"\n{'#' * 65}\n"
+            f"  TARGET: {cfg_title!r}\n"
+            f"  output: {target_output_dir}\n"
+            f"{'#' * 65}",
             flush=True,
         )
 
-    all_results = {}
-    subjects_per_model = {}
-    _splits_saved = precomputed_splits is not None
-
-    for model_name in models_to_run:
-        result = run_model(
-            model_name=model_name,
-            results_root=args.results_root,
-            marker_csv=args.marker_csv,
-            patient_labels_file=args.patient_labels,
-            output_dir=op.join(args.output_dir, model_name),
-            reduction=args.reduction,
-            classifiers=args.classifiers,
-            n_folds=args.n_folds,
-            random_state=args.random_state,
-            precomputed_splits=precomputed_splits,
-            common_sessions_ref=common_sessions_ref,
+        # Load labels for this target
+        print("Loading patient labels ...", flush=True)
+        labels_dict, is_multiclass = load_labels_for_target(
+            args.patient_labels, cfg_target, cfg_mode, cfg_subset
         )
-        model_results, subjects_info, splits_used, common_used, labels_used = result
-        if model_results is not None:
+        if len(labels_dict) < 10:
+            print(f"  [SKIP] Too few labelled sessions ({len(labels_dict)}) — skip.", flush=True)
+            continue
+
+        # ── Load or prepare per-target splits ─────────────────────────────
+        precomputed_splits = None
+        common_sessions_ref = None
+        labels_ref = None
+
+        if args.splits_file and op.isfile(args.splits_file):
+            precomputed_splits, common_sessions_ref, labels_ref = load_cv_splits(
+                args.splits_file
+            )
+            print(
+                f"Loaded {len(precomputed_splits)} pre-computed outer folds "
+                f"({len(common_sessions_ref)} sessions) from {args.splits_file}",
+                flush=True,
+            )
+
+        all_results = {}
+        subjects_per_model = {}
+        _splits_saved = precomputed_splits is not None
+        # Only compute R² for the CRS target to keep runtimes manageable
+        _compute_r2 = (cfg_target == "crs")
+
+        for model_name in models_to_run:
+            result = run_model(
+                model_name=model_name,
+                results_root=args.results_root,
+                marker_csv=args.marker_csv,
+                labels_dict=labels_dict,
+                is_multiclass=is_multiclass,
+                output_dir=op.join(target_output_dir, model_name),
+                reduction=args.reduction,
+                classifiers=args.classifiers,
+                n_folds=args.n_folds,
+                random_state=args.random_state,
+                precomputed_splits=precomputed_splits,
+                common_sessions_ref=common_sessions_ref,
+                compute_r2=_compute_r2,
+                pca=args.pca,
+                pca_components=args.pca_components,
+            )
+            model_results, subjects_info, splits_used, common_used, labels_used = result
+            if model_results is None:
+                continue
+
             all_results[model_name] = model_results
             subjects_per_model[model_name] = subjects_info or {}
 
+            # Collect best-clf score for summary heatmap
+            for clf_name, res in model_results.items():
+                summary_rows.append({
+                    "title": cfg_title,
+                    "subdir": cfg_subdir or "",
+                    "model": model_name,
+                    "clf": clf_name,
+                    "mean_auc": res["mean_auc"],
+                })
+
+            # Lock in splits on first successful run per target
             if not _splits_saved and splits_used is not None:
                 precomputed_splits = splits_used
                 common_sessions_ref = common_used
@@ -1220,34 +1631,46 @@ def main():
                 save_path = args.save_splits_to
                 if not save_path:
                     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    splits_dir = op.join(args.output_dir, "cv_splits")
-                    save_path = op.join(
-                        splits_dir, f"residualization_dim_crs_{ts}.json"
-                    )
+                    splits_dir = op.join(target_output_dir, "cv_splits")
+                    tag = (cfg_subdir or cfg_target).replace("/", "_")
+                    save_path = op.join(splits_dir, f"dim_splits_{tag}_{ts}.json")
                 save_cv_splits(splits_used, common_used, labels_used, save_path)
                 print(f"  CV splits saved to {save_path}", flush=True)
                 _splits_saved = True
 
-    if not all_results:
-        print("\nNo results to save — all models were skipped.", flush=True)
-        return
+        if not all_results:
+            print("  No results — all models were skipped for this target.", flush=True)
+            continue
 
-    print("\nSaving results ...", flush=True)
-    save_results(
-        all_results=all_results,
-        subjects_per_model=subjects_per_model,
-        output_dir=args.output_dir,
-        reduction=args.reduction,
-        n_folds=args.n_folds,
-    )
+        print("\nSaving results ...", flush=True)
+        save_results(
+            all_results=all_results,
+            subjects_per_model=subjects_per_model,
+            output_dir=target_output_dir,
+            reduction=args.reduction,
+            n_folds=args.n_folds,
+            target=cfg_target,
+            label_mode=cfg_mode,
+            subset=cfg_subset,
+            is_multiclass=is_multiclass,
+        )
 
-    print("Generating AUC comparison plot ...", flush=True)
-    plot_path = op.join(args.output_dir, "auc_comparison.png")
-    plot_auc_comparison(
-        all_results=all_results,
-        output_path=plot_path,
-        classifiers=args.classifiers,
-    )
+        print("Generating AUC comparison plot ...", flush=True)
+        plot_auc_comparison(
+            all_results=all_results,
+            output_path=op.join(target_output_dir, "auc_comparison.png"),
+            classifiers=args.classifiers,
+            title_suffix=cfg_title,
+            is_multiclass=is_multiclass,
+        )
+
+    # ── Summary heatmap (only meaningful when --all-targets) ──────────────────
+    if args.all_targets and summary_rows:
+        print("\nGenerating summary heatmap across all targets ...", flush=True)
+        plot_summary_heatmap(
+            summary_data=summary_rows,
+            output_path=op.join(args.output_dir, "summary_heatmap.png"),
+        )
 
     print("\nDone.", flush=True)
 

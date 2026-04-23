@@ -68,13 +68,19 @@ _MODEL_LABELS = {
     "NeuroLM": "NeuroLM",
 }
 
-# CRS shifted variants: (embedding_kind, display_suffix)
+# CRS shifted/PCA variants: (embedding_kind, display_suffix)
+# Missing files are skipped silently — new models/variants appear automatically.
 _SHIFT_VARIANTS = [
-    ("MLP_EMBEDDING",                    ""),           # base model — no suffix
-    ("EMBEDDING_DK_COMBINED",            " (Combined)"),
-    ("EMBEDDING_DK_COMBINED_DK_SHIFTED", " (DK Shifted)"),
-    ("EMBEDDING_DK_COMBINED_FM_SHIFTED", " (FM Shifted)"),
-    ("EMBEDDING_DK_COMBINED_BOTH_SHIFTED"," (All Shifted)"),
+    ("MLP_EMBEDDING",                          ""),                  # base model
+    ("EMBEDDING_DK_COMBINED",                  " (Combined)"),
+    ("EMBEDDING_DK_COMBINED_DK_SHIFTED",       " (DK Shifted)"),
+    ("EMBEDDING_DK_COMBINED_FM_SHIFTED",       " (FM Shifted)"),
+    ("EMBEDDING_DK_COMBINED_BOTH_SHIFTED",     " (All Shifted)"),
+    ("EMBEDDING_FM_PCA_ONLY",                  " (FM PCA)"),         # PCA-reduced FM
+    ("EMBEDDING_DK_COMBINED_FM_PCA",           " (PCA + DK)"),      # PCA FM + DK
+    ("EMBEDDING_DK_COMBINED_FM_PCA_DK_SHIFTED"," (PCA + DK Shifted)"),
+    ("EMBEDDING_DK_COMBINED_FM_PCA_FM_SHIFTED"," (PCA + FM Shifted)"),
+    ("EMBEDDING_DK_COMBINED_FM_PCA_BOTH_SHIFTED"," (PCA + All Shifted)"),
 ]
 
 # Non-CRS targets to produce overview plots for
@@ -255,6 +261,42 @@ def collect_crs_variant_data(fm_model: str) -> dict[str, dict[str, dict]]:
     return result
 
 
+def collect_pca_cross_model_data() -> dict[str, dict[str, dict]]:
+    """Return {label: {clf: {mean, std}}} for Baseline + FM × {raw, FM PCA, PCA+DK} on CRS."""
+    result: dict[str, dict[str, dict]] = {}
+
+    # Baseline (marker-based, no PCA concept)
+    bl_label = _MODEL_LABELS["MARKER_BASELINE"]
+    result[bl_label] = {}
+    for clf in CLASSIFIERS:
+        candidates = _candidate_paths_main("MARKER_BASELINE", "crs", "MLP_EMBEDDING", clf)
+        scores = _resolve_scores(candidates)
+        if scores is not None:
+            result[bl_label][clf] = scores
+
+    # FM models: raw, PCA-only, PCA+DK
+    _pca_variants = [
+        ("MLP_EMBEDDING",            ""),
+        ("EMBEDDING_FM_PCA_ONLY",    " (FM PCA)"),
+        ("EMBEDDING_DK_COMBINED_FM_PCA", " (PCA + DK)"),
+    ]
+    for model in FM_MODELS:
+        base_label = _MODEL_LABELS[model]
+        for emb_kind, suffix in _pca_variants:
+            lbl = base_label + suffix
+            result[lbl] = {}
+            for clf in CLASSIFIERS:
+                if emb_kind == "MLP_EMBEDDING":
+                    candidates = _candidate_paths_main(model, "crs", emb_kind, clf)
+                else:
+                    candidates = _candidate_paths_shifted(model, emb_kind, clf)
+                scores = _resolve_scores(candidates)
+                if scores is not None:
+                    result[lbl][clf] = scores
+
+    return result
+
+
 def collect_combined_overview_data(metric_path: str) -> dict[str, dict[str, dict]]:
     """Return {label: {clf: {mean, std}}} for Baseline + FM base + FM (Combined).
 
@@ -368,6 +410,101 @@ def plot_auc_dots(
     print(f"   Saved: {output_path}")
 
 
+# ── Multi-panel row plot ───────────────────────────────────────────────────────
+
+
+def plot_auc_panel_row(
+    panels: list[tuple[dict[str, dict[str, dict]], str]],
+    x_order: list[str],
+    output_path: Path,
+    suptitle: str | None = None,
+) -> None:
+    """1-row × N-column subplot figure with shared y-axis.
+
+    Parameters
+    ----------
+    panels      : list of (data_dict, subplot_title) — one entry per column
+    x_order     : x-axis label order (same for every panel)
+    output_path : where to save the figure
+    suptitle    : optional figure-level title
+    """
+    n = len(panels)
+    fig, axes = plt.subplots(
+        1, n,
+        figsize=(max(5, n * 5), 5),
+        sharey=True,
+    )
+    if n == 1:
+        axes = [axes]
+
+    n_clf = len(CLASSIFIERS)
+    width = 0.7 / max(n_clf, 1)
+
+    handles_global: list = []
+    labels_global: list[str] = []
+    first_legend = True
+
+    for ax, (data, sub_title) in zip(axes, panels):
+        x_labels = [m for m in x_order if m in data]
+        x = np.arange(len(x_labels))
+
+        for ci, clf_name in enumerate(CLASSIFIERS):
+            marker, color = _CLASSIFIER_MARKERS.get(clf_name, ("o", None))
+            means, stds = [], []
+            for label in x_labels:
+                entry = data.get(label, {}).get(clf_name, {})
+                means.append(entry.get("mean", float("nan")))
+                stds.append(entry.get("std", 0.0))
+
+            offset = (ci - (n_clf - 1) / 2) * width
+            eb = ax.errorbar(
+                x + offset,
+                means,
+                yerr=stds,
+                fmt=marker,
+                color=color,
+                capsize=4,
+                markersize=8,
+                linewidth=1.5,
+                label=clf_name,
+            )
+            if first_legend:
+                handles_global.append(eb[0])
+                labels_global.append(clf_name)
+
+        chance = ax.axhline(0.5, color="gray", linestyle="--", linewidth=1, alpha=0.7)
+        if first_legend:
+            handles_global.append(chance)
+            labels_global.append("chance")
+            first_legend = False
+
+        ax.set_xticks(x)
+        ax.set_xticklabels(x_labels, fontsize=9, rotation=20, ha="right")
+        ax.set_title(sub_title, fontsize=10)
+        ax.grid(axis="y", alpha=0.3)
+        ax.set_xlabel("Model", fontsize=10)
+
+    axes[0].set_ylim(0.0, 1.0)
+    axes[0].set_ylabel("AUC (mean ± std)", fontsize=11)
+
+    fig.legend(
+        handles_global,
+        labels_global,
+        loc="lower center",
+        ncol=n_clf + 1,
+        fontsize=9,
+        bbox_to_anchor=(0.5, -0.02),
+    )
+
+    if suptitle:
+        fig.suptitle(suptitle, fontsize=12, y=1.01)
+
+    fig.tight_layout()
+    fig.savefig(output_path, bbox_inches="tight")
+    plt.close(fig)
+    print(f"   Saved: {output_path}")
+
+
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 
@@ -394,7 +531,7 @@ def main() -> None:
         output_path=output_dir / "crs_main_models.png",
     )
 
-    # ── CRS: per-FM variant plots ─────────────────────────────────────────────
+    # ── CRS: per-FM variant plots (A — full, including PCA) ───────────────────
     for fm_model in FM_MODELS:
         print(f"CRS {fm_model} variants plot...")
         variant_data = collect_crs_variant_data(fm_model)
@@ -405,12 +542,38 @@ def main() -> None:
             base_label + " (DK Shifted)",
             base_label + " (FM Shifted)",
             base_label + " (All Shifted)",
+            base_label + " (FM PCA)",
+            base_label + " (PCA + DK)",
+            base_label + " (PCA + DK Shifted)",
+            base_label + " (PCA + FM Shifted)",
+            base_label + " (PCA + All Shifted)",
         ]
         plot_auc_dots(
             variant_data,
             x_order=x_order_variants,
-            title=f"CRS — {base_label}: raw vs. shifted variants (nested CV)",
+            title=f"CRS — {base_label}: raw vs. shifted vs. PCA variants (nested CV)",
             output_path=output_dir / f"crs_{fm_model}_variants.png",
+        )
+
+    # ── CRS: per-FM PCA-focused plots (B) ────────────────────────────────────
+    for fm_model in FM_MODELS:
+        print(f"CRS {fm_model} PCA-focused plot...")
+        variant_data = collect_crs_variant_data(fm_model)
+        base_label = _MODEL_LABELS[fm_model]
+        x_order_pca = [
+            base_label,
+            base_label + " (FM PCA)",
+            base_label + " (Combined)",
+            base_label + " (PCA + DK)",
+            base_label + " (PCA + DK Shifted)",
+            base_label + " (PCA + FM Shifted)",
+            base_label + " (PCA + All Shifted)",
+        ]
+        plot_auc_dots(
+            variant_data,
+            x_order=x_order_pca,
+            title=f"CRS — {base_label}: PCA reduction vs. DK augmentation (nested CV)",
+            output_path=output_dir / f"crs_{fm_model}_pca_focused.png",
         )
 
     # ── Other targets: overview plots ─────────────────────────────────────────
@@ -465,6 +628,55 @@ def main() -> None:
             output_path=output_dir / f"{slug}_combined_overview.png",
             band_groups=combined_bands,
         )
+
+    # ── CRS: cross-model PCA vs non-PCA overview (C) ─────────────────────────
+    print("CRS PCA cross-model overview plot...")
+    pca_cross_data = collect_pca_cross_model_data()
+    pca_cross_x_order = ["Baseline"]
+    for m in FM_MODELS:
+        lbl = _MODEL_LABELS[m]
+        pca_cross_x_order += [lbl, lbl + " (FM PCA)", lbl + " (PCA + DK)"]
+    # Shade each FM model group (3 entries each): TOTEM (1-3), CBraMod (4-6), LaBram (7-9), NeuroLM (10-12)
+    pca_cross_bands = [(1, 3), (4, 6), (7, 9), (10, 12)]
+    plot_auc_dots(
+        pca_cross_data,
+        x_order=pca_cross_x_order,
+        title="CRS — Baseline vs. FM vs. FM-PCA vs. FM-PCA + DK (nested CV)",
+        output_path=output_dir / "crs_pca_cross_model.png",
+        band_groups=pca_cross_bands,
+    )
+
+    # ── Panel row 1: CRS + CS improvement across time-points ─────────────────
+    print("Panel row: CRS + CS improvement (6m / 1y / 2y)...")
+    panel1_specs = [
+        ("crs",                  "CRS — AUC"),
+        ("cs_6m/binary_improvement", "CS 6M — Improvement AUC"),
+        ("cs_1y/binary_improvement", "CS 1Y — Improvement AUC"),
+        ("cs_2y/binary_improvement", "CS 2Y — Improvement AUC"),
+    ]
+    panel1_data = [(collect_main_model_data(mp), title) for mp, title in panel1_specs]
+    plot_auc_panel_row(
+        panel1_data,
+        x_order=x_order_main,
+        output_path=output_dir / "panel_crs_improvement.png",
+  #      suptitle="CRS and Improvement (VS→MCS/Conscious · MCS→Conscious) — nested CV",
+    )
+
+    # ── Panel row 2: Etiology and Etiology Code by baseline state ─────────────
+    print("Panel row: Etiology / Etiology Code — VS only / MCS only...")
+    panel2_specs = [
+        ("etiology/vs_only",      "Etiology (VS only)"),
+        ("etiology/mcs_only",     "Etiology (MCS only)"),
+        ("etiology_code/vs_only", "Etiology Code (VS only)"),
+        ("etiology_code/mcs_only","Etiology Code (MCS only)"),
+    ]
+    panel2_data = [(collect_main_model_data(mp), title) for mp, title in panel2_specs]
+    plot_auc_panel_row(
+        panel2_data,
+        x_order=x_order_main,
+        output_path=output_dir / "panel_etiology_baseline.png",
+       # suptitle="Etiology prediction stratified by baseline consciousness state — nested CV",
+    )
 
     print("\nDone.")
 
