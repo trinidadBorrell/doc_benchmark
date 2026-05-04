@@ -1,6 +1,6 @@
 # Can EEG Foundation Models Go Beyond Domain Knowledge in Reading Consciousness?
 
-Reference implementation for the NeurIPS 2025 submission of the same title.
+Reference implementation for the NeurIPS 2026 submission of the same title.
 This repository evaluates five EEG foundation models (BIOT, LaBraM, EEGPT,
 NeuroLM, CBraMod) against a validated domain-knowledge (DK) baseline across
 six clinical tasks, on 300 recordings from 249 patients with disorders of
