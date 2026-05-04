@@ -25,8 +25,10 @@ doc_benchmark/
 ├── src/
 │   ├── paper_plots/             ← canonical NeurIPS figures (Fig 1 / 2 / 3 / Appendix)
 │   ├── paper_plots_legacy/      ← variant / ablation plot scripts (not in paper)
-│   ├── model/                   ← classifiers, CV, embedding comparison, MKNN
-│   ├── interp/                  ← linear probing & fold-internal residualisation
+│   ├── model/                   ← dk_marker_baseline, fm_embedding_classifier,
+│   │                              fm_plus_dk_classifier, embedding_comparison (MKNN)
+│   ├── interp/                  ← linear_probing, plot_layerwise_{r2,crs_auc},
+│   │                              res_no_leakage/fold_internal_residualisation
 │   └── misc/                    ← exploratory modules NOT used by the paper
 ├── tests/                       ← pytest suite
 ├── requirements.txt
@@ -47,10 +49,6 @@ transparency and is **not required** to reproduce any paper result.
 python3.11 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-
-# Optional: NICE C extensions for accelerated information-theoretic markers.
-# NICE requires numpy to be pre-installed.
-pip install --no-build-isolation 'nice @ git+https://github.com/nice-tools/nice'
 ```
 
 The pipeline targets Python 3.11 and was developed against the dependency
@@ -91,8 +89,7 @@ requirements:
   `diagnostic_crs_final` (UWS/MCS), `etiology`, `cs_6m`, `cs_1y`, `cs_2y`;
 - a per-recording scalar marker CSV produced by extracting the DK markers
   from §3.2 with the upstream
-  [`nice`](https://github.com/nice-tools/nice) library, e.g.
-  `baseline_stable_20210128_scalars.csv`;
+  [`nice`](https://github.com/nice-tools/nice) library;
 - per-FM embedding files (one `.npy` / `.npz` per recording per layer)
   produced by each model's upstream extraction code.
 
@@ -205,9 +202,9 @@ random row-shufflings of the DK matrix.
 pytest tests/ -v
 ```
 
-The unit tests cover marker computation, HDF5 IO, and CV-split utilities.
-They do not require the clinical dataset and run in under a minute on a
-modest workstation.
+The unit tests cover the CV-split utilities used across all paper
+evaluations. They do not require the clinical dataset and run in under a
+minute on a modest workstation.
 
 ---
 
@@ -221,18 +218,6 @@ ruff format src/
 Configuration (line length 88, target Python 3.8+) lives in
 `pyproject.toml`.
 
----
-
-## Citation
-
-```bibtex
-@inproceedings{eeg_fm_doc_2025,
-  title  = {Can EEG Foundation Models Go Beyond Domain Knowledge in Reading Consciousness?},
-  author = {Anonymous},
-  booktitle = {Advances in Neural Information Processing Systems (NeurIPS)},
-  year   = {2025}
-}
-```
 
 ---
 

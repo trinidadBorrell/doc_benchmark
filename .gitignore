@@ -1,58 +1,30 @@
-notebooks/
-results/
-narrative/
-
-cookbooks/old_scripts/
-cookbooks/cleanup_hdf5_markers.py
-
-data
-cv_splits/
-src/old_version/
-src/extra_tools/
-src/decoder/doc_benchmark
-src/decoder/results
-src/dummy_model_test/
-src/train_extratrees.py
-src/analysis/__init__.py
-src/analysis/ntbk.ipynb
-src/decoder/res
-src/decoder/analysis/peak_analysis.py
-src/model/extratrees.py
-src/analysis/results
-src/ground_truth/
-src/markers_old/
-src/markers/
-src/global_analysis/global_analysis.py
-src/global_analysis/README_SCRIPTS.txt
-src/report_completed_results.py
-src/paper_plots_raw/
-src/interp/run_analysis_nonlinear.sh
-src/interp/run_pool_nonlinear.sh
-src/interp/run_analysis.sh
-src/interp/run_pool.sh
-
-src/model/txt/
-
-src/interp/how_to_run.txt
-src/build_tables/run.txt
-
-
-
-.ruff_cache/
-.vscode/
-.DS_Store
+# ── Python / tooling ──────────────────────────────────────────────────────
 *__pycache__*
+.ruff_cache/
 .venv/
 .venv_n/
 
-PIPELINE_CHANGES_EXPLANATION.txt
-run_model_scripts.txt
+# ── Editor / OS ───────────────────────────────────────────────────────────
+.vscode/
+.DS_Store
 
-
-cookbooks/pipeline.py.backup
-
+# ── Claude Code internals (not part of the release) ───────────────────────
 .claude/
 CLAUDE.md
 
+# ── Run-time outputs and caches (re-created by the pipeline) ──────────────
+results/
+cv_splits/
+data
+notebooks/
+narrative/
 
+# ── Backups and scratch files kept locally only ───────────────────────────
+cookbooks/pipeline.py.backup
+src/model/txt/
+src/report_completed_results.py
+src/model/extratrees.py
 
+# ── DK marker code: use the upstream `nice` library instead ───────────────
+# https://github.com/nice-tools/nice — see README.md "Data" section.
+src/markers/
