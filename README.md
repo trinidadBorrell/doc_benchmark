@@ -93,9 +93,6 @@ requirements:
 - per-FM embedding files (one `.npy` / `.npz` per recording per layer)
   produced by each model's upstream extraction code.
 
-Dataset summary (paper §3.1): 144 UWS / 156 MCS recordings, 40.7% anoxic /
-25.7% TBI, 67.3% acute / 32.7% chronic. CRS-R diagnostic label assigned from
-the best assessment across at least three sessions.
 
 Pre-processing follows a configuration-driven MNE-Python pipeline: 0.5–45 Hz
 bandpass, 50 Hz notch, automatic artifact rejection, bad-channel
@@ -138,17 +135,14 @@ folds are patient-grouped and shared across all FMs (paper §3.2).
 
 | Step | Paper § | Phase flag | Entry point | Outputs (under `<results-root>/`) | Compute (paper Appendix A) |
 |---|---|---|---|---|---|
-| **A** Utility nested CV (5×20, 6 tasks, 5 classifiers, FDR t-test vs DK) | §3.1 (Fig 1) | `--fm-embedding-only` | `src/model/fm_embedding_classifier.py` (called by `pipeline.py`) | `MLP_EMBEDDING/{target}/nested_cv/...` and `MARKER_BASELINE/...` | ~540 CPU-h / 30 jobs |
-| **B** Layer-wise linear probing R² | §3.2 (Fig 2 rows 1–4) | `--probing-only` | `src/interp/linear_probing.py` | `LINEAR_PROBING/regression/{layer}/{FM}/summary.json` | ~580 CPU-h / 5 jobs |
+| **A** Utility nested CV (5×20, 6 tasks, 5 classifiers, FDR t-test vs DK) | §3.1 (Fig 1) | `--fm-embedding-only` | `src/model/fm_embedding_classifier.py` (called by `pipeline.py`) | `FM_EMBEDDING/{target}/nested_cv/...` and `MARKER_BASELINE/...` |
+| **B** Layer-wise linear probing R² | §3.2 (Fig 2 rows 1–4) | `--probing-only` | `src/interp/linear_probing.py` | `LINEAR_PROBING/regression/{layer}/{FM}/summary.json` |
 | **C** Layer-wise CRS AUC | §3.2 (Fig 2 row 5) | `--probing-only` (same call) | `src/interp/linear_probing.py` | `LINEAR_PROBING/classification/{layer}/{FM}/...` | shared with **B** |
-| **D** FM ⊕ DK concatenation | §3.2 (Fig 3) | `--fm-plus-dk-only` | `src/model/fm_plus_dk_classifier.py` | `EMBEDDING_DK_COMBINED/{target}/...` | ~600 CPU-h / 36 jobs |
-| **E** Fold-internal residualisation | §3.2 (Fig 3) | `--residualise-only` | `src/interp/res_no_leakage/fold_internal_residualisation.py` | `RES_NO_LEAKAGE/{target}/...` | ~540 CPU-h / 30 jobs |
-| **F** MKNN(k=20) + permutation null | §3.2 (Table 1) | `--mknn-only` | `src/model/embedding_comparison.py` | `EMBEDDING_COMPARISON/component5_mknn/` | ~15 CPU-h / 1 job |
+| **D** FM ⊕ DK concatenation | §3.2 (Fig 3) | `--fm-plus-dk-only` | `src/model/fm_plus_dk_classifier.py` | `EMBEDDING_DK_COMBINED/{target}/...` |
+| **E** Fold-internal residualisation | §3.2 (Fig 3) | `--residualise-only` | `src/interp/res_no_leakage/fold_internal_residualisation.py` | `RES_NO_LEAKAGE/{target}/...` |
+| **F** MKNN(k=20) + permutation null | §3.2 (Table 1) | `--mknn-only` | `src/model/embedding_comparison.py` | `EMBEDDING_COMPARISON/component5_mknn/` | 
 | **G** MKNN k-sweep ablation | Appendix A.2 | `--mknn-only` (same call) | `src/model/embedding_comparison.py` | `EMBEDDING_COMPARISON/component5_mknn_ksweep/` | shared with **F** |
 
-The full project compute (including FM feature extraction on a single GPU
-and all preliminary / failed runs) is ≈ 6,000 CPU-hours and ≈ 35 P100-hours
-across ≈ 130 jobs (paper Appendix A).
 
 ### Worked example — single step
 
@@ -182,16 +176,6 @@ Default `--output-dir` is `<results-root>/PLOTS/`. See
 each script consumes and the available ablation variants under
 [`src/paper_plots_legacy/`](src/paper_plots_legacy/).
 
----
-
-## Statistical protocols
-
-All AUCs are reported as mean over 100 outer-fold evaluations (5 outer folds
-× 20 repeats), with patient-level fold integrity preserved across all FMs.
-Significance is assessed with a  t-test (one-tailed, see `src/paper_plots/_corrected_ttest.py`), and
-Benjamini-Hochberg FDR correction is applied across the family of comparisons
-shown in each figure. The MKNN permutation-based null is built from 1000
-random row-shufflings of the DK matrix.
 
 ---
 
