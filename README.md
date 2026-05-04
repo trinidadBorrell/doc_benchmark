@@ -188,8 +188,7 @@ each script consumes and the available ablation variants under
 
 All AUCs are reported as mean over 100 outer-fold evaluations (5 outer folds
 × 20 repeats), with patient-level fold integrity preserved across all FMs.
-Significance is assessed with the Nadeau–Bengio variance-corrected paired
-t-test (one-tailed, see `src/paper_plots/_corrected_ttest.py`), and
+Significance is assessed with a  t-test (one-tailed, see `src/paper_plots/_corrected_ttest.py`), and
 Benjamini-Hochberg FDR correction is applied across the family of comparisons
 shown in each figure. The MKNN permutation-based null is built from 1000
 random row-shufflings of the DK matrix.

@@ -1,22 +1,3 @@
-"""Nadeau & Bengio (2003) corrected resampled t-test.
-
-Naive paired t-tests on repeated k-fold CV scores have catastrophically
-inflated Type I error because the per-fold scores are dependent (training
-sets overlap). The corrected resampled t-test inflates the variance to
-compensate:
-
-    t_corr = mean(d) / sqrt((1/n + n_test/n_train) * var(d, ddof=1))
-
-with two-sided p-value from Student's t with df = n - 1.
-
-This module provides:
-    * :func:`corrected_resampled_ttest`        — the test itself.
-    * :func:`paired_per_fold_aucs`             — load + pair AUCs from two
-      ``classification_results.json`` files by (repeat, fold-within-repeat).
-    * :func:`load_n_train_test`                — read median (n_train, n_test)
-      from a ``cv_split_manifest.json``; falls back to the (k-1):1 split
-      implied by ``n_folds`` if the manifest is missing.
-"""
 from __future__ import annotations
 
 import json
@@ -34,8 +15,7 @@ def corrected_resampled_ttest(
     n_train: int,
     n_test: int,
 ) -> tuple[float, float]:
-    """Two-sided Nadeau-Bengio corrected resampled t-test on paired diffs.
-
+    """
     Parameters
     ----------
     diffs : array-like
