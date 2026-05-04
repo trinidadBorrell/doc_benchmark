@@ -11,20 +11,6 @@ consciousness (DoC). Two complementary axes are measured:
    residualisation, and Mutual k-Nearest Neighbour (MKNN) alignment with
    the DK space.
 
----
-
-## ML Code Completeness Checklist
-
-Following the [paperswithcode reproducibility
-template](https://github.com/paperswithcode/releasing-research-code):
-
-- [x] **Specification of dependencies** — see [`requirements.txt`](requirements.txt) and [`pyproject.toml`](pyproject.toml).
-- [x] **Training / feature-extraction code** — FM embeddings are produced by each model's upstream extraction code (linked below); DK markers are extracted with the [NICE](https://github.com/nice-tools/nice) library following the protocol in paper §3.2; pipeline orchestration under [`cookbooks/pipeline.py`](cookbooks/pipeline.py).
-- [x] **Evaluation code** — the seven evaluation steps of the paper are wired under a single command (`--paper-eval`). See *End-to-end reproduction* below.
-- [x] **Pre-trained models** — five publicly released FM checkpoints (links and licenses listed under *Foundation models*).
-- [x] **README with table of results & commands to reproduce each** — see *Per-step reproduction* and *Figure reproduction* tables below.
-
-License: [MIT](LICENSE).
 
 ---
 
