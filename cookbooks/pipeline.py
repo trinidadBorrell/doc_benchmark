@@ -17,7 +17,7 @@ Supported Data Structures
 Pipeline Phases
 ---------------
 A. GENERAL_METRICS  compute_metrics.py          → MAPE & Pearson correlation
-B. MLP_EMBEDDING    fm_embedding_classifier.py → MLP/RF/KR on embeddings
+B. FM_EMBEDDING    fm_embedding_classifier.py → MLP/RF/KR on embeddings
                     Supports three sub-modes via CLI flags forwarded to the script:
                     • default             — binary VS vs MCS classification
                     • --marker-regression — Ridge regression: embeddings → scalar markers
@@ -52,10 +52,10 @@ python cookbooks/pipeline.py \\
     --main-path /data --metadata-dir /data/metadata \\
     --mode patient --task lg --all --markers-only
 
-# MLP embedding phase: binary VS/MCS with 5-fold CV
+# FM embedding phase: binary VS/MCS with 5-fold CV
 python cookbooks/pipeline.py \\
     --main-path /data --metadata-dir /data/metadata \\
-    --mode patient --task lg --all --mlp-embedding-only \\
+    --mode patient --task lg --all --fm-embedding-only \\
     --embedding-data-dir /data/embeddings/totem \\
     --emb-full-cv
 
@@ -75,13 +75,13 @@ python cookbooks/pipeline.py \\
 Phase-Specific Flags
 --------------------
 --general-metrics-only   Only GENERAL_METRICS
---mlp-embedding-only     Only MLP_EMBEDDING
+--fm-embedding-only     Only FM_EMBEDDING
 --decoder-only           Only DECODER
 --markers-only           Only MARKERS
 --model-only             Only MODEL
 
 --skip-general-metrics   Skip GENERAL_METRICS
---skip-mlp-embedding     Skip MLP_EMBEDDING
+--skip-fm-embedding     Skip FM_EMBEDDING
 --skip-decoder           Skip DECODER
 --skip-markers           Skip MARKERS
 --skip-model             Skip MODEL
@@ -186,13 +186,13 @@ class Pipeline:
             marker files (sub-{ID}/ses-{N}/orig/scalars_*.npz).  When set, the
             standard MARKERS output dir is used for recon and this path for orig.
         embedding_data_dir : str
-            Path to pre-computed embeddings directory (for MLP embedding phase)
+            Path to pre-computed embeddings directory (for FM embedding phase)
         mlp_n_epochs : int
-            Maximum training epochs for MLP embedding classifier
+            Maximum training epochs for FM embedding classifier
         mlp_lr : float
-            Learning rate for MLP embedding classifier
+            Learning rate for FM embedding classifier
         mlp_batch_size : int
-            Batch size for MLP embedding classifier
+            Batch size for FM embedding classifier
         data_source : str
             Data source identifier: 'auto', 'CBraMod', 'TOTEM', 'LaBram', 'standard'
         results_subdir : str
@@ -845,9 +845,9 @@ class Pipeline:
             self.logger.error(f"✗ GENERAL METRICS phase failed: {e}")
             return False
 
-    def run_mlp_embedding_phase(self) -> bool:
+    def run_fm_embedding_phase(self) -> bool:
         """
-        Run MLP embedding classification phase (Phase B).
+        Run FM embedding classification phase (Phase B).
 
         Invokes ``fm_embedding_classifier.py`` with the configured options.
         The sub-mode is determined by which flags are set on the Pipeline
@@ -2104,7 +2104,7 @@ class Pipeline:
     #   H. Residualisation    → §3.2 fold-internal residualisation (step E)
     #   I. MKNN alignment     → §3.2 + Appendix MKNN(k) and k-sweep (steps F & G)
     # Step A (Utility nested CV across 6 tasks) reuses the existing
-    # MLP_EMBEDDING phase. Each helper subprocesses into the canonical entry
+    # FM_EMBEDDING phase. Each helper subprocesses into the canonical entry
     # point under src/{interp,model}/ with sys.executable.
     # ──────────────────────────────────────────────────────────────────────
 
@@ -2149,7 +2149,7 @@ class Pipeline:
             self.logger.error(f"✗ PROBING phase failed: {e}")
             return False
 
-    def run_combined_dk_phase(self) -> bool:
+    def run_fm_plus_dk_phase(self) -> bool:
         """Phase G: FM ⊕ DK concatenation classification.
 
         Wraps ``src/model/fm_plus_dk_classifier.py``. Produces
@@ -2171,10 +2171,10 @@ class Pipeline:
             if not self._run_command(cmd):
                 self.logger.error("fm_plus_dk_classifier.py failed")
                 return False
-            self.logger.info("✓ COMBINED_DK phase completed")
+            self.logger.info("✓ FM_PLUS_DK phase completed")
             return True
         except Exception as e:
-            self.logger.error(f"✗ COMBINED_DK phase failed: {e}")
+            self.logger.error(f"✗ FM_PLUS_DK phase failed: {e}")
             return False
 
     def run_residualise_phase(self) -> bool:
@@ -2276,12 +2276,12 @@ class Pipeline:
         self,
         subjects: List[Tuple[str, str]],
         skip_general_metrics: bool = False,
-        skip_mlp_embedding: bool = False,
+        skip_fm_embedding: bool = False,
         skip_decoder: bool = False,
         skip_markers: bool = False,
         skip_model: bool = False,
         skip_probing: bool = True,
-        skip_combined_dk: bool = True,
+        skip_fm_plus_dk: bool = True,
         skip_residualise: bool = True,
         skip_mknn: bool = True,
     ) -> dict:
@@ -2290,7 +2290,7 @@ class Pipeline:
 
         Pipeline flow:
         A. GENERAL_METRICS phase: compute_metrics.py → Correlation/MAPE
-        B. MLP_EMBEDDING phase: fm_embedding_classifier.py → MLP on embeddings (VS vs MCS)
+        B. FM_EMBEDDING phase: fm_embedding_classifier.py → MLP on embeddings (VS vs MCS)
         C. DECODER phase: decoder.py → analysis.py → viz.py
         D. MARKERS phase: For each subject:
            - compute_markers_with_junifer.py → HDF5
@@ -2304,8 +2304,8 @@ class Pipeline:
             List of (subject_id, session) tuples to process
         skip_general_metrics : bool
             Skip GENERAL_METRICS phase
-        skip_mlp_embedding : bool
-            Skip MLP_EMBEDDING phase
+        skip_fm_embedding : bool
+            Skip FM_EMBEDDING phase
         skip_decoder : bool
             Skip DECODER phase
         skip_markers : bool
@@ -2349,12 +2349,12 @@ class Pipeline:
 
         results = {
             "general_metrics": False if not skip_general_metrics else "skipped",
-            "mlp_embedding": False if not skip_mlp_embedding else "skipped",
+            "fm_embedding": False if not skip_fm_embedding else "skipped",
             "decoder": False if not skip_decoder else "skipped",
             "markers": False if not skip_markers else "skipped",
             "model": False if not skip_model else "skipped",
             "probing": False if not skip_probing else "skipped",
-            "combined_dk": False if not skip_combined_dk else "skipped",
+            "fm_plus_dk": False if not skip_fm_plus_dk else "skipped",
             "residualise": False if not skip_residualise else "skipped",
             "mknn": False if not skip_mknn else "skipped",
         }
@@ -2377,23 +2377,23 @@ class Pipeline:
             self.logger.info("\n" + "=" * 70)
             self.logger.info("PHASE A: GENERAL_METRICS - SKIPPED")
 
-        # Phase B: MLP_EMBEDDING
-        if not skip_mlp_embedding:
+        # Phase B: FM_EMBEDDING
+        if not skip_fm_embedding:
             self.logger.info("\n" + "=" * 70)
             _phase_t0 = datetime.now()
-            if self.run_mlp_embedding_phase():
-                results["mlp_embedding"] = True
+            if self.run_fm_embedding_phase():
+                results["fm_embedding"] = True
             else:
                 self.logger.error(
-                    "MLP_EMBEDDING phase failed - continuing with DECODER phase"
+                    "FM_EMBEDDING phase failed - continuing with DECODER phase"
                 )
             self._record_timing(
-                "MLP_EMBEDDING", "total", (datetime.now() - _phase_t0).total_seconds()
+                "FM_EMBEDDING", "total", (datetime.now() - _phase_t0).total_seconds()
             )
             self._flush_timing_csv()
         else:
             self.logger.info("\n" + "=" * 70)
-            self.logger.info("PHASE B: MLP_EMBEDDING - SKIPPED")
+            self.logger.info("PHASE B: FM_EMBEDDING - SKIPPED")
 
         # Phase C: DECODER
         if not skip_decoder:
@@ -2462,21 +2462,21 @@ class Pipeline:
             self.logger.info("\n" + "=" * 70)
             self.logger.info("PHASE F: PROBING - SKIPPED")
 
-        # Phase G: COMBINED_DK (paper §3.2 FM ⊕ DK concatenation)
-        if not skip_combined_dk:
+        # Phase G: FM_PLUS_DK (paper §3.2 FM ⊕ DK concatenation)
+        if not skip_fm_plus_dk:
             self.logger.info("\n" + "=" * 70)
             _phase_t0 = datetime.now()
-            if self.run_combined_dk_phase():
-                results["combined_dk"] = True
+            if self.run_fm_plus_dk_phase():
+                results["fm_plus_dk"] = True
             else:
-                self.logger.error("COMBINED_DK phase failed - continuing")
+                self.logger.error("FM_PLUS_DK phase failed - continuing")
             self._record_timing(
-                "COMBINED_DK", "total", (datetime.now() - _phase_t0).total_seconds()
+                "FM_PLUS_DK", "total", (datetime.now() - _phase_t0).total_seconds()
             )
             self._flush_timing_csv()
         else:
             self.logger.info("\n" + "=" * 70)
-            self.logger.info("PHASE G: COMBINED_DK - SKIPPED")
+            self.logger.info("PHASE G: FM_PLUS_DK - SKIPPED")
 
         # Phase H: RESIDUALISE (paper §3.2 fold-internal residualisation)
         if not skip_residualise:
@@ -2534,10 +2534,10 @@ class Pipeline:
                 "⏸ Skipped" if results["general_metrics"] == "skipped" else "✗ Failed"
             )
         )
-        mlp_status = (
+        fm_emb_status = (
             "✓ Success"
-            if results["mlp_embedding"] is True
-            else ("⏸ Skipped" if results["mlp_embedding"] == "skipped" else "✗ Failed")
+            if results["fm_embedding"] is True
+            else ("⏸ Skipped" if results["fm_embedding"] == "skipped" else "✗ Failed")
         )
         decoder_status = (
             "✓ Success"
@@ -2556,7 +2556,7 @@ class Pipeline:
         )
 
         self.logger.info(f"  - GENERAL_METRICS: {gm_status}")
-        self.logger.info(f"  - MLP_EMBEDDING: {mlp_status}")
+        self.logger.info(f"  - FM_EMBEDDING: {fm_emb_status}")
         self.logger.info(f"  - DECODER: {decoder_status}")
         self.logger.info(f"  - MARKERS: {markers_status}")
         if self.task != "rs":
@@ -2717,10 +2717,10 @@ Examples:
       --main-path /data --metadata-dir /data/metadata \\
       --mode patient --task lg --all --markers-only
 
-  # MLP embedding phase only: binary VS/MCS with 5-fold CV
+  # FM embedding phase only: binary VS/MCS with 5-fold CV
   python pipeline.py \\
       --main-path /data --metadata-dir /data/metadata \\
-      --mode patient --task lg --all --mlp-embedding-only \\
+      --mode patient --task lg --all --fm-embedding-only \\
       --embedding-data-dir /data/embeddings/totem \\
       --emb-full-cv
 
@@ -2740,7 +2740,7 @@ Examples:
   # Subject intersection across two foundation models (embedding phase)
   python pipeline.py \\
       --main-path /data --metadata-dir /data/metadata \\
-      --mode patient --task lg --all --mlp-embedding-only \\
+      --mode patient --task lg --all --fm-embedding-only \\
       --emb-use-subject-intersection \\
       --emb-all-embedding-dirs TOTEM=/data/totem_emb CBraMod=/data/cbramod_emb
         """,
@@ -2908,19 +2908,19 @@ Examples:
         "--mlp-n-epochs",
         type=int,
         default=500,
-        help="Max training epochs for MLP embedding classifier (default: 500)",
+        help="Max training epochs for FM embedding classifier (default: 500)",
     )
     parser.add_argument(
         "--mlp-lr",
         type=float,
         default=1e-3,
-        help="Learning rate for MLP embedding classifier (default: 0.001)",
+        help="Learning rate for FM embedding classifier (default: 0.001)",
     )
     parser.add_argument(
         "--mlp-batch-size",
         type=int,
         default=32,
-        help="Batch size for MLP embedding classifier (default: 32)",
+        help="Batch size for FM embedding classifier (default: 32)",
     )
     parser.add_argument(
         "--emb-full-cv",
@@ -2980,7 +2980,7 @@ Examples:
         "--skip-general-metrics", action="store_true", help="Skip GENERAL_METRICS phase"
     )
     parser.add_argument(
-        "--skip-mlp-embedding", action="store_true", help="Skip MLP_EMBEDDING phase"
+        "--skip-fm-embedding", action="store_true", help="Skip FM_EMBEDDING phase"
     )
     parser.add_argument(
         "--skip-decoder", action="store_true", help="Skip DECODER phase"
@@ -2996,8 +2996,8 @@ Examples:
         help="Skip layer-wise PROBING phase (default: skipped)",
     )
     parser.add_argument(
-        "--skip-combined-dk", action="store_true", default=True,
-        help="Skip FM+DK COMBINED_DK phase (default: skipped)",
+        "--skip-fm-plus-dk", action="store_true", default=True,
+        help="Skip FM_PLUS_DK phase (default: skipped)",
     )
     parser.add_argument(
         "--skip-residualise", action="store_true", default=True,
@@ -3015,7 +3015,7 @@ Examples:
         help="Only run GENERAL_METRICS phase",
     )
     parser.add_argument(
-        "--mlp-embedding-only", action="store_true", help="Only run MLP_EMBEDDING phase"
+        "--fm-embedding-only", action="store_true", help="Only run FM_EMBEDDING phase"
     )
     parser.add_argument(
         "--markers-only",
@@ -3033,8 +3033,8 @@ Examples:
         help="Only run PROBING phase (paper §3.2 layer-wise R²/AUC)",
     )
     parser.add_argument(
-        "--combined-dk-only", action="store_true",
-        help="Only run COMBINED_DK phase (paper §3.2 FM⊕DK concatenation)",
+        "--fm-plus-dk-only", action="store_true",
+        help="Only run FM_PLUS_DK phase (paper §3.2 FM⊕DK concatenation)",
     )
     parser.add_argument(
         "--residualise-only", action="store_true",
@@ -3048,7 +3048,7 @@ Examples:
         "--paper-eval", action="store_true",
         help=(
             "End-to-end NeurIPS paper evaluation: runs the seven steps "
-            "(MLP_EMBEDDING + PROBING + COMBINED_DK + RESIDUALISE + MKNN). "
+            "(FM_EMBEDDING + PROBING + FM_PLUS_DK + RESIDUALISE + MKNN). "
             "Skips GENERAL_METRICS, DECODER, MARKERS, MODEL."
         ),
     )
@@ -3073,59 +3073,59 @@ Examples:
 
     # Handle *-only flags
     if args.general_metrics_only:
-        args.skip_mlp_embedding = True
+        args.skip_fm_embedding = True
         args.skip_decoder = True
         args.skip_markers = True
         args.skip_model = True
         args.skip_general_metrics = False
-    elif args.mlp_embedding_only:
+    elif args.fm_embedding_only:
         args.skip_general_metrics = True
         args.skip_decoder = True
         args.skip_markers = True
         args.skip_model = True
-        args.skip_mlp_embedding = False
+        args.skip_fm_embedding = False
     elif args.markers_only:
         args.skip_general_metrics = True
-        args.skip_mlp_embedding = True
+        args.skip_fm_embedding = True
         args.skip_decoder = True
         args.skip_model = True
         args.skip_markers = False
     elif args.decoder_only:
         args.skip_general_metrics = True
-        args.skip_mlp_embedding = True
+        args.skip_fm_embedding = True
         args.skip_markers = True
         args.skip_model = True
         args.skip_decoder = False
     elif args.model_only:
         args.skip_general_metrics = True
-        args.skip_mlp_embedding = True
+        args.skip_fm_embedding = True
         args.skip_decoder = True
         args.skip_markers = True
         args.skip_model = False
     elif args.probing_only:
         args.skip_general_metrics = True
-        args.skip_mlp_embedding = True
+        args.skip_fm_embedding = True
         args.skip_decoder = True
         args.skip_markers = True
         args.skip_model = True
         args.skip_probing = False
-    elif args.combined_dk_only:
+    elif args.fm_plus_dk_only:
         args.skip_general_metrics = True
-        args.skip_mlp_embedding = True
+        args.skip_fm_embedding = True
         args.skip_decoder = True
         args.skip_markers = True
         args.skip_model = True
-        args.skip_combined_dk = False
+        args.skip_fm_plus_dk = False
     elif args.residualise_only:
         args.skip_general_metrics = True
-        args.skip_mlp_embedding = True
+        args.skip_fm_embedding = True
         args.skip_decoder = True
         args.skip_markers = True
         args.skip_model = True
         args.skip_residualise = False
     elif args.mknn_only:
         args.skip_general_metrics = True
-        args.skip_mlp_embedding = True
+        args.skip_fm_embedding = True
         args.skip_decoder = True
         args.skip_markers = True
         args.skip_model = True
@@ -3137,9 +3137,9 @@ Examples:
         args.skip_decoder = True
         args.skip_markers = True
         args.skip_model = True
-        args.skip_mlp_embedding = False
+        args.skip_fm_embedding = False
         args.skip_probing = False
-        args.skip_combined_dk = False
+        args.skip_fm_plus_dk = False
         args.skip_residualise = False
         args.skip_mknn = False
 
@@ -3204,12 +3204,12 @@ Examples:
     result = pipeline.run_pipeline(
         subjects,
         skip_general_metrics=args.skip_general_metrics,
-        skip_mlp_embedding=args.skip_mlp_embedding,
+        skip_fm_embedding=args.skip_fm_embedding,
         skip_decoder=args.skip_decoder,
         skip_markers=args.skip_markers,
         skip_model=args.skip_model,
         skip_probing=args.skip_probing,
-        skip_combined_dk=args.skip_combined_dk,
+        skip_fm_plus_dk=args.skip_fm_plus_dk,
         skip_residualise=args.skip_residualise,
         skip_mknn=args.skip_mknn,
     )

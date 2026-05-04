@@ -29,4 +29,4 @@ $PYTHON_EXE cookbooks/pipeline.py --all \
         /data/project/eeg_foundation/data/data_250Hz_EGI256/zero_shot_data/DOC/fifdata \
         /data/project/eeg_foundation/data/data_250Hz_EGI256/nice_epochs_from_cohen_2/nice_epochs/nice_epochs2 \
     --batch-size 6 \
-    --mlp-embedding-only
+    --fm-embedding-only

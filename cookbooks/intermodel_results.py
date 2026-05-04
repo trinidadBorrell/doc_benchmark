@@ -2,7 +2,7 @@
 """
 Inter-Model Results Aggregation Script
 
-Aggregates decoder results and/or re-runs MLP embedding classification
+Aggregates decoder results and/or re-runs FM embedding classification
 across multiple foundation models (CBraMod, LaBram, NeuroLM).
 
 Subject filtering pipeline:
@@ -12,13 +12,13 @@ Subject filtering pipeline:
   3. Optionally further restrict to a reference directory when
      --unique-subjects-values is passed.
   4. The resulting common subject set is used for BOTH the decoder
-     aggregation and the MLP embedding classification.
+     aggregation and the FM embedding classification.
   5. Any subject that fails or is missing at any stage is reported
      explicitly (subject ID + model + reason).
 
 Modes:
   --decoder-only          Re-aggregate existing decoder results only
-  --mlp-embedding-only    Re-run MLP embedding classification only
+  --fm-embedding-only    Re-run FM embedding classification only
   (default)               Run both: decoder + MLP
 
 Data-leakage sanity check:
@@ -1031,7 +1031,7 @@ def run_mlp_for_model(
     test_size: float = 0.2,
     val_size: float = 0.2,
 ):
-    """Run MLP embedding classification for *model* restricted to
+    """Run FM embedding classification for *model* restricted to
     *allowed_subjects*.  Returns True on success.
     """
     # Locate embedding directory
@@ -1051,7 +1051,7 @@ def run_mlp_for_model(
     src_dir = Path(__file__).resolve().parent.parent / "src"
     sys.path.insert(0, str(src_dir / "model"))
 
-    from mlp_embedding_classifier import EmbeddingMLPClassifier
+    from fm_embedding_classifier import EmbeddingMLPClassifier
 
     # ------------------------------------------------------------------
     # Subclass to inject subject filtering
@@ -1883,7 +1883,7 @@ Examples:
   python intermodel_results.py --decoder-only
 
   # MLP only
-  python intermodel_results.py --mlp-embedding-only
+  python intermodel_results.py --fm-embedding-only
 
   # Both decoder + MLP (default)
   python intermodel_results.py
@@ -1937,9 +1937,9 @@ Examples:
         "--decoder-only", action="store_true", help="Only re-aggregate decoder results"
     )
     mode_group.add_argument(
-        "--mlp-embedding-only",
+        "--fm-embedding-only",
         action="store_true",
-        help="Only re-run MLP embedding classification",
+        help="Only re-run FM embedding classification",
     )
     mode_group.add_argument(
         "--markers-topo-only",
@@ -1948,9 +1948,9 @@ Examples:
     )
 
     parser.add_argument(
-        "--skip-mlp-embedding",
+        "--skip-fm-embedding",
         action="store_true",
-        help="Skip the MLP embedding classification step",
+        help="Skip the FM embedding classification step",
     )
 
     # Marker topoplot grid options
@@ -2087,9 +2087,9 @@ Examples:
         Path(args.metadata_dir) / "patient_labels_with_controls.csv"
     )
 
-    run_decoder = not args.mlp_embedding_only and not args.markers_topo_only
-    run_mlp = not args.decoder_only and not args.markers_topo_only and not args.skip_mlp_embedding
-    run_markers_topo = not args.decoder_only and not args.mlp_embedding_only
+    run_decoder = not args.fm_embedding_only and not args.markers_topo_only
+    run_mlp = not args.decoder_only and not args.markers_topo_only and not args.skip_fm_embedding
+    run_markers_topo = not args.decoder_only and not args.fm_embedding_only
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 

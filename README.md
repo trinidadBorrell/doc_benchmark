@@ -123,9 +123,9 @@ python cookbooks/pipeline.py \
 
 `--paper-eval` is equivalent to running, in this order:
 
-1. **MLP_EMBEDDING** (paper step A — Utility nested CV across 6 tasks)
+1. **FM_EMBEDDING** (paper step A — Utility nested CV across 6 tasks)
 2. **PROBING** (paper steps B & C — layer-wise R² + per-layer CRS AUC)
-3. **COMBINED_DK** (paper step D — FM ⊕ DK concatenation)
+3. **FM_PLUS_DK** (paper step D — FM ⊕ DK concatenation)
 4. **RESIDUALISE** (paper step E — fold-internal residualisation)
 5. **MKNN** (paper steps F & G — MKNN(k=20) + Appendix k-sweep)
 
@@ -138,10 +138,10 @@ folds are patient-grouped and shared across all FMs (paper §3.2).
 
 | Step | Paper § | Phase flag | Entry point | Outputs (under `<results-root>/`) | Compute (paper Appendix A) |
 |---|---|---|---|---|---|
-| **A** Utility nested CV (5×20, 6 tasks, 5 classifiers, FDR t-test vs DK) | §3.1 (Fig 1) | `--mlp-embedding-only` | `src/model/fm_embedding_classifier.py` (called by `pipeline.py`) | `MLP_EMBEDDING/{target}/nested_cv/...` and `MARKER_BASELINE/...` | ~540 CPU-h / 30 jobs |
+| **A** Utility nested CV (5×20, 6 tasks, 5 classifiers, FDR t-test vs DK) | §3.1 (Fig 1) | `--fm-embedding-only` | `src/model/fm_embedding_classifier.py` (called by `pipeline.py`) | `MLP_EMBEDDING/{target}/nested_cv/...` and `MARKER_BASELINE/...` | ~540 CPU-h / 30 jobs |
 | **B** Layer-wise linear probing R² | §3.2 (Fig 2 rows 1–4) | `--probing-only` | `src/interp/linear_probing.py` | `LINEAR_PROBING/regression/{layer}/{FM}/summary.json` | ~580 CPU-h / 5 jobs |
 | **C** Layer-wise CRS AUC | §3.2 (Fig 2 row 5) | `--probing-only` (same call) | `src/interp/linear_probing.py` | `LINEAR_PROBING/classification/{layer}/{FM}/...` | shared with **B** |
-| **D** FM ⊕ DK concatenation | §3.2 (Fig 3) | `--combined-dk-only` | `src/model/fm_plus_dk_classifier.py` | `EMBEDDING_DK_COMBINED/{target}/...` | ~600 CPU-h / 36 jobs |
+| **D** FM ⊕ DK concatenation | §3.2 (Fig 3) | `--fm-plus-dk-only` | `src/model/fm_plus_dk_classifier.py` | `EMBEDDING_DK_COMBINED/{target}/...` | ~600 CPU-h / 36 jobs |
 | **E** Fold-internal residualisation | §3.2 (Fig 3) | `--residualise-only` | `src/interp/res_no_leakage/fold_internal_residualisation.py` | `RES_NO_LEAKAGE/{target}/...` | ~540 CPU-h / 30 jobs |
 | **F** MKNN(k=20) + permutation null | §3.2 (Table 1) | `--mknn-only` | `src/model/embedding_comparison.py` | `EMBEDDING_COMPARISON/component5_mknn/` | ~15 CPU-h / 1 job |
 | **G** MKNN k-sweep ablation | Appendix A.2 | `--mknn-only` (same call) | `src/model/embedding_comparison.py` | `EMBEDDING_COMPARISON/component5_mknn_ksweep/` | shared with **F** |
