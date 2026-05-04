@@ -190,7 +190,7 @@ output = {job_dir}/job.out
 error = {job_dir}/job.err
 
 # Environment
-environment = "HOME={os.environ.get("HOME", "/home/triniborrell")}"
+environment = "HOME={os.environ.get("HOME", "")}"
 
 # Transfer files
 should_transfer_files = YES

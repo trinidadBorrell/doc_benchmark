@@ -23,8 +23,6 @@ Usage
     python feature_importance_comparison.py \\
         --results-dir /data/project/eeg_foundation/data/benchmark_results/new_results \\
         --output-dir /data/.../combined_plots
-
-Author: Trinidad Borrell <trinidad.borrell@gmail.com>
 """
 
 import argparse

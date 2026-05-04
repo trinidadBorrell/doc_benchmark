@@ -39,6 +39,62 @@ import numpy as np
 
 
 # ---------------------------------------------------------------------------
+# Marker exclusion
+# ---------------------------------------------------------------------------
+
+# Paradigm-locked / known-broken NICE marker families to drop from every
+# classification pipeline. Removing these from nice_scalars_all.csv leaves
+# exactly 27 `nice/marker/*` markers, which is also the canonical PCA target
+# dimension for FM embeddings in the matched baselines.
+EXCLUDED_MARKER_PREFIXES = (
+    "nice/marker/TimeLockedContrast/",
+    "nice/marker/WindowDecoding/",
+)
+
+
+def is_excluded_marker(name: str) -> bool:
+    """Return True if *name* matches any family in ``EXCLUDED_MARKER_PREFIXES``."""
+    return any(name.startswith(p) for p in EXCLUDED_MARKER_PREFIXES)
+
+
+def filter_excluded_markers(
+    marker_names: list[str],
+    markers_dict: dict | None = None,
+) -> tuple[list[str], dict | None, int]:
+    """Drop TimeLockedContrast/* and WindowDecoding/* from marker outputs.
+
+    Parameters
+    ----------
+    marker_names:
+        Ordered list of marker column names aligned with each marker vector.
+    markers_dict:
+        Optional mapping session_key → 1-D array of marker values whose
+        columns are aligned with ``marker_names``. If provided, each array
+        is sliced column-wise to keep only non-excluded markers.
+
+    Returns
+    -------
+    kept_names:
+        Filtered list of marker names (same order, excluded entries removed).
+    kept_dict_or_None:
+        ``None`` if ``markers_dict`` was ``None``; otherwise a new dict with
+        each vector restricted to the kept columns.
+    n_dropped:
+        Number of marker names removed.
+    """
+    keep_mask = [not is_excluded_marker(n) for n in marker_names]
+    kept_names = [n for n, keep in zip(marker_names, keep_mask) if keep]
+    n_dropped = len(marker_names) - len(kept_names)
+
+    if markers_dict is None:
+        return kept_names, None, n_dropped
+
+    keep_idx = np.asarray(keep_mask, dtype=bool)
+    kept_dict = {k: np.asarray(v)[keep_idx] for k, v in markers_dict.items()}
+    return kept_names, kept_dict, n_dropped
+
+
+# ---------------------------------------------------------------------------
 # Types
 # ---------------------------------------------------------------------------
 
@@ -397,3 +453,120 @@ def load_cv_splits(
     common_sessions: list[str] = payload["common_sessions"]
     labels: dict[str, int] = {k: int(v) for k, v in payload["labels"].items()}
     return folds, common_sessions, labels
+
+
+# ---------------------------------------------------------------------------
+# Repeated nested CV
+# ---------------------------------------------------------------------------
+
+
+def generate_repeated_nested_cv_folds(
+    common_sessions: list[str],
+    labels: dict[str, int],
+    n_outer: int = 5,
+    n_repeats: int = 20,
+    base_random_state: int = 42,
+) -> list[list[FoldDict]]:
+    """Generate n_repeats independent nested CV structures.
+
+    Each repeat uses seed = base_random_state + repeat_idx, giving genuinely
+    different fold assignments per repeat (proper repeated CV for variance
+    reduction) while allowing all pipelines in the same repeat to share
+    identical folds by using the same seed.
+
+    Parameters
+    ----------
+    common_sessions:
+        Ordered list of session keys.
+    labels:
+        Mapping session_key → integer class label.
+    n_outer:
+        Number of outer folds per repeat.
+    n_repeats:
+        Number of independent repeats.
+    base_random_state:
+        Seed for repeat 0; repeat r uses base_random_state + r.
+
+    Returns
+    -------
+    List of length n_repeats, each element a list of FoldDicts (one per outer fold).
+    """
+    all_repeats: list[list[FoldDict]] = []
+    for r in range(n_repeats):
+        seed = base_random_state + r
+        folds = generate_nested_cv_folds(
+            common_sessions=common_sessions,
+            labels=labels,
+            n_outer=n_outer,
+            random_state=seed,
+        )
+        all_repeats.append(folds)
+    return all_repeats
+
+
+def save_repeated_cv_splits(
+    repeats: list[list[FoldDict]],
+    common_sessions: list[str],
+    labels: dict[str, int],
+    path: str,
+    base_random_state: int = 42,
+) -> None:
+    """Serialise repeated CV structures to a JSON manifest file.
+
+    Parameters
+    ----------
+    repeats:
+        Output of :func:`generate_repeated_nested_cv_folds`.
+    common_sessions:
+        Ordered session list used to generate the folds.
+    labels:
+        Labels dict (only common_sessions entries are stored).
+    path:
+        Output file path (will be created / overwritten).
+    base_random_state:
+        The base seed used; repeat r had seed = base_random_state + r.
+    """
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    payload = {
+        "n_repeats": len(repeats),
+        "base_random_state": base_random_state,
+        "common_sessions": common_sessions,
+        "labels": {k: int(labels[k]) for k in common_sessions},
+        "groups": [k.split("_ses-")[0] for k in common_sessions],
+        "repeats": [
+            {
+                "repeat_idx": r,
+                "random_state": base_random_state + r,
+                "folds": [_fold_to_serialisable(f) for f in folds],
+            }
+            for r, folds in enumerate(repeats)
+        ],
+    }
+    with open(path, "w") as fh:
+        json.dump(payload, fh, indent=2)
+
+
+def load_repeated_cv_splits(
+    path: str,
+) -> tuple[list[list[FoldDict]], list[str], dict[str, int]]:
+    """Load repeated CV structures from a JSON manifest file.
+
+    Returns
+    -------
+    repeats:
+        List[repeat] of List[FoldDict] with numpy arrays restored.
+    common_sessions:
+        Ordered session list.
+    labels:
+        Mapping session_key → integer label.
+    """
+    with open(path) as fh:
+        payload = json.load(fh)
+
+    repeats: list[list[FoldDict]] = [
+        [_fold_from_serialisable(f) for f in rep["folds"]]
+        for rep in payload["repeats"]
+    ]
+    common_sessions: list[str] = payload["common_sessions"]
+    labels: dict[str, int] = {k: int(v) for k, v in payload["labels"].items()}
+    return repeats, common_sessions, labels

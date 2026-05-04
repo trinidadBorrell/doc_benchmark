@@ -4,8 +4,7 @@
 # Multiple jobs coordinate via processing.lock + finished.txt.
 set -e
 
-export PYTHON_EXE="/home/triniborrell/miniforge3_ppc64le/envs/pytorch_ppc64le/bin/python"
-export PATH="/home/triniborrell/miniforge3_ppc64le/envs/pytorch_ppc64le/bin:$PATH"
+export PYTHON_EXE="${PYTHON_EXE:-python3}"
 
 # Required
 : "${MAIN_PATH:?MAIN_PATH must be set in submit file}"

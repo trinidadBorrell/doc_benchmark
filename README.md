@@ -1,342 +1,267 @@
-# doc_benchmark
+# Can EEG Foundation Models Go Beyond Domain Knowledge in Reading Consciousness?
 
-EEG analysis pipeline for benchmarking neurophysiological markers and classifying consciousness states (VS vs MCS) in Disorders of Consciousness (DoC) patients. 
+Reference implementation for the NeurIPS 2025 submission of the same title.
+This repository evaluates five EEG foundation models (BIOT, LaBraM, EEGPT,
+NeuroLM, CBraMod) against a validated domain-knowledge (DK) baseline across
+six clinical tasks, on 300 recordings from 249 patients with disorders of
+consciousness (DoC). Two complementary axes are measured:
 
-## Quick Start
+1. **Utility** — zero-shot clinical classification performance vs.\ the DK.
+2. **Representational audit** — layer-wise linear probing, fold-internal
+   residualisation, and Mutual k-Nearest Neighbour (MKNN) alignment with
+   the DK space.
+
+---
+
+## ML Code Completeness Checklist
+
+Following the [paperswithcode reproducibility
+template](https://github.com/paperswithcode/releasing-research-code):
+
+- [x] **Specification of dependencies** — see [`requirements.txt`](requirements.txt) and [`pyproject.toml`](pyproject.toml).
+- [x] **Training / feature-extraction code** — FM embeddings are produced by each model's upstream extraction code (linked below); DK markers are extracted with the [NICE](https://github.com/nice-tools/nice) library following the protocol in paper §3.2; pipeline orchestration under [`cookbooks/pipeline.py`](cookbooks/pipeline.py).
+- [x] **Evaluation code** — the seven evaluation steps of the paper are wired under a single command (`--paper-eval`). See *End-to-end reproduction* below.
+- [x] **Pre-trained models** — five publicly released FM checkpoints (links and licenses listed under *Foundation models*).
+- [x] **README with table of results & commands to reproduce each** — see *Per-step reproduction* and *Figure reproduction* tables below.
+
+License: [MIT](LICENSE).
+
+---
+
+## Repository layout
+
+```
+doc_benchmark/
+├── cookbooks/
+│   ├── pipeline.py              ← top-level orchestrator (paper + legacy phases)
+│   ├── intermodel_results.py    ← cross-FM result aggregation
+│   └── run_*.sh                 ← convenience shell wrappers
+├── src/
+│   ├── paper_plots/             ← canonical NeurIPS figures (Fig 1 / 2 / 3 / Appendix)
+│   ├── paper_plots_legacy/      ← variant / ablation plot scripts (not in paper)
+│   ├── model/                   ← classifiers, CV, embedding comparison, MKNN
+│   ├── interp/                  ← linear probing & fold-internal residualisation
+│   └── misc/                    ← exploratory modules NOT used by the paper
+├── tests/                       ← pytest suite
+├── requirements.txt
+├── pyproject.toml
+├── LICENSE
+└── README.md  (this file)
+```
+
+The four files in `src/paper_plots/` produce the paper's three figures plus
+the appendix MKNN k-sweep; everything else under `src/misc/` is kept for
+transparency and is **not required** to reproduce any paper result.
+
+---
+
+## Installation
 
 ```bash
-# Get a worker node first
-condor_submit -i /data/project/eeg_foundation/jobs/interactive.submit
-conda activate pytorch_ppc64le
+python3.11 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
 
-# Run the full pipeline
-cd /data/project/eeg_foundation/src/doc_benchmark
+# Optional: NICE C extensions for accelerated information-theoretic markers.
+# NICE requires numpy to be pre-installed.
+pip install --no-build-isolation 'nice @ git+https://github.com/nice-tools/nice'
+```
+
+The pipeline targets Python 3.11 and was developed against the dependency
+versions pinned in `requirements.txt` (MNE 1.5–1.10, scikit-learn ≥ 1.2,
+NumPy 1.26.x, antropy, h5py, joblib, junifer).
+
+---
+
+## Foundation models
+
+| Model | Pretraining (hrs) | Params | License | Repository |
+|---|---:|---:|---|---|
+| BIOT | ~5,000 | 3.3M | MIT | https://github.com/ycq091044/BIOT |
+| LaBraM-B | ~2,534 | 5.8M | MIT | https://github.com/935963004/LaBraM |
+| EEGPT | ~1,200 | 10M | Apache 2.0 | https://github.com/BINE022/EEGPT |
+| NeuroLM-B | ~25,000 | 254M | MIT | https://github.com/935963004/NeuroLM |
+| CBraMod | ~9,000 | 4M | MIT | https://github.com/wjq-learning/CBraMod |
+
+Each FM is run **frozen, zero-shot** on the DoC cohort: per-FM input
+preprocessing follows the upstream specifications (sampling rate, channel
+subset, window length, patch size). For BIOT and EEGPT, the EGI-256 montage
+is projected onto the model's target layout (10–20 / 10–10 respectively).
+LaBraM, NeuroLM, and CBraMod operate on the full 256-channel array.
+Activation hooks placed at architecturally meaningful intermediate layers
+yield one mean-pooled fixed-dimensional embedding per recording per layer.
+
+---
+
+## Data
+
+The clinical dataset (300 recordings × 249 DoC patients, EGI 256-channel,
+local-global auditory oddball paradigm) **is not redistributed** for privacy
+reasons; access is restricted to the originating institution. The pipeline is
+fully runnable on any equivalent DoC EEG cohort that satisfies these
+requirements:
+
+- a `patient_labels.csv` with at minimum `patient_id` and one of
+  `diagnostic_crs_final` (UWS/MCS), `etiology`, `cs_6m`, `cs_1y`, `cs_2y`;
+- a per-recording scalar marker CSV produced by extracting the DK markers
+  from §3.2 with the upstream
+  [`nice`](https://github.com/nice-tools/nice) library, e.g.
+  `baseline_stable_20210128_scalars.csv`;
+- per-FM embedding files (one `.npy` / `.npz` per recording per layer)
+  produced by each model's upstream extraction code.
+
+Dataset summary (paper §3.1): 144 UWS / 156 MCS recordings, 40.7% anoxic /
+25.7% TBI, 67.3% acute / 32.7% chronic. CRS-R diagnostic label assigned from
+the best assessment across at least three sessions.
+
+Pre-processing follows a configuration-driven MNE-Python pipeline: 0.5–45 Hz
+bandpass, 50 Hz notch, automatic artifact rejection, bad-channel
+interpolation, common-average re-referencing, stimulus-locked epoching.
+
+---
+
+## End-to-end reproduction
+
+A single command runs all seven evaluation steps of the paper, in dependency
+order, against an existing tree of pre-extracted FM embeddings and DK
+markers:
+
+```bash
 python cookbooks/pipeline.py \
-    --main-path /data/project/eeg_foundation/data/CbraMod/recon_data_inference \
-    --metadata-dir /data/project/eeg_foundation/data/metadata \
-    --mode patient --task lg --all \
+    --paper-eval --all \
+    --main-path     /path/to/doc_eeg_data \
+    --metadata-dir  /path/to/metadata \
+    --mode patient --task lg \
     --results-subdir CBraMod/doc_patients \
-    --results-dir /data/project/eeg_foundation/data/benchmark_results/new_results
+    --embedding-data-dir   /path/to/embeddings \
+    --emb-marker-csv       /path/to/baseline_stable_20210128_scalars.csv \
+    --emb-patient-labels-full /path/to/patient_labels_with_controls.csv
 ```
 
-## Pipeline Phases
+`--paper-eval` is equivalent to running, in this order:
 
-| Phase | Flag | Purpose |
-|-------|------|---------|
-| A. GENERAL_METRICS | `--general-metrics-only` | MAPE, Pearson correlation, FFT between original & reconstructed EEG |
-| B. MLP_EMBEDDING | `--mlp-embedding-only` | MLP/RF/KernelRidge classification on foundation model embeddings, linear probing, dimensionality study of embedding space|
-| C. DECODER | `--decoder-only` | Temporal decoding with SlidingEstimator + LogisticRegression |
-| D. MARKERS | `--markers-only` | Junifer feature extraction → HDF5 → 120 scalars + topographies |
-| E. MODEL | `--model-only` | SVM binary classification (VS vs MCS) |
-
-Each phase is independent. Skip phases with `--skip-markers`, `--skip-decoder`, etc.
-
-## Running the Pipeline
-
-**Subject selection** (mutually exclusive):
-
-```bash
---all                        # all subjects
---subject BA001              # single subject
---subjects BA001,BA002       # comma-separated list
---random 5                   # N random subjects
-```
-
-**Useful options:**
-
-```bash
---save-time           # write per-step timing CSV to results/logs/
---keep-h5             # retain H5 files after markers phase
---dry-run             # show what would run without executing
---data-source CBraMod # override auto-detection (auto|CBraMod|TOTEM|LaBram|bids)
---results-subdir CBraMod/doc_patients
-```
-
-## Parallelism
-
-Three composable levels:
-
-| Level | How | Use |
-|-------|-----|-----|
-| 1. Sequential | default | debugging |
-| 2. In-process | `--batch-size N` | N subjects concurrently within one run (capped at `cpu_count - 1`) |
-| 3. Cluster | `condor_submit jobs/markers.submit` | distributes subjects across nodes; jobs coordinate via filesystem locks |
-
-**Submit markers array job:**
-
-```bash
-# CBraMod (default)
-condor_submit jobs/markers.submit
-
-# LaBram
-condor_submit jobs/markers.submit \
-    dataset=labram \
-    main_path=/data/project/eeg_foundation/data/LaBram/results_DoC_lg/recon_data_inference \
-    results_subdir=LaBram/doc_patients
-
-# NeuroLM
-condor_submit jobs/markers.submit \
-    dataset=neurolm \
-    main_path=/data/project/eeg_foundation/data/NeuroLM-output/fif_data_target \
-    results_subdir=NeuroLM/doc_patients \
-    data_source=bids
-
-# BIOT
-condor_submit jobs/markers.submit \
-    dataset=biot \
-    main_path=/data/project/eeg_foundation/data/BIOT \
-    results_subdir=BIOT/doc_patients \
-    data_source=bids
-```
-
-4 nodes × 4 threads = up to 16 subjects processed concurrently. Jobs skip already-finished subjects (`finished.txt`) and use atomic locks (`processing.lock`) to avoid duplicate work.
-
-**Monitor:**
-
-```bash
-condor_q
-tail -f /data/project/eeg_foundation/logs/markers_cbramod_<cluster>.*.out
-grep "^>>> Progress" /data/project/eeg_foundation/logs/markers_cbramod_<cluster>.*.out
-```
-
-## Marker Baseline Classifier
-
-`src/model/baseline.py` trains SVM, MLP, Random Forest, and Kernel Ridge directly on pre-computed scalar markers (not embeddings) — the classical baseline for comparison.
-
-**Prediction targets and modes:**
-
-| Target | Modes |
-|--------|-------|
-| `crs` | binary VS vs MCS |
-| `etiology` | all subjects · `vs_only` (UWS baseline) · `mcs_only` (MCS baseline) |
-| `etiology_code` | all subjects · `vs_only` · `mcs_only` |
-| `cs_6m/cs_1y/cs_2y` | `multiclass` · `binary` · `binary_death` · `binary_vs_to_mcs` · `binary_mcs_to_conscious` · `binary_improvement` |
-
-`binary_improvement` labels all subjects as IMPROVED/NON_IMPROVED regardless of baseline (VS→MCS/CONSCIOUS or MCS→CONSCIOUS).
-
-```bash
-python src/model/baseline.py \
-    --original-metadata /data/.../baseline_stable_20210128_scalars.csv \
-    --patient-labels /data/.../patient_labels.csv \
-    --main-path /data/.../benchmark_results/new_results \
-    [--full-cv --n-cv-folds 5] [--marker-reduction A|B|C|D]
-```
-
-## Output Structure
-
-```
-results/{results-subdir}/
-├── GENERAL_METRICS/
-├── MLP_EMBEDDING/
-│   └── {classic_split,nested_cv}/{mlp,random_forest,kernel_ridge}/
-│       ├── classification_results.json
-│       └── {crs,etiology,cs_6m,cs_1y,cs_2y}/   (--full-metric-prediction)
-├── DECODER/
-├── MARKERS/
-│   └── sub-{ID}/ses-{NUM}/
-│       ├── finished.txt
-│       ├── original/{scalars,topos}_*.npz
-│       └── recon/{scalars,topos}_*.npz
-├── MARKER_BASELINE/
-│   ├── crs/{classic_split,nested_cv}/{svm,mlp,random_forest,kernel_ridge}/
-│   ├── {etiology,etiology_code}/{classic_split,nested_cv,vs_only/,mcs_only/}/
-│   └── {cs_6m,cs_1y,cs_2y}/{multiclass,binary,binary_death,binary_vs_to_mcs,binary_mcs_to_conscious,binary_improvement}/
-├── MODEL/
-└── logs/
-```
-
-## Post-Hoc Studies
-
-These scripts are **not** part of the main pipeline. They are run manually after pipeline results are available. Each can be invoked as a standalone Python script with `--help` for full argument docs.
+1. **MLP_EMBEDDING** (paper step A — Utility nested CV across 6 tasks)
+2. **PROBING** (paper steps B & C — layer-wise R² + per-layer CRS AUC)
+3. **COMBINED_DK** (paper step D — FM ⊕ DK concatenation)
+4. **RESIDUALISE** (paper step E — fold-internal residualisation)
+5. **MKNN** (paper steps F & G — MKNN(k=20) + Appendix k-sweep)
 
 ---
 
-### Decoder Analysis (`src/decoder/analysis/`)
+## Per-step reproduction
 
-Run after the DECODER phase to add statistical testing and publication-quality plots.
+Each step is independently re-runnable via a dedicated `--*-only` flag. CV
+folds are patient-grouped and shared across all FMs (paper §3.2).
 
-| Script | Purpose |
-|--------|---------|
-| `analysis.py` | Per-timepoint Wilcoxon signed-rank tests against chance (0.5 AUC), with FDR correction |
-| `viz.py` | Publication-quality AUC timeseries plots with significance shading |
-| `peak_analysis.py` | Peak detection in per-subject AUC curves using prominence thresholding |
+| Step | Paper § | Phase flag | Entry point | Outputs (under `<results-root>/`) | Compute (paper Appendix A) |
+|---|---|---|---|---|---|
+| **A** Utility nested CV (5×20, 6 tasks, 5 classifiers, FDR t-test vs DK) | §3.1 (Fig 1) | `--mlp-embedding-only` | `src/model/fm_embedding_classifier.py` (called by `pipeline.py`) | `MLP_EMBEDDING/{target}/nested_cv/...` and `MARKER_BASELINE/...` | ~540 CPU-h / 30 jobs |
+| **B** Layer-wise linear probing R² | §3.2 (Fig 2 rows 1–4) | `--probing-only` | `src/interp/linear_probing.py` | `LINEAR_PROBING/regression/{layer}/{FM}/summary.json` | ~580 CPU-h / 5 jobs |
+| **C** Layer-wise CRS AUC | §3.2 (Fig 2 row 5) | `--probing-only` (same call) | `src/interp/linear_probing.py` | `LINEAR_PROBING/classification/{layer}/{FM}/...` | shared with **B** |
+| **D** FM ⊕ DK concatenation | §3.2 (Fig 3) | `--combined-dk-only` | `src/model/fm_plus_dk_classifier.py` | `EMBEDDING_DK_COMBINED/{target}/...` | ~600 CPU-h / 36 jobs |
+| **E** Fold-internal residualisation | §3.2 (Fig 3) | `--residualise-only` | `src/interp/res_no_leakage/fold_internal_residualisation.py` | `RES_NO_LEAKAGE/{target}/...` | ~540 CPU-h / 30 jobs |
+| **F** MKNN(k=20) + permutation null | §3.2 (Table 1) | `--mknn-only` | `src/model/embedding_comparison.py` | `EMBEDDING_COMPARISON/component5_mknn/` | ~15 CPU-h / 1 job |
+| **G** MKNN k-sweep ablation | Appendix A.2 | `--mknn-only` (same call) | `src/model/embedding_comparison.py` | `EMBEDDING_COMPARISON/component5_mknn_ksweep/` | shared with **F** |
+
+The full project compute (including FM feature extraction on a single GPU
+and all preliminary / failed runs) is ≈ 6,000 CPU-hours and ≈ 35 P100-hours
+across ≈ 130 jobs (paper Appendix A).
+
+### Worked example — single step
 
 ```bash
-python src/decoder/analysis/analysis.py \
-    --results-dir results/{subdir}/DECODER/decoding-global-{timestamp}/ \
-    --output-dir results/{subdir}/DECODER/stats/
-
-python src/decoder/analysis/viz.py \
-    --results-dir results/{subdir}/DECODER/decoding-global-{timestamp}/ \
-    --stats-file results/{subdir}/DECODER/stats/wilcoxon_results.csv \
-    --output-dir results/{subdir}/DECODER/plots/
+# Step E: fold-internal residualisation only
+python cookbooks/pipeline.py \
+    --residualise-only --all \
+    --main-path /path/to/doc_eeg_data --metadata-dir /path/to/metadata \
+    --mode patient --task lg \
+    --results-subdir CBraMod/doc_patients \
+    --emb-marker-csv /path/to/baseline_stable_20210128_scalars.csv \
+    --emb-patient-labels-full /path/to/patient_labels.csv
 ```
 
 ---
 
-### Global Marker Analysis (`src/global_analysis/`)
+## Figure reproduction
 
-Group-level analyses comparing original vs. reconstructed neurophysiological markers.
+Once `<results-root>` contains the artefacts produced by the per-step table
+above, the four canonical figures in the paper are produced by:
 
-| Script | Purpose |
-|--------|---------|
-| `global_topoplots_minimal.py` | Six topographic comparison plots (orig/recon/diff) with FDR-corrected Wilcoxon tests and Spearman correlation heatmaps, broken down by diagnosis group |
-| `individual_analysis.py` | Per-subject scalar/topographic metrics (correlation, MSE, NMSE) and GFP plots per event type |
-| `statistical_analysis.py` | Permutation-based cluster tests, paired Wilcoxon tests, effect sizes (Cohen's d), and SSIM for topographic fidelity |
-| `qualitative_analysis.py` | Time-frequency spectrograms and electrode×epoch heatmaps for a subset of representative subjects |
-| `ohbm_biomarker_group_comparison.py` | 9×4 topographic grid (9 biomarkers × 4 diagnostic groups) with Spearman ρ and FDR stars |
-| `ohbm_plots.py` | 4-row decoder results figure grouped by subject type (EMCS / MCS / UWS / COMA) |
-| `control_rs_plots_CBraMod.py` | 3-column topographic grid (original / reconstructed / relative difference) for control resting-state data |
+| Paper figure | Command | Output PNG |
+|---|---|---|
+| **Fig 1** Utility AUC, 6 tasks (§3.1) | `python -m src.paper_plots.fig1_utility --results-root <root>` | `plot1_per_target_dot_ttest_fdr_directional.png` |
+| **Fig 2** Layer-wise R² + CRS AUC (§3.2) | `python -m src.paper_plots.fig2_layerwise --results-root <root>` | `plot3_combined_eegpt.png` |
+| **Fig 3** FM / FM+DK / FM-res (§3.2) | `python -m src.paper_plots.fig3_residualisation --results-root <root>` | `plot4_noleak_combined_nonpca_annotated_ttest_fdr.png` |
+| **Appendix A.2** MKNN k-sweep | `python -m src.paper_plots.fig_mknn_ksweep --results-root <root>` | `plot_mknn_k_sweep.png` |
+
+Default `--output-dir` is `<results-root>/PLOTS/`. See
+[`src/paper_plots/README.md`](src/paper_plots/README.md) for details on what
+each script consumes and the available ablation variants under
+[`src/paper_plots_legacy/`](src/paper_plots_legacy/).
+
+---
+
+## Statistical protocols
+
+All AUCs are reported as mean over 100 outer-fold evaluations (5 outer folds
+× 20 repeats), with patient-level fold integrity preserved across all FMs.
+Significance is assessed with the Nadeau–Bengio variance-corrected paired
+t-test (one-tailed, see `src/paper_plots/_corrected_ttest.py`), and
+Benjamini-Hochberg FDR correction is applied across the family of comparisons
+shown in each figure. The MKNN permutation-based null is built from 1000
+random row-shufflings of the DK matrix.
+
+---
+
+## Tests
 
 ```bash
-python src/global_analysis/global_topoplots_minimal.py \
-    --results-dir results/{subdir}/MARKERS/ \
-    --patient-labels /data/.../metadata_patient_labels.csv \
-    --output-dir results/{subdir}/GLOBAL_ANALYSIS/
+pytest tests/ -v
+```
 
-python src/global_analysis/statistical_analysis.py \
-    --results-dir results/{subdir}/MARKERS/ \
-    --patient-labels /data/.../metadata_patient_labels.csv \
-    --output-dir results/{subdir}/GLOBAL_ANALYSIS/stats/
+The unit tests cover marker computation, HDF5 IO, and CV-split utilities.
+They do not require the clinical dataset and run in under a minute on a
+modest workstation.
+
+---
+
+## Linting
+
+```bash
+ruff check src/
+ruff format src/
+```
+
+Configuration (line length 88, target Python 3.8+) lives in
+`pyproject.toml`.
+
+---
+
+## Citation
+
+```bibtex
+@inproceedings{eeg_fm_doc_2025,
+  title  = {Can EEG Foundation Models Go Beyond Domain Knowledge in Reading Consciousness?},
+  author = {Anonymous},
+  booktitle = {Advances in Neural Information Processing Systems (NeurIPS)},
+  year   = {2025}
+}
 ```
 
 ---
 
-### Embedding Interpretability (`src/interp/`)
+## Beyond the paper
 
-Layer-by-layer probing studies to understand what neurophysiological information is encoded at each depth of the foundation models. Supported models: **CBraMod, LaBram, NeuroLM, TOTEM, BIOT**. BIOT uses 6 layers (`pre_transformer`, `transformer_0–3`, `final_emb`; 256-dim embeddings, 36 channels) with raw data read directly from `/data/project/eeg_foundation/data/BIOT/`.
+The original DoC research pipeline supports four legacy phases that **are
+not part of the NeurIPS submission** but remain runnable for users
+interested in the broader workflow:
 
-| Script | Purpose |
-|--------|---------|
-| `linear_probing.py` | For each layer: (1) Ridge regression from embeddings to each marker scalar (R² per marker per layer) and (2) nested CV VS/MCS classification (AUC per layer). Can run in `--pool-only` mode to cache mean-pooled per-layer embeddings first. |
-| `embedding_steering.py` | Trains per-marker linear probes, then steers embeddings along probe directions to measure the effect on VS/MCS predictions (representation engineering) |
-| `residualization_embeddings.py` | Removes marker-predictable variance from embeddings by projecting out all probe directions, then re-classifies VS/MCS to quantify how much marker information was load-bearing for classification |
-| `plot_layers.py` | R² curves across layers — one curve per layer, markers on x-axis |
-| `plot_classification_layers.py` | Per-layer AUC grouped bar chart by classifier |
-| `launch_pool_jobs.py` | Generates HTCondor submit files for parallel linear probing (pool → analysis → aggregate stages) |
+| Legacy phase | Purpose | Flag |
+|---|---|---|
+| GENERAL_METRICS | MAPE / Pearson / FFT between original and reconstructed EEG | `--general-metrics-only` |
+| DECODER | Temporal decoding (sliding-estimator + LogisticRegression) | `--decoder-only` |
+| MODEL | SVM binary classifier on DK markers (legacy variant) | `--model-only` |
 
-```bash
-# Step 1: pool mean embeddings per layer (parallelisable via HTCondor)
-python src/interp/linear_probing.py \
-    --results-root /data/.../benchmark_results/new_results \
-    --model CBraMod --output-dir results/interp/CBraMod/ \
-    --pool-only
-
-# Step 2: per-layer regression + classification
-python src/interp/linear_probing.py \
-    --results-root /data/.../benchmark_results/new_results \
-    --model CBraMod --output-dir results/interp/CBraMod/ \
-    --layer 0   # repeat for each layer
-
-# Step 3: embedding steering
-python src/interp/embedding_steering.py \
-    --results-root /data/.../benchmark_results/new_results \
-    --model CBraMod \
-    --marker-csv /data/.../baseline_stable_20210128_scalars.csv \
-    --patient-labels /data/.../metadata_patient_labels.csv \
-    --output-dir results/interp/CBraMod/steering/
-
-# Step 4: residualization
-python src/interp/residualization_embeddings.py \
-    --results-root /data/.../benchmark_results/new_results \
-    --marker-csv /data/.../baseline_stable_20210128_scalars.csv \
-    --patient-labels /data/.../metadata_patient_labels.csv \
-    --output-dir results/interp/residualization/
-```
-
-**Outputs per model:**
-```
-results/interp/{Model}/
-├── pooled_chan_layers.npz          # cached per-layer pooled embeddings
-├── layer_{N}/
-│   ├── summary.json                # R² per marker
-│   ├── classification_results.json # AUC per classifier
-│   └── feature_importance_raw.png
-├── steering/
-│   ├── embedding_steering_results.json
-│   ├── embedding_steering_summary.csv
-│   └── causal_effects_comparison_r2_order.png
-└── residualization/
-    ├── results.json / results.csv
-    └── auc_comparison.png
-```
-
-For cluster execution across all layers in parallel:
-```bash
-python src/interp/launch_pool_jobs.py --model CBraMod --n-jobs 8
-```
-
----
-
-### Embedding Comparison Studies (`src/model/`)
-
-Cross-model studies comparing foundation model embeddings against each other and against domain-knowledge markers. All use shared CV splits for fair comparison. Supported models: **CBraMod, LaBram, NeuroLM, TOTEM, BIOT**.
-
-| Script | Purpose |
-|--------|---------|
-| `embedding_comparison.py` | Four-component analysis: (1) noise-ceiling-corrected R² (how well FM embeddings predict DK markers), (2) RSA — pairwise RDM alignment (Spearman ρ + bootstrap CIs), (3) CKA — linear Centered Kernel Alignment, (4) dimensionality metrics (power-law exponent, participation ratio, effective rank, threshold-based n_80/90/95/99) |
-| `learning_curve.py` | Performance vs. data budget: evaluates all models on common class-balanced session subsets from N=5 to N=full, with identical nested CV folds across models |
-| `feature_importance_comparison.py` | Cross-model R² heatmap — which models best encode which markers (max-normalised per marker) |
-| `dk_embeddings_classification.py` | FM + domain-knowledge combined classifier with permutation controls (FM-shifted / DK-shifted / both-shifted) to isolate each modality's contribution |
-
-```bash
-# Four-component embedding comparison
-python src/model/embedding_comparison.py \
-    --results-dir /data/.../benchmark_results/new_results \
-    --marker-csv /data/.../baseline_stable_20210128_scalars.csv \
-    --patient-labels /data/.../metadata_patient_labels.csv \
-    --output-dir results/embedding_comparison/
-
-# Learning curve across data budgets
-python src/model/learning_curve.py \
-    --results-dir /data/.../benchmark_results/new_results \
-    --marker-csv /data/.../baseline_stable_20210128_scalars.csv \
-    --patient-labels /data/.../metadata_patient_labels.csv \
-    --output-dir results/learning_curve/ \
-    --budgets 5,10,20,40,full
-
-# FM + DK combined classification
-python src/model/dk_embeddings_classification.py \
-    --results-dir /data/.../benchmark_results/new_results \
-    --marker-csv /data/.../baseline_stable_20210128_scalars.csv \
-    --patient-labels /data/.../metadata_patient_labels.csv \
-    --output-dir results/dk_embeddings/
-```
-
-#### PCA Study — FM embedding dimensionality reduction
-
-Applies per-fold PCA to the FM embedding block (reducing to DK marker dimensionality) before the combined FM+DK classifier, producing two additional output variants: `EMBEDDING_DK_COMBINED_FM_PCA` (PCA-reduced FM ∥ DK) and `EMBEDDING_FM_PCA_ONLY` (PCA-reduced FM alone). Shared CV splits ensure fair comparison with the non-PCA run.
-
-Run all models in parallel as HTCondor jobs (one job per FM model, all 6 targets per job):
-
-```bash
-condor_submit jobs/pca_study.submit
-
-# Monitor
-condor_q
-tail -f /data/project/eeg_foundation/logs/pca_TOTEM_<cluster>.*.out
-```
-
-Each job corresponds to one line in `jobs/pca_models.txt` (TOTEM, LaBram, NeuroLM, CBraMod, BIOT). Results land in `{results_root}/{FM}/doc_patients/EMBEDDING_DK_COMBINED_FM_PCA/` and `EMBEDDING_FM_PCA_ONLY/`.
-
----
-
-### Multi-Model Aggregation (`cookbooks/intermodel_results.py`)
-
-Re-runs MLP embedding classification and/or aggregates decoder results on the **intersection** of subjects available across all foundation models, ensuring identical CV folds for fair head-to-head comparison.
-
-```bash
-python cookbooks/intermodel_results.py \
-    --results-root /data/.../benchmark_results/new_results \
-    --output-root /data/.../benchmark_results/new_results/intermodel \
-    --patient-labels /data/.../metadata_patient_labels.csv \
-    [--decoder-only | --mlp-embedding-only]
-```
-
-Outputs land in `{output_root}/DECODER/intermodel-{timestamp}/` and `{output_root}/MLP-CLASSIFIER/intermodel-{timestamp}/`, one subdirectory per model.
-
----
-
-## Acknowledgements
-
-This project is made possible by the generous support of [Paris Brain Institute America](https://parisbraininstitute.org/). We are deeply grateful to the institute for funding this research and for their continued commitment to advancing the understanding and treatment of disorders of consciousness. Their support enables the scientific infrastructure and clinical insights that drive this work forward.
+These phases reach into modules under [`src/misc/`](src/misc/) and can be
+invoked alongside or independently of `--paper-eval`. They are documented in
+[`src/misc/README.md`](src/misc/README.md).

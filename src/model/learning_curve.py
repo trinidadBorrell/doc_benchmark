@@ -118,7 +118,7 @@ DEFAULT_MARKER_CSV = (
     "/data/project/eeg_foundation/data/original_DoC/nice_scalars_all.csv"
 )
 
-DEFAULT_EMBEDDING_MODELS = ["CBraMod", "NeuroLM", "TOTEM", "LaBram"]
+DEFAULT_EMBEDDING_MODELS = ["CBraMod", "NeuroLM", "TOTEM", "LaBram", "BIOT"]
 SESSION_BUDGETS = np.arange(20, 200, 5)
 
 REDUCTION_MAP = {

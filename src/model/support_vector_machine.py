@@ -33,8 +33,6 @@ Based on the DOC-Forest recipe from:
       --baseline-csv /data/project/eeg_foundation/data/original_DoC/basel
   ine_stable_20210128_scalars.csv \
       --full-cv --use-subject-intersection
-
-Author: Trinidad Borrell <trinidad.borrell@gmail.com>
 """
 
 import numpy as np

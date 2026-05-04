@@ -39,13 +39,11 @@ Usage
         --marker-csv /data/.../baseline_stable_20210128_scalars.csv \\
         --patient-labels /data/.../patient_labels.csv \\
         --output-dir /data/.../embedding_comparison \\
-        --foundation-models NeuroLM CBraMod TOTEM LaBram \\
+        --foundation-models NeuroLM CBraMod TOTEM LaBram EEGPT \\
         --marker-reduction A \\
         --n-cv-folds 5 \\
         --random-state 42 \\
         --pca-variance 0.95
-
-Author: Trinidad Borrell <trinidad.borrell@gmail.com>
 """
 
 import argparse
@@ -65,7 +63,7 @@ import pandas as pd
 from scipy.spatial.distance import pdist, squareform
 from scipy.stats import spearmanr
 from sklearn.neighbors import NearestNeighbors
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import StandardScaler, normalize
 
 plt.rcParams["font.family"] = "serif"
 plt.rcParams["mathtext.fontset"] = "cm"
@@ -1362,6 +1360,35 @@ def compute_mknn_score(
     return float(per_subject.mean()), per_subject
 
 
+def compute_mknn_shuffle_baseline(
+    X_dk: np.ndarray,
+    X_fm: np.ndarray,
+    k: int,
+    n_shuffles: int = 1000,
+    rng: np.random.RandomState = None,
+) -> Tuple[float, float, float, float]:
+    """Null MKNN distribution by shuffling DK rows to break DK–FM correspondence.
+
+    Returns (mean, std, ci_lo, ci_hi) of the permutation null distribution.
+    Expected value ≈ k / (N - 1) when embeddings are unrelated.
+    """
+    if rng is None:
+        rng = np.random.RandomState(42)
+    n = X_dk.shape[0]
+    scores = []
+    for _ in range(n_shuffles):
+        perm = rng.permutation(n)
+        score, _ = compute_mknn_score(X_dk[perm], X_fm, k)
+        scores.append(score)
+    arr = np.array(scores)
+    return (
+        float(arr.mean()),
+        float(arr.std()),
+        float(np.percentile(arr, 2.5)),
+        float(np.percentile(arr, 97.5)),
+    )
+
+
 def run_mknn_analysis(
     X_dk: np.ndarray,
     X_fm: np.ndarray,
@@ -1395,6 +1422,11 @@ def run_mknn_analysis(
     os.makedirs(output_dir, exist_ok=True)
     n = X_dk.shape[0]
     rng = np.random.RandomState(random_state)
+
+    # L2-normalize both spaces so Euclidean kNN is equivalent to cosine kNN,
+    # matching the inner-product kernel used in the PHR paper (Huh et al. 2024).
+    X_dk = normalize(X_dk, norm="l2")
+    X_fm = normalize(X_fm, norm="l2")
 
     results: Dict = {"fm_model_name": fm_model_name, "n_subjects": int(n), "k_results": {}}
 
@@ -1437,7 +1469,72 @@ def run_mknn_analysis(
     os.makedirs(plots_dir, exist_ok=True)
     _plot_mknn_bar(results, fm_model_name, plots_dir)
 
+    run_mknn_baseline_analysis(
+        X_dk=X_dk,
+        X_fm=X_fm,
+        output_dir=output_dir,
+        fm_model_name=fm_model_name,
+        k_values=k_values,
+        n_shuffles=n_bootstrap,
+        random_state=random_state + 1,
+    )
+
     return results
+
+
+def run_mknn_baseline_analysis(
+    X_dk: np.ndarray,
+    X_fm: np.ndarray,
+    output_dir: str,
+    fm_model_name: str,
+    k_values: List[int] = None,
+    n_shuffles: int = 1000,
+    random_state: int = 43,
+) -> Dict:
+    """Compute shuffled-DK MKNN null distribution for each k and save results.
+
+    Saves ``mknn_baseline_{fm_model_name}.json`` alongside the observed results.
+    """
+    if k_values is None:
+        k_values = [10, 20, 30]
+
+    os.makedirs(output_dir, exist_ok=True)
+    n = X_dk.shape[0]
+    rng = np.random.RandomState(random_state)
+
+    baseline: Dict = {
+        "fm_model_name": fm_model_name,
+        "n_subjects": int(n),
+        "n_shuffles": n_shuffles,
+        "k_results": {},
+    }
+
+    for k in k_values:
+        mean_b, std_b, ci_lo, ci_hi = compute_mknn_shuffle_baseline(
+            X_dk, X_fm, k, n_shuffles=n_shuffles, rng=rng
+        )
+        baseline["k_results"][str(k)] = {
+            "k": int(k),
+            "mean": mean_b,
+            "boot_std": std_b,
+            "ci_lower": ci_lo,
+            "ci_upper": ci_hi,
+        }
+        log.info(
+            "MKNN baseline k=%d  mean=%.3f [%.3f, %.3f] — %s",
+            k,
+            mean_b,
+            ci_lo,
+            ci_hi,
+            fm_model_name,
+        )
+
+    out_json = op.join(output_dir, f"mknn_baseline_{fm_model_name}.json")
+    with open(out_json, "w") as f:
+        json.dump(baseline, f, indent=2)
+    log.info("MKNN baseline saved: %s", out_json)
+
+    return baseline
 
 
 def _plot_mknn_bar(results: Dict, fm_model_name: str, plots_dir: str):
@@ -1920,7 +2017,7 @@ def main():
     parser.add_argument(
         "--foundation-models",
         nargs="+",
-        default=["NeuroLM", "CBraMod", "TOTEM", "LaBram"],
+        default=["NeuroLM", "CBraMod", "TOTEM", "LaBram", "BIOT", "EEGPT"],
         help="Foundation model names (match subdirs in --results-dir).",
     )
     parser.add_argument(
@@ -2002,6 +2099,15 @@ def main():
         type=int,
         default=1000,
         help="Bootstrap iterations for MKNN CI (default: 1000).",
+    )
+    parser.add_argument(
+        "--mknn-subdir",
+        type=str,
+        default="component5_mknn",
+        help=(
+            "Output subdirectory name for MKNN results under --output-dir "
+            "(default: component5_mknn). Use component5_mknn_l2 for L2-normalised runs."
+        ),
     )
     parser.add_argument(
         "--skip-pwcca",
@@ -2102,7 +2208,7 @@ def main():
         c2_dir = op.join(args.output_dir, "component2_rsa")
         c3_dir = op.join(args.output_dir, "component3_cka")
         c4_dir = op.join(args.output_dir, "component4_dimensionality")
-        c5_dir = op.join(args.output_dir, "component5_mknn")
+        c5_dir = op.join(args.output_dir, args.mknn_subdir)
         c6_dir = op.join(args.output_dir, "component6_pwcca")
         summary_dir = op.join(args.output_dir, "summary")
         for d in [c1_dir, c2_dir, c3_dir, c4_dir, c5_dir, c6_dir, summary_dir]:
@@ -2283,8 +2389,6 @@ def main():
 
             plot_r2_comparison(
                 results_dir=args.results_dir,
-                marker_csv=args.marker_csv,
-                marker_reduction=args.marker_reduction,
                 output_dir=c1_plots_dir,
             )
         except Exception as exc:

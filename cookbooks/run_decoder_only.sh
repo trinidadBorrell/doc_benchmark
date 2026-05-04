@@ -6,9 +6,9 @@ set -e
 # Print commands for debugging
 set -x
 
-# Use the Python directly from the conda environment
-export PYTHON_EXE="/home/triniborrell/miniforge3_ppc64le/envs/pytorch_ppc64le/bin/python"
-export PATH="/home/triniborrell/miniforge3_ppc64le/envs/pytorch_ppc64le/bin:$PATH"
+# Use Python from the active conda/venv environment.
+# Override by exporting PYTHON_EXE before invoking this script.
+export PYTHON_EXE="${PYTHON_EXE:-python3}"
 
 # Print debugging info
 echo "Using Python directly from conda environment: $PYTHON_EXE"

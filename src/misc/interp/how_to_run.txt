@@ -1,0 +1,390 @@
+==============================================================================
+  INTERPRETABILITY SCRIPTS — HOW TO RUN
+  src/interp/
+==============================================================================
+
+Three independent scripts probe foundation model (FM) embeddings from
+different angles.  All three share the same CV infrastructure:
+
+  - Splits are either loaded from a pre-computed JSON (--splits-file) or
+    generated on the fly with StratifiedGroupKFold (outer + inner).
+  - Generated splits are always auto-saved so they can be reused.
+  - Subjects are grouped by patient ID to prevent data leakage across folds.
+
+Shared CV splits JSON (recommended for cross-script consistency):
+  /data/project/eeg_foundation/data/benchmark_results/new_results/
+  cv_splits/dk_combined_crs_20260331_170511.json
+  (290 sessions, 5 outer folds, 4 inner folds each)
+
+------------------------------------------------------------------------------
+1. LINEAR PROBING  (linear_probing.py)
+------------------------------------------------------------------------------
+
+What it does
+------------
+Probes multi-layer embeddings (every transformer layer) in two ways:
+
+  A) Ridge Regression — predicts each classical EEG marker from the
+     mean-pooled layer embedding.  Output: R² per marker per layer.
+
+  B) Nested CV Classification — binary VS vs MCS classification using
+     SVM, KernelRidge, and RandomForest with StratifiedGroupKFold outer
+     CV.  Output: AUC (mean ± std) per classifier per layer.
+
+Regression and classification share the same outer folds, enabling
+direct comparison between "how well does this layer encode marker X"
+and "how well does this layer separate VS from MCS".
+
+Input
+-----
+  --data-dir          Root data dir with model embedding subdirs
+                      (e.g. CbraMod/multi_layer_embeddings/sub-*/
+                            pooled_chan_layers.npz or raw .npz)
+                      Default: /data/project/eeg_foundation/data
+
+  --patient-labels    CSV with columns subject, session, diagnostic_crs_final
+                      Default: .../original_DoC/patient_labels_with_controls.csv
+
+  --marker-csv        CSV with classical EEG marker scalars (one row per session)
+                      Default: .../original_DoC/baseline_stable_20210128_scalars.csv
+
+  --output-dir        Where to save all results
+                      Default: .../benchmark_results/new_results/LINEAR_PROBING
+
+  --models            One or more of: CbraMod  NeuroLM  (default: both)
+  --layers            Comma-separated layer keys or 'all' (default: all)
+  --reduction         Marker aggregation variant A/B/C/D (default: A = trim_mean80)
+  --n-cv-folds        Number of outer folds (default: 5)
+  --random-state      Random seed (default: 42)
+  --splits-file       Pre-computed CV splits JSON (optional, recommended)
+  --save-splits-to    Explicit path to save generated splits JSON
+
+  --skip-regression       Skip Ridge regression stage
+  --skip-classification   Skip nested CV classification stage
+  --pool-only             Only compute and cache pooled embeddings (disk stage)
+  --aggregate-only        Only merge per-layer JSON results into summaries
+
+Output
+------
+  {output-dir}/
+  ├── {MODEL}/
+  │   ├── pooled/
+  │   │   └── {subject}/pooled_chan_layers.npz   (cached per-channel embeddings)
+  │   ├── regression/
+  │   │   ├── {layer}/summary.json               (R² per marker)
+  │   │   └── regression_summary.json            (aggregated across layers)
+  │   ├── classification/
+  │   │   ├── {layer}/classification_{clf}.json  (AUC per fold per classifier)
+  │   │   └── classification_summary.json        (aggregated)
+  │   └── feature_importance_raw.png             (R² bar plot, all layers)
+  └── cv_splits/
+      └── linear_probing_crs_{timestamp}.json    (auto-saved if no --splits-file)
+
+Run examples
+------------
+# Minimal (uses all defaults, generates splits automatically):
+python src/interp/linear_probing.py
+
+# With shared splits — same folds as model scripts:
+python src/interp/linear_probing.py \
+    --splits-file /data/project/eeg_foundation/data/benchmark_results/\
+new_results/cv_splits/dk_combined_crs_20260331_170511.json
+
+# Only one model, only classification, save splits for reuse:
+python src/interp/linear_probing.py \
+    --models CbraMod \
+    --skip-regression \
+    --save-splits-to /path/to/my_splits.json
+
+# Single layer (faster iteration):
+python src/interp/linear_probing.py \
+    --models CbraMod \
+    --layers layer_11
+
+HTCondor parallel workflow (recommended for full runs)
+-------------------------------------------------------
+# Step 1 — Pool embeddings in parallel (N jobs, one per subject chunk):
+python src/interp/launch_pool_jobs.py \
+    --model CbraMod --stage pool --n-jobs 10 --submit
+
+# Step 2 — One job per layer (regression + classification):
+python src/interp/launch_pool_jobs.py \
+    --model CbraMod --stage analysis \
+    --splits-file .../cv_splits/dk_combined_crs_20260331_170511.json \
+    --submit
+
+# Step 3 — Aggregate per-layer JSONs into summaries + plots:
+python src/interp/launch_pool_jobs.py \
+    --model CbraMod --stage aggregate --submit
+
+# All three stages at once (dry-run first to check submit files):
+python src/interp/launch_pool_jobs.py \
+    --model CbraMod --stage all --n-jobs 10 \
+    --splits-file .../dk_combined_crs_20260331_170511.json
+
+
+------------------------------------------------------------------------------
+2. EMBEDDING STEERING  (embedding_steering.py)
+------------------------------------------------------------------------------
+
+What it does
+------------
+Tests whether classical EEG markers are causally encoded in FM embeddings
+by steering the embedding space along learned probe directions and measuring
+the downstream effect on VS/MCS classification.
+
+Per outer fold:
+  1. Train a Ridge probe per marker on the TRAIN split only (avoids leakage).
+  2. Extract unit-normalised probe direction w_hat.
+  3. Compute delta = mean_MCS_projection - mean_VS_projection (test split).
+  4. Shift every VS embedding: x_patched = x_vs + delta * w_hat.
+  5. Feed patched embeddings to the pre-trained classifier and measure
+     causal_effect = mean(P_patched(MCS) - P_original(MCS)).
+Results are aggregated across folds (mean ± std).
+
+Note: this is embedding steering / representation engineering
+(Zou et al., 2023), NOT activation patching (Meng et al., 2022).
+Activation patching operates layer-by-layer on intermediate activations;
+this script works on final pooled embeddings only.
+
+Input
+-----
+  --model             LaBram | CBraMod | NeuroLM | TOTEM | all (default: all)
+
+  --results-root      Root directory with per-model benchmark results
+                      Default: .../benchmark_results/new_results
+                      (expects {results-root}/{MODEL}/MLP_EMBEDDING/
+                               pooled_embeddings/ and nested_cv/)
+
+  --marker-csv        CSV with classical EEG marker scalars
+                      Default: .../original_DoC/nice_scalars_all.csv
+
+  --patient-labels    CSV with diagnostic labels
+                      Default: .../metadata/metadata_patient_labels.csv
+
+  --output-dir        Where to save results
+                      Default: {results-root}/EMBEDDING_STEERING
+
+  --classifier-type   Pre-trained classifier to steer against:
+                      kernel_ridge | mlp | random_forest  (default: kernel_ridge)
+
+  --reduction         Marker aggregation variant A/B/C/D (default: A)
+  --n-cv-folds        Number of outer CV folds when generating splits (default: 5)
+  --random-state      Random seed (default: 42)
+  --splits-file       Pre-computed CV splits JSON (optional, recommended)
+  --save-splits-to    Explicit path to save generated splits JSON
+  --compare           Also produce a cross-model comparison plot (requires --model all)
+
+Output
+------
+  {output-dir}/
+  ├── {MODEL}/
+  │   ├── embedding_steering_results.json     (per-fold causal effects per marker)
+  │   ├── embedding_steering_summary.csv      (mean ± std across folds, all markers)
+  │   └── causal_effects_{MODEL}.png          (bar plot, markers sorted by effect size)
+  ├── comparison_causal_effects.png           (cross-model plot, if --compare)
+  └── cv_splits/
+      └── embedding_steering_crs_{timestamp}.json   (auto-saved if no --splits-file)
+
+Run examples
+------------
+# All models, auto-generate splits:
+python src/interp/embedding_steering.py
+
+# Single model with shared splits:
+python src/interp/embedding_steering.py \
+    --model CBraMod \
+    --splits-file /data/project/eeg_foundation/data/benchmark_results/\
+new_results/cv_splits/dk_combined_crs_20260331_170511.json
+
+# All models, shared splits, cross-model comparison plot:
+python src/interp/embedding_steering.py \
+    --model all --compare \
+    --splits-file .../dk_combined_crs_20260331_170511.json
+
+# Use MLP classifier instead of kernel_ridge:
+python src/interp/embedding_steering.py \
+    --model CBraMod --classifier-type mlp
+
+
+------------------------------------------------------------------------------
+3. RESIDUALIZATION EMBEDDINGS  (residualization_embeddings.py)
+------------------------------------------------------------------------------
+
+What it does
+------------
+Tests how much of the FM embedding's discriminative power for VS/MCS
+classification comes from classical EEG marker information, by removing
+marker-predictable variance before classifying.
+
+Per outer fold:
+  1. Train a Ridge probe per marker on the TRAIN split.
+  2. Residualize embeddings: x_res = x - sum_m (x @ w_hat_m) * w_hat_m
+     (removes directions correlated with any marker).
+  3. Classify VS vs MCS on residualized embeddings using nested CV
+     with four classifiers: KernelRidge, SVM, MLP, RandomForest.
+  4. Compare AUC before vs after residualization to quantify how much
+     classification relies on marker-encodable information.
+
+Input
+-----
+  --model             LaBram | CBraMod | NeuroLM | TOTEM | all (default: all)
+
+  --results-root      Root directory with per-model benchmark results
+                      Default: .../benchmark_results/new_results
+                      (expects {results-root}/{MODEL}/MLP_EMBEDDING/
+                               pooled_embeddings/)
+
+  --marker-csv        CSV with classical EEG marker scalars
+                      Default: .../original_DoC/nice_scalars_all.csv
+
+  --patient-labels    CSV with diagnostic labels
+                      Default: .../metadata/metadata_patient_labels.csv
+
+  --output-dir        Where to save results  (default: results/residualization)
+
+  --classifiers       Subset of: kernel_ridge  svm  mlp  random_forest
+                      (default: all four)
+  --reduction         Marker aggregation variant A/B/C/D (default: A)
+  --n-folds           Number of outer CV folds (default: 5)
+  --random-state      Random seed (default: 42)
+  --splits-file       Pre-computed CV splits JSON (optional, recommended)
+  --save-splits-to    Explicit path to save generated splits JSON
+
+Output
+------
+  {output-dir}/
+  ├── {MODEL}/
+  │   ├── results.json            (AUC per fold per classifier)
+  │   ├── results.csv             (tidy table: model, classifier, fold, AUC)
+  │   └── auc_comparison.png      (dot + error-bar plot, y-axis 0–1)
+  └── cv_splits/
+      └── residualization_crs_{timestamp}.json   (auto-saved if no --splits-file)
+
+Run examples
+------------
+# All models, all classifiers, auto-generate splits:
+python src/interp/residualization_embeddings.py \
+    --results-root /data/project/eeg_foundation/data/benchmark_results/new_results \
+    --marker-csv   /data/project/eeg_foundation/data/original_DoC/nice_scalars_all.csv \
+    --patient-labels /data/project/eeg_foundation/data/metadata/metadata_patient_labels.csv \
+    --output-dir   /data/project/eeg_foundation/data/benchmark_results/new_results/RESIDUALIZATION
+
+# With shared splits (recommended — aligns folds with model scripts):
+python src/interp/residualization_embeddings.py \
+    --results-root .../new_results \
+    --marker-csv   .../nice_scalars_all.csv \
+    --patient-labels .../metadata_patient_labels.csv \
+    --output-dir   .../new_results/RESIDUALIZATION \
+    --splits-file  .../cv_splits/dk_combined_crs_20260331_170511.json
+
+# Single model, only fast classifiers:
+python src/interp/residualization_embeddings.py \
+    --model CBraMod \
+    --classifiers kernel_ridge svm \
+    --splits-file .../dk_combined_crs_20260331_170511.json \
+    --output-dir  .../RESIDUALIZATION
+
+
+------------------------------------------------------------------------------
+RECOMMENDED WORKFLOW FOR CROSS-SCRIPT COMPARISONS
+------------------------------------------------------------------------------
+
+Run all three scripts on the same CV splits to ensure that train/test
+assignments are identical.  This lets you directly compare:
+  - "Does this layer predict marker X?" (linear_probing, R²)
+  - "Is marker X causally encoded?" (embedding_steering, causal effect)
+  - "Does removing markers reduce discriminability?" (residualization, ΔAUC)
+
+SPLITS_FILE=".../cv_splits/dk_combined_crs_20260331_170511.json"
+
+# 1. Linear probing (all layers, both models):
+python src/interp/linear_probing.py \
+    --splits-file $SPLITS_FILE
+
+# 2. Embedding steering (all models):
+python src/interp/embedding_steering.py \
+    --model all --compare \
+    --splits-file $SPLITS_FILE
+
+# 3. Residualization (all models):
+python src/interp/residualization_embeddings.py \
+    --results-root .../new_results \
+    --marker-csv   .../nice_scalars_all.csv \
+    --patient-labels .../metadata_patient_labels.csv \
+    --output-dir   .../new_results/RESIDUALIZATION \
+    --splits-file  $SPLITS_FILE
+
+
+------------------------------------------------------------------------------
+4. PLOT CLASSIFICATION LAYERS  (plot_classification_layers.py)
+------------------------------------------------------------------------------
+
+What it does
+------------
+Reads per-layer classification JSONs produced by linear_probing.py and
+generates two outputs per model:
+
+  A) Bar plot  — grouped bars (one group per layer, one bar per classifier)
+     with AUC mean ± std error bars.  The last-layer embedding result from
+     the main pipeline (MLP_EMBEDDING/nested_cv) is appended as an extra
+     hatched bar group for reference.
+
+  B) Table PNG — rows = layers (patch_emb, layer_0, …, last-layer embedding),
+     columns = classifiers (SVM, KernelRidge, RandomForest), cells = AUC
+     mean ± std.  Best value per column is bold; the embedding row is
+     highlighted in yellow.
+
+Input
+-----
+  --output-dir    Directory written by linear_probing.py that contains a
+                  classification/ subdirectory with per-layer JSONs.
+                  Default: .../benchmark_results/new_results/LINEAR_PROBING
+
+  --models        One or more of: CbraMod  NeuroLM  (default: both)
+
+Output (saved directly in --output-dir)
+------
+  classification_layers_{MODEL}.png         bar plot
+  classification_layers_table_{MODEL}.png   table
+
+Run examples
+------------
+# Both models, default paths:
+python src/interp/plot_classification_layers.py
+
+# Single model:
+python src/interp/plot_classification_layers.py --models CbraMod
+
+# Custom results dir:
+python src/interp/plot_classification_layers.py \
+    --output-dir /data/project/eeg_foundation/data/benchmark_results/\
+new_results/LINEAR_PROBING \
+    --models CbraMod NeuroLM
+
+
+------------------------------------------------------------------------------
+CV SPLITS FORMAT REFERENCE
+------------------------------------------------------------------------------
+
+JSON schema:
+  {
+    "common_sessions": ["sub-AA001_ses-1", ...],   // 290 sessions
+    "labels":          {"sub-AA001_ses-1": 0, ...}, // 0=VS/UWS, 1=MCS
+    "groups":          ["AA001", ...],              // subject IDs (for GroupKFold)
+    "folds": [
+      {
+        "train_idx":      [0, 2, 4, ...],           // indices into common_sessions
+        "test_idx":       [1, 3, 5, ...],
+        "train_subjects": ["AA001", ...],
+        "test_subjects":  ["AA002", ...],
+        "inner_splits": [                           // indices relative to X[train_idx]
+          {"train": [...], "val": [...]}, ...
+        ]
+      },
+      ...  // 5 outer folds total
+    ]
+  }
+
+Loaded by: src/model/cv_utils.py :: load_cv_splits(path)
+Generated by: generate_nested_cv_folds(common_sessions, labels, n_outer, random_state)

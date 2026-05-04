@@ -17,7 +17,7 @@ Supported Data Structures
 Pipeline Phases
 ---------------
 A. GENERAL_METRICS  compute_metrics.py          → MAPE & Pearson correlation
-B. MLP_EMBEDDING    mlp_embedding_classifier.py → MLP/RF/KR on embeddings
+B. MLP_EMBEDDING    fm_embedding_classifier.py → MLP/RF/KR on embeddings
                     Supports three sub-modes via CLI flags forwarded to the script:
                     • default             — binary VS vs MCS classification
                     • --marker-regression — Ridge regression: embeddings → scalar markers
@@ -85,8 +85,6 @@ Phase-Specific Flags
 --skip-decoder           Skip DECODER
 --skip-markers           Skip MARKERS
 --skip-model             Skip MODEL
-
-Authors: Trinidad Borrell <trinidad.borrell@gmail.com>
 """
 
 import argparse
@@ -416,17 +414,22 @@ class Pipeline:
         # Create results directory if it doesn't exist
         (self.results_dir / "new_results").mkdir(parents=True, exist_ok=True)
 
-        # Check for required source files
+        # Check for required source files. Paper-relevant code lives under
+        # src/{model,interp,paper_plots}/; the legacy phases (GENERAL_METRICS,
+        # DECODER, the per-subject HTML report) live under src/misc/ and are
+        # reached through dedicated --skip / --*-only flags. DK marker
+        # extraction (paper §3.2) is performed with the upstream `nice`
+        # library (https://github.com/nice-tools/nice) -- the historical
+        # in-tree wrappers under src/markers/ are not redistributed and are
+        # only checked when the MARKERS phase is explicitly requested.
         required_files = [
-            "decoder/decoder.py",
-            "decoder/analysis/analysis.py",
-            "decoder/analysis/viz.py",
-            "markers/report/compute_data.py",
-            "markers/report/generate_plots.py",
-            "markers/compute_scalars.py",
-            "markers/compute_topographies.py",
+            "misc/decoder/decoder.py",
+            "misc/decoder/analysis/analysis.py",
+            "misc/decoder/analysis/viz.py",
+            "misc/markers_report/compute_data.py",
+            "misc/markers_report/generate_plots.py",
             "model/support_vector_machine.py",
-            "model/mlp_embedding_classifier.py",
+            "model/fm_embedding_classifier.py",
         ]
 
         missing_files = []
@@ -809,7 +812,7 @@ class Pipeline:
             cmd = (
                 [
                     sys.executable,
-                    str(self.src_dir / "general_metrics" / "compute_metrics.py"),
+                    str(self.src_dir / "misc" / "general_metrics" / "compute_metrics.py"),
                     "--base_dirs",
                 ]
                 + base_dirs
@@ -846,7 +849,7 @@ class Pipeline:
         """
         Run MLP embedding classification phase (Phase B).
 
-        Invokes ``mlp_embedding_classifier.py`` with the configured options.
+        Invokes ``fm_embedding_classifier.py`` with the configured options.
         The sub-mode is determined by which flags are set on the Pipeline
         instance (defaults to binary VS vs MCS):
 
@@ -930,7 +933,7 @@ class Pipeline:
 
             cmd = [
                 sys.executable,
-                str(self.src_dir / "model" / "mlp_embedding_classifier.py"),
+                str(self.src_dir / "model" / "fm_embedding_classifier.py"),
                 "--data-dir",
                 str(emb_dir),
                 "--patient-labels",
@@ -977,7 +980,7 @@ class Pipeline:
                 ])
 
             if not self._run_command(cmd):
-                self.logger.error("mlp_embedding_classifier.py failed")
+                self.logger.error("fm_embedding_classifier.py failed")
                 return False
 
             self.logger.info("✓ MLP EMBEDDING phase completed")
@@ -1010,7 +1013,7 @@ class Pipeline:
             self.logger.info("Step C1: Running decoder.py...")
             cmd = [
                 sys.executable,
-                str(self.src_dir / "decoder" / "decoder.py"),
+                str(self.src_dir / "misc" / "decoder" / "decoder.py"),
                 "--main_path",
                 str(self.main_path),
                 "--output_dir",
@@ -1060,7 +1063,7 @@ class Pipeline:
             self.logger.info("Step C2: Running analysis.py...")
             cmd = [
                 sys.executable,
-                str(self.src_dir / "decoder" / "analysis" / "analysis.py"),
+                str(self.src_dir / "misc" / "decoder" / "analysis" / "analysis.py"),
                 "--results-dir",
                 str(latest_decoder_dir),
             ]
@@ -1075,7 +1078,7 @@ class Pipeline:
             viz_mode = "DOC" if self.mode == "patient" else "control"
             cmd = [
                 sys.executable,
-                str(self.src_dir / "decoder" / "analysis" / "viz.py"),
+                str(self.src_dir / "misc" / "decoder" / "analysis" / "viz.py"),
                 "--results-dir",
                 str(latest_decoder_dir),
                 "--mode",
@@ -1252,7 +1255,7 @@ class Pipeline:
             _t0 = datetime.now()
             cmd = [
                 sys.executable,
-                str(self.src_dir / "markers" / "report" / "compute_data.py"),
+                str(self.src_dir / "misc" / "markers_report" / "compute_data.py"),
                 "--subject_id",
                 subject_id,
                 "--h5_file",
@@ -1860,7 +1863,7 @@ class Pipeline:
 
             cmd = [
                 sys.executable,
-                str(self.src_dir / "markers" / "report" / "generate_plots.py"),
+                str(self.src_dir / "misc" / "markers_report" / "generate_plots.py"),
                 "--subject_id",
                 subject_id,
                 "--session",
@@ -2092,6 +2095,183 @@ class Pipeline:
             self.logger.error(f"✗ MODEL phase failed: {e}")
             return False
 
+    # ──────────────────────────────────────────────────────────────────────
+    # NeurIPS paper-evaluation phases (representational audit, §3.2)
+    #
+    # These four phases mirror the 7-step evaluation framework of the paper:
+    #   F. Probing            → §3.2 layer-wise R² + per-layer CRS AUC (steps B & C)
+    #   G. Combined DK        → §3.2 FM ⊕ DK concatenation (step D)
+    #   H. Residualisation    → §3.2 fold-internal residualisation (step E)
+    #   I. MKNN alignment     → §3.2 + Appendix MKNN(k) and k-sweep (steps F & G)
+    # Step A (Utility nested CV across 6 tasks) reuses the existing
+    # MLP_EMBEDDING phase. Each helper subprocesses into the canonical entry
+    # point under src/{interp,model}/ with sys.executable.
+    # ──────────────────────────────────────────────────────────────────────
+
+    def _paper_results_root(self) -> "Path":
+        """Where the per-FM result trees live (parent of {FM}/doc_patients/)."""
+        from pathlib import Path
+
+        if self.results_subdir:
+            return Path(self.results_dir) / Path(self.results_subdir).parts[0]
+        return Path(self.results_dir)
+
+    def run_probing_phase(self) -> bool:
+        """Phase F: layer-wise linear probing (R² + per-layer CRS AUC).
+
+        Wraps ``src/interp/linear_probing.py``. Produces
+        ``LINEAR_PROBING/regression/{layer}/{FM}/summary.json`` and
+        ``LINEAR_PROBING/classification/{layer}/{FM}/...``.
+        """
+        try:
+            self.logger.info("=" * 60)
+            self.logger.info("PHASE F: LAYER-WISE LINEAR PROBING")
+            self.logger.info("=" * 60)
+            output_dir = self._paper_results_root() / "LINEAR_PROBING"
+            output_dir.mkdir(parents=True, exist_ok=True)
+            cmd = [
+                sys.executable,
+                str(self.src_dir / "interp" / "linear_probing.py"),
+                "--output-dir", str(output_dir),
+            ]
+            if self.embedding_data_dir:
+                cmd.extend(["--data-dir", str(self.embedding_data_dir)])
+            if self.emb_marker_csv:
+                cmd.extend(["--marker-csv", str(self.emb_marker_csv)])
+            if self.emb_patient_labels_full:
+                cmd.extend(["--patient-labels", str(self.emb_patient_labels_full)])
+            if not self._run_command(cmd):
+                self.logger.error("linear_probing.py failed")
+                return False
+            self.logger.info("✓ PROBING phase completed")
+            return True
+        except Exception as e:
+            self.logger.error(f"✗ PROBING phase failed: {e}")
+            return False
+
+    def run_combined_dk_phase(self) -> bool:
+        """Phase G: FM ⊕ DK concatenation classification.
+
+        Wraps ``src/model/fm_plus_dk_classifier.py``. Produces
+        ``EMBEDDING_DK_COMBINED/{target}/...``.
+        """
+        try:
+            self.logger.info("=" * 60)
+            self.logger.info("PHASE G: FM + DK COMBINED CLASSIFICATION")
+            self.logger.info("=" * 60)
+            cmd = [
+                sys.executable,
+                str(self.src_dir / "model" / "fm_plus_dk_classifier.py"),
+                "--results-root", str(self._paper_results_root()),
+            ]
+            if self.emb_marker_csv:
+                cmd.extend(["--marker-csv", str(self.emb_marker_csv)])
+            if self.emb_patient_labels_full:
+                cmd.extend(["--patient-labels", str(self.emb_patient_labels_full)])
+            if not self._run_command(cmd):
+                self.logger.error("fm_plus_dk_classifier.py failed")
+                return False
+            self.logger.info("✓ COMBINED_DK phase completed")
+            return True
+        except Exception as e:
+            self.logger.error(f"✗ COMBINED_DK phase failed: {e}")
+            return False
+
+    def run_residualise_phase(self) -> bool:
+        """Phase H: fold-internal linear residualisation (no leakage).
+
+        Wraps ``src/interp/res_no_leakage/fold_internal_residualisation.py``.
+        Produces ``RES_NO_LEAKAGE/{target}/...``.
+        """
+        try:
+            self.logger.info("=" * 60)
+            self.logger.info("PHASE H: FOLD-INTERNAL RESIDUALISATION")
+            self.logger.info("=" * 60)
+            output_dir = self._paper_results_root() / "RES_NO_LEAKAGE"
+            output_dir.mkdir(parents=True, exist_ok=True)
+            cmd = [
+                sys.executable,
+                str(
+                    self.src_dir
+                    / "interp"
+                    / "res_no_leakage"
+                    / "fold_internal_residualisation.py"
+                ),
+                "--results-root", str(self._paper_results_root()),
+                "--output-dir", str(output_dir),
+            ]
+            if self.emb_marker_csv:
+                cmd.extend(["--marker-csv", str(self.emb_marker_csv)])
+            if self.emb_patient_labels_full:
+                cmd.extend(["--patient-labels", str(self.emb_patient_labels_full)])
+            if not self._run_command(cmd):
+                self.logger.error("fold_internal_residualisation.py failed")
+                return False
+            self.logger.info("✓ RESIDUALISE phase completed")
+            return True
+        except Exception as e:
+            self.logger.error(f"✗ RESIDUALISE phase failed: {e}")
+            return False
+
+    def run_mknn_phase(self) -> bool:
+        """Phase I: MKNN(DK, FM) alignment + permutation null + k-sweep.
+
+        Wraps ``src/model/embedding_comparison.py`` and runs Component 5 only,
+        twice: once at the canonical k=20 (paper Table 1, output to
+        ``EMBEDDING_COMPARISON/component5_mknn/``) and once across k ∈ [10, 40]
+        for the appendix k-sweep ablation
+        (``EMBEDDING_COMPARISON/component5_mknn_ksweep/``).
+        """
+        try:
+            self.logger.info("=" * 60)
+            self.logger.info("PHASE I: MKNN ALIGNMENT")
+            self.logger.info("=" * 60)
+            output_dir = self._paper_results_root() / "EMBEDDING_COMPARISON"
+            output_dir.mkdir(parents=True, exist_ok=True)
+
+            base_cmd = [
+                sys.executable,
+                str(self.src_dir / "model" / "embedding_comparison.py"),
+                "--results-dir", str(self._paper_results_root()),
+                "--output-dir", str(output_dir),
+                "--skip-ridge-r2",
+                "--skip-rsa",
+                "--skip-cka",
+                "--skip-dimensionality",
+                "--skip-pwcca",
+            ]
+            if self.emb_marker_csv:
+                base_cmd.extend(["--marker-csv", str(self.emb_marker_csv)])
+            if self.emb_patient_labels_full:
+                base_cmd.extend(["--patient-labels", str(self.emb_patient_labels_full)])
+
+            # 1) Canonical k=20 (paper Table 1).
+            cmd_k20 = base_cmd + [
+                "--mknn-k", "20",
+                "--mknn-subdir", "component5_mknn",
+            ]
+            self.logger.info("MKNN: running canonical k=20")
+            if not self._run_command(cmd_k20):
+                self.logger.error("embedding_comparison.py (k=20) failed")
+                return False
+
+            # 2) k-sweep for the Appendix ablation (k = 10..40 step 1).
+            ksweep = [str(k) for k in range(10, 41)]
+            cmd_sweep = base_cmd + [
+                "--mknn-k", *ksweep,
+                "--mknn-subdir", "component5_mknn_ksweep",
+            ]
+            self.logger.info("MKNN: running k-sweep over k ∈ [10, 40]")
+            if not self._run_command(cmd_sweep):
+                self.logger.error("embedding_comparison.py (k-sweep) failed")
+                return False
+
+            self.logger.info("✓ MKNN phase completed")
+            return True
+        except Exception as e:
+            self.logger.error(f"✗ MKNN phase failed: {e}")
+            return False
+
     def run_pipeline(
         self,
         subjects: List[Tuple[str, str]],
@@ -2100,13 +2280,17 @@ class Pipeline:
         skip_decoder: bool = False,
         skip_markers: bool = False,
         skip_model: bool = False,
+        skip_probing: bool = True,
+        skip_combined_dk: bool = True,
+        skip_residualise: bool = True,
+        skip_mknn: bool = True,
     ) -> dict:
         """
         Run the complete pipeline for the specified subjects.
 
         Pipeline flow:
         A. GENERAL_METRICS phase: compute_metrics.py → Correlation/MAPE
-        B. MLP_EMBEDDING phase: mlp_embedding_classifier.py → MLP on embeddings (VS vs MCS)
+        B. MLP_EMBEDDING phase: fm_embedding_classifier.py → MLP on embeddings (VS vs MCS)
         C. DECODER phase: decoder.py → analysis.py → viz.py
         D. MARKERS phase: For each subject:
            - compute_markers_with_junifer.py → HDF5
@@ -2169,6 +2353,10 @@ class Pipeline:
             "decoder": False if not skip_decoder else "skipped",
             "markers": False if not skip_markers else "skipped",
             "model": False if not skip_model else "skipped",
+            "probing": False if not skip_probing else "skipped",
+            "combined_dk": False if not skip_combined_dk else "skipped",
+            "residualise": False if not skip_residualise else "skipped",
+            "mknn": False if not skip_mknn else "skipped",
         }
 
         # Phase A: GENERAL_METRICS
@@ -2257,6 +2445,70 @@ class Pipeline:
             self.logger.info("\n" + "=" * 70)
             self.logger.info("PHASE E: MODEL - SKIPPED")
         # else: task == 'rs', model phase skipped automatically
+
+        # Phase F: PROBING (paper §3.2 layer-wise linear probing)
+        if not skip_probing:
+            self.logger.info("\n" + "=" * 70)
+            _phase_t0 = datetime.now()
+            if self.run_probing_phase():
+                results["probing"] = True
+            else:
+                self.logger.error("PROBING phase failed - continuing")
+            self._record_timing(
+                "PROBING", "total", (datetime.now() - _phase_t0).total_seconds()
+            )
+            self._flush_timing_csv()
+        else:
+            self.logger.info("\n" + "=" * 70)
+            self.logger.info("PHASE F: PROBING - SKIPPED")
+
+        # Phase G: COMBINED_DK (paper §3.2 FM ⊕ DK concatenation)
+        if not skip_combined_dk:
+            self.logger.info("\n" + "=" * 70)
+            _phase_t0 = datetime.now()
+            if self.run_combined_dk_phase():
+                results["combined_dk"] = True
+            else:
+                self.logger.error("COMBINED_DK phase failed - continuing")
+            self._record_timing(
+                "COMBINED_DK", "total", (datetime.now() - _phase_t0).total_seconds()
+            )
+            self._flush_timing_csv()
+        else:
+            self.logger.info("\n" + "=" * 70)
+            self.logger.info("PHASE G: COMBINED_DK - SKIPPED")
+
+        # Phase H: RESIDUALISE (paper §3.2 fold-internal residualisation)
+        if not skip_residualise:
+            self.logger.info("\n" + "=" * 70)
+            _phase_t0 = datetime.now()
+            if self.run_residualise_phase():
+                results["residualise"] = True
+            else:
+                self.logger.error("RESIDUALISE phase failed - continuing")
+            self._record_timing(
+                "RESIDUALISE", "total", (datetime.now() - _phase_t0).total_seconds()
+            )
+            self._flush_timing_csv()
+        else:
+            self.logger.info("\n" + "=" * 70)
+            self.logger.info("PHASE H: RESIDUALISE - SKIPPED")
+
+        # Phase I: MKNN (paper §3.2 + Appendix MKNN alignment)
+        if not skip_mknn:
+            self.logger.info("\n" + "=" * 70)
+            _phase_t0 = datetime.now()
+            if self.run_mknn_phase():
+                results["mknn"] = True
+            else:
+                self.logger.error("MKNN phase failed - continuing")
+            self._record_timing(
+                "MKNN", "total", (datetime.now() - _phase_t0).total_seconds()
+            )
+            self._flush_timing_csv()
+        else:
+            self.logger.info("\n" + "=" * 70)
+            self.logger.info("PHASE I: MKNN - SKIPPED")
 
         # Final timing flush (ensures file is complete)
         if self.save_time and self._timing_records:
@@ -2738,6 +2990,24 @@ Examples:
     )
     parser.add_argument("--skip-model", action="store_true", help="Skip MODEL phase")
 
+    # Paper-evaluation phases (off by default; enabled by --paper-eval or *-only)
+    parser.add_argument(
+        "--skip-probing", action="store_true", default=True,
+        help="Skip layer-wise PROBING phase (default: skipped)",
+    )
+    parser.add_argument(
+        "--skip-combined-dk", action="store_true", default=True,
+        help="Skip FM+DK COMBINED_DK phase (default: skipped)",
+    )
+    parser.add_argument(
+        "--skip-residualise", action="store_true", default=True,
+        help="Skip RESIDUALISE phase (default: skipped)",
+    )
+    parser.add_argument(
+        "--skip-mknn", action="store_true", default=True,
+        help="Skip MKNN alignment phase (default: skipped)",
+    )
+
     # Only run specific phases
     parser.add_argument(
         "--general-metrics-only",
@@ -2757,6 +3027,30 @@ Examples:
     )
     parser.add_argument(
         "--model-only", action="store_true", help="Only run MODEL phase"
+    )
+    parser.add_argument(
+        "--probing-only", action="store_true",
+        help="Only run PROBING phase (paper §3.2 layer-wise R²/AUC)",
+    )
+    parser.add_argument(
+        "--combined-dk-only", action="store_true",
+        help="Only run COMBINED_DK phase (paper §3.2 FM⊕DK concatenation)",
+    )
+    parser.add_argument(
+        "--residualise-only", action="store_true",
+        help="Only run RESIDUALISE phase (paper §3.2 fold-internal residualisation)",
+    )
+    parser.add_argument(
+        "--mknn-only", action="store_true",
+        help="Only run MKNN alignment phase (paper §3.2 + Appendix)",
+    )
+    parser.add_argument(
+        "--paper-eval", action="store_true",
+        help=(
+            "End-to-end NeurIPS paper evaluation: runs the seven steps "
+            "(MLP_EMBEDDING + PROBING + COMBINED_DK + RESIDUALISE + MKNN). "
+            "Skips GENERAL_METRICS, DECODER, MARKERS, MODEL."
+        ),
     )
 
     # Other options
@@ -2808,6 +3102,46 @@ Examples:
         args.skip_decoder = True
         args.skip_markers = True
         args.skip_model = False
+    elif args.probing_only:
+        args.skip_general_metrics = True
+        args.skip_mlp_embedding = True
+        args.skip_decoder = True
+        args.skip_markers = True
+        args.skip_model = True
+        args.skip_probing = False
+    elif args.combined_dk_only:
+        args.skip_general_metrics = True
+        args.skip_mlp_embedding = True
+        args.skip_decoder = True
+        args.skip_markers = True
+        args.skip_model = True
+        args.skip_combined_dk = False
+    elif args.residualise_only:
+        args.skip_general_metrics = True
+        args.skip_mlp_embedding = True
+        args.skip_decoder = True
+        args.skip_markers = True
+        args.skip_model = True
+        args.skip_residualise = False
+    elif args.mknn_only:
+        args.skip_general_metrics = True
+        args.skip_mlp_embedding = True
+        args.skip_decoder = True
+        args.skip_markers = True
+        args.skip_model = True
+        args.skip_mknn = False
+    elif args.paper_eval:
+        # End-to-end paper evaluation: A (utility nested-CV) + B/C (probing) +
+        # D (combined DK) + E (residualisation) + F/G (MKNN + k-sweep).
+        args.skip_general_metrics = True
+        args.skip_decoder = True
+        args.skip_markers = True
+        args.skip_model = True
+        args.skip_mlp_embedding = False
+        args.skip_probing = False
+        args.skip_combined_dk = False
+        args.skip_residualise = False
+        args.skip_mknn = False
 
     # Resolve subject arguments
     subject_args = []
@@ -2874,6 +3208,10 @@ Examples:
         skip_decoder=args.skip_decoder,
         skip_markers=args.skip_markers,
         skip_model=args.skip_model,
+        skip_probing=args.skip_probing,
+        skip_combined_dk=args.skip_combined_dk,
+        skip_residualise=args.skip_residualise,
+        skip_mknn=args.skip_mknn,
     )
 
     # Exit with appropriate code

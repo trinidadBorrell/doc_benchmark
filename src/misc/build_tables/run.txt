@@ -1,0 +1,44 @@
+How to run the table-building scripts
+======================================
+
+1. Get a worker node (required — scripts load data from disk):
+
+    condor_submit -i /data/project/eeg_foundation/jobs/interactive.submit
+
+2. Activate the environment:
+
+    conda activate pytorch_ppc64le
+
+3. Go to this directory:
+
+    cd /data/project/eeg_foundation/src/doc_benchmark/src/build_tables
+
+4. Run the scripts:
+
+    python build_tables.py
+    python shift_tables.py
+
+
+Output location
+---------------
+All PNGs and CSVs are saved to:
+    /data/project/eeg_foundation/data/benchmark_results/new_results/TABLES/
+
+
+Script descriptions
+-------------------
+build_tables.py
+    Reads MLP_EMBEDDING classification results for all models, metrics, and
+    classifiers, plus EMBEDDING_DK_COMBINED combined rows for CRS.
+    Outputs one AUC table and one Balanced Accuracy table per metric, plus
+    table_crs_auc_std_no_combined.png (CRS without combined rows).
+
+shift_tables.py
+    Reads CRS results and produces a shift comparison table:
+      - Original rows: Baseline + FM models (MLP_EMBEDDING)
+      - Shifted rows per FM model (3 rows each):
+          {Model} (DK Shifted)  <- EMBEDDING_DK_COMBINED_DK_SHIFTED
+          {Model} (FM Shifted)  <- EMBEDDING_DK_COMBINED_FM_SHIFTED
+          {Model} (All Shifted) <- EMBEDDING_DK_COMBINED_BOTH_SHIFTED
+    Outputs table_crs_shift_auc_std.png and
+    table_crs_shift_balanced_accuracy_std.png.
